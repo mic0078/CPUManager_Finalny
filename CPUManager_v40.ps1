@@ -1,0 +1,19273 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# CPUManager ENGINE v43.9 - AI KNOWLEDGE TRANSFER (FIXED)
+# © 2026 Michał | v43.9: 2026-02-02
+# ═══════════════════════════════════════════════════════════════════════════════
+# v43.9 CRITICAL FIX (Claude Opus 4.5):
+#   - NAPRAWIONO funkcję Show-Database (brakowało ciała ForEach-Object + zamknięć)
+#   - NAPRAWIONO nadmiarowy } w bloku AIEngines config check (linia ~14487)
+#   - Plik przechodzi walidację składni PowerShell
+# ═══════════════════════════════════════════════════════════════════════════════
+# v43.8 AI KNOWLEDGE TRANSFER (AICoordinator):
+#   - WYKORZYSTUJE istniejący AICoordinator zamiast nowych funkcji
+#   - Dodano metody do AICoordinator:
+#     * IntegrateProphetData() - profile aplikacji do transferData
+#     * IntegrateGPUBoundData() - scenariusze GPU-bound do transferData
+#     * IntegrateBanditData() - Thompson Sampling stats do transferData
+#     * IntegrateGeneticData() - ewolucyjne progi do transferData
+#     * ApplyEnrichedToEnsemble() - aplikuj rozszerzony transferData do Ensemble
+#     * TransferBackFromEnsemble() - oddaj wiedzę z Ensemble do Q-Learning/Prophet
+#     * TransferBackFromBrain() - oddaj wiedzę z Brain do Q-Learning
+#   - Ensemble ON: pobiera wiedzę z QLearning+Prophet+GPUBound+Bandit+Genetic
+#   - Ensemble OFF: oddaje wiedzę do Q-Learning i Prophet
+#   - Brain ON: pobiera wiedzę z QLearning+Prophet (używa istn. ApplyToNeuralBrain)
+#   - Brain OFF: oddaje AggressionBias boost do Q-Learning
+#   - Blend 70/30 zachowany (jak w oryginalnym AICoordinator)
+#   - Logowanie przez AICoordinator.LogActivity()
+# ═══════════════════════════════════════════════════════════════════════════════
+# v43.3 CRITICAL FIX:
+#   - $neuralBrainEnabledUser i $ensembleEnabledUser przeniesite PRZED hashtable
+#   - Poprzednia wersja miała te zmienne WEWNĄTRZ @{} co crashowało ENGINE!
+#   - Teraz widgetData zapisuje się poprawnie do WidgetData.json
+#   - Komunikacja ENGINE <-> CONFIGURATOR przywrócona
+# ═══════════════════════════════════════════════════════════════════════════════
+# V42.5: TIMER-BASED HYSTERESIS - FIX PING-PONG!
+# 
+# PROBLEM v42.4:
+# - Entry: CPU<45%, Exit: CPU>45% (instant)
+# - Silent Hill: CPU skacze 40-55% → Mode ping-pong co 5 sekund! ❌
+# - Wentylator: 2500 RPM ↔ 4000 RPM → IRYTUJĄCE! ❌
+# - Rezultat: Balanced ↔ Turbo ↔ Balanced → brak stabilności!
+# 
+# ROZWIĄZANIE v42.5:
+# ✅ Entry: CPU < 50% (wyższy próg, łatwiejsze wejście)
+# ✅ Exit: CPU > 50% przez 3+ sekund (timer-based!)
+# ✅ CPU spike 52% na 1s → ignoruj (timer nie upłynął)
+# ✅ CPU 52% przez 5s → exit GPU-bound (confirmed)
+# ✅ Rezultat: Mode STABILNY mimo CPU fluktuacji!
+#
+# PRZYKŁAD DZIAŁANIA:
+# Silent Hill - CPU 30-55% zmienne:
+# [t=0s]  CPU=45%, GPU=95% → GPU-BOUND entry ✅
+# [t=2s]  CPU=52%, GPU=95% → EXIT pending 0/3s (stay GPU-bound) ✅
+# [t=3s]  CPU=48%, GPU=95% → EXIT cancelled (stay GPU-bound) ✅
+# [t=5s]  CPU=54%, GPU=95% → EXIT pending 0/3s (stay GPU-bound) ✅
+# [t=8s]  CPU=56%, GPU=95% → EXIT pending 3/3s → TURBO ✅
+# Rezultat: Mode stabilny przez 8 sekund! (było: ping-pong co 2s)
+#
+# V42.4: GPU-BOUND DETECTION - Podstawowe działanie
+# 1. GPUBoundDetector - wykrywa scenariusze Low CPU + High GPU
+# 2. Integracja W HIGH (priorytet 3)
+# 3. Kompatybilność: AMD/Intel CPU + iGPU/dGPU
+# 4. Intelligent reduction: 5-10-15W based on CPU usage
+# 
+# EFEKT GPU-BOUND:
+# - CPU 30%, GPU 90% → ENGINE obniża CPU TDP (35W→25W)
+# - Chłodniejszy system (-10-15°C CPU, -4-7°C GPU)
+# - GPU boost wyżej (+50-100MHz) dzięki lepszym warunkom termalnym
+# - Więcej FPS (+2-5%) przy MNIEJSZYM zużyciu energii
+# - Kompatybilne z APU (AMD shared power budget) i dGPU (Nvidia/AMD)
+#
+# V42.1: FIX PROPHET LEARNING - Ciągłe uczenie aplikacji
+# 1. Prophet.UpdateRunning() - aktualizacja danych co ~10s podczas pracy aplikacji
+# 2. Mechanizm confidence (30 próbek) - finalizacja kategorii dopiero po wystarczających danych
+# 3. V42 logic fix - Prophet SUGERUJE tryb, nie wymusza (rzeczywiste CPU ma priorytet)
+# ═══════════════════════════════════════════════════════════════════════════════
+# V42.5: HIERARCHIA DECYZJI (GPU-BOUND + TIMER HYSTERESIS):
+# 1. THERMAL >90°C → Silent      5. HOLD SILENT (hysteresis)
+# 2. LOADING (I/O>80) → Turbo    6. PROPHET (zna app)
+# 3. HIGH >70% → Turbo           7. LOW <20% → Silent
+#    ├─ GPU-BOUND check W HIGH ⭐
+#    ├─ Entry: CPU<50% + GPU>75% (instant)
+#    └─ Exit: CPU>50% przez 3s (timer!) → STABILNY!
+# 4. HOLD TURBO (hysteresis)     8. DEFAULT → Balanced
+# ═══════════════════════════════════════════════════════════════════════════════
+#       --> Przeniesiono jako funkcję globalną przed definicję klasy
+#       --> Dodano brakujący try { przed wywołaniem Main
+#       --> Zapobiega "File is being used" gdy GUI czyta plik podczas zapisu ENGINE
+#       --> TODO: Zastąpić wszystkie [File]::WriteAllText w metodach SaveState klas AI
+# #
+# #
+#   1. USUNIETO podwojne wczytywanie Prophet/Brain (Load-State + LoadState metody)
+#   2. NAPRAWIONO bug $_.Name w Load-State (zagniezdzone petle ForEach-Object)
+#   3. NAPRAWIONO ten sam bug w ProphetMemory.LoadState
+#   4. USUNIETO podwojne RecordLaunch (z brain.Train + glowna petla)
+#   5. DODANO brakujace pola do Save-State (LastLearnTime, RAMWeight)
+#   6. USUNIETO warunki Is-NeuralBrainEnabled przy Save-State (6 miejsc)
+#   7. USUNIETO warunek Is-NeuralBrainEnabled z Load-State dla Brain
+#   8. USUNIETO podwojne zapisywanie w auto-save (3x->1x)
+#   9. NAPRAWIONO bug $_.Name w QLearningAgent.LoadState
+#  10. NAPRAWIONO ten sam bug w LoadPredictor.LoadPatterns (HourlyData, AppLaunchPatterns)
+#  11. NAPRAWIONO ten sam bug w NetworkAI.LoadState (NetworkQTable)
+#  12. NAPRAWIONO ten sam bug w AICoordinator.LoadState (EngineSuccessRate)
+# #
+#   JEDNORAZOWO przy pierwszym uruchomieniu:
+#   DYNAMICZNIE podczas dzialania:
+#  NEW: NetworkAI - uczenie sie wzorcow sieciowych (PELNA INTEGRACJA Z AI!)
+#   CO ROBI:
+#   WBUDOWANA WIEDZA:
+#   ZAPISUJE DO: NetworkAI.json (profile aplikacji, wzorce czasowe, Q-Table)
+#   EFEKT: AI wyprzedza optymalizacje - wie ze o 20:00 grasz w Valorant
+# -  FIX KRYTYCZNY: JSON mode backupInterval byl 999999 (praktycznie NIGDY!)
+#   Rozwiazanie: Zmieniono z 999999 na 150 iteracji (~5 minut)
+# - - FIX: ErrorLog.txt spam - usunieto logi DEBUG zapisywane co sekunde
+#   Powod: Blokowal zapis gdy silnik wylaczony, powodujac utrate danych
+#   Powod: Podwojna ochrona (auto-save + SaveState) blokowala zapis
+#   Powod: Pliki tworzone dopiero przy zamknieciu, nie przy starcie
+# #
+# TDP SAFETY LIMITS - KRYTYCZNE BEZPIECZNIKI
+# #
+$Script:TDP_HARD_LIMITS = @{
+    MaxSTAPM = 28      # Absolutny maksymalny STAPM (W) - dopasowano do profilu Extreme
+    MaxFast = 40       # Absolutny maksymalny Fast Boost (W)
+    MaxSlow = 35       # Absolutny maksymalny Slow Boost (W)
+    MaxTctl = 92       # Absolutna maksymalna temperatura (°C)
+    MinSTAPM = 10      # Minimalny STAPM (zabezpieczenie przed 0)
+    MinTctl = 50       # Minimalna temperatura (zabezpieczenie)
+    AutoAdjustTctl = $true  # Jesli $true -> automatycznie dopasowuje Tctl do zakresu [MinTctl, MaxTctl]; jesli $false -> tylko ostrzega przy MinTctl
+}
+function Validate-TDP {
+    param(
+        [hashtable]$TDPProfile,
+        [string]$Mode = "Unknown"
+    )
+    $safe = $true
+    $warnings = @()
+    # Walidacja STAPM
+    if ($TDPProfile.STAPM -gt $Script:TDP_HARD_LIMITS.MaxSTAPM) {
+        $warnings += "[WARN] $Mode STAPM $($TDPProfile.STAPM)W exceeds HARD LIMIT $($Script:TDP_HARD_LIMITS.MaxSTAPM)W - CAPPED"
+        $TDPProfile.STAPM = $Script:TDP_HARD_LIMITS.MaxSTAPM
+        $safe = $false
+    }
+    if ($TDPProfile.STAPM -lt $Script:TDP_HARD_LIMITS.MinSTAPM) {
+        $warnings += "[WARN] $Mode STAPM $($TDPProfile.STAPM)W below minimum - set to $($Script:TDP_HARD_LIMITS.MinSTAPM)W"
+        $TDPProfile.STAPM = $Script:TDP_HARD_LIMITS.MinSTAPM
+    }
+    # Walidacja Fast
+    if ($TDPProfile.Fast -gt $Script:TDP_HARD_LIMITS.MaxFast) {
+        $warnings += "[WARN] $Mode Fast $($TDPProfile.Fast)W exceeds HARD LIMIT $($Script:TDP_HARD_LIMITS.MaxFast)W - CAPPED"
+        $TDPProfile.Fast = $Script:TDP_HARD_LIMITS.MaxFast
+        $safe = $false
+    }
+    # Walidacja Slow
+    if ($TDPProfile.Slow -gt $Script:TDP_HARD_LIMITS.MaxSlow) {
+        $warnings += "[WARN] $Mode Slow $($TDPProfile.Slow)W exceeds HARD LIMIT $($Script:TDP_HARD_LIMITS.MaxSlow)W - CAPPED"
+        $TDPProfile.Slow = $Script:TDP_HARD_LIMITS.MaxSlow
+        $safe = $false
+    }
+    # Walidacja Tctl
+    if ($TDPProfile.Tctl -gt $Script:TDP_HARD_LIMITS.MaxTctl) {
+        $warnings += " CRITICAL: $Mode Tctl $($TDPProfile.Tctl)°C exceeds THERMAL SAFETY LIMIT $($Script:TDP_HARD_LIMITS.MaxTctl)°C"
+        if ($Script:TDP_HARD_LIMITS.AutoAdjustTctl) {
+            $warnings += "[WARN] $Mode Tctl $($TDPProfile.Tctl)°C above maximum - lowering to $($Script:TDP_HARD_LIMITS.MaxTctl)°C"
+            $TDPProfile.Tctl = $Script:TDP_HARD_LIMITS.MaxTctl
+        } else {
+            $warnings += " CRITICAL: EMERGENCY CAP applied ($($Script:TDP_HARD_LIMITS.MaxTctl)°C)"
+            $TDPProfile.Tctl = $Script:TDP_HARD_LIMITS.MaxTctl
+        }
+        $safe = $false
+    }
+    if ($TDPProfile.Tctl -lt $Script:TDP_HARD_LIMITS.MinTctl) {
+        if ($Script:TDP_HARD_LIMITS.AutoAdjustTctl) {
+            $warnings += "[WARN] $Mode Tctl $($TDPProfile.Tctl)°C below minimum - raising to $($Script:TDP_HARD_LIMITS.MinTctl)°C"
+            $TDPProfile.Tctl = $Script:TDP_HARD_LIMITS.MinTctl
+        } else {
+            $warnings += "[WARN] $Mode Tctl $($TDPProfile.Tctl)°C below minimum $($Script:TDP_HARD_LIMITS.MinTctl)°C - NOT modifying value"
+            # Nie podnosimy automatycznie Tctl; tylko logujemy ostrzezenie
+        }
+    }
+    # Logika spojnosci: Fast >= Slow >= STAPM
+    if ($TDPProfile.Fast -lt $TDPProfile.Slow) {
+        $warnings += "[WARN] $Mode Fast ($($TDPProfile.Fast)) < Slow ($($TDPProfile.Slow)) - correcting"
+        $TDPProfile.Fast = $TDPProfile.Slow
+    }
+    if ($TDPProfile.Slow -lt $TDPProfile.STAPM) {
+        $warnings += "[WARN] $Mode Slow ($($TDPProfile.Slow)) < STAPM ($($TDPProfile.STAPM)) - correcting"
+        $TDPProfile.Slow = $TDPProfile.STAPM
+    }
+    # Log ostrzezen
+    foreach ($warn in $warnings) {
+        Write-Log $warn "TDP-SAFETY"
+    }
+    return @{ Safe = $safe; Warnings = $warnings; Profile = $TDPProfile }
+}
+# #
+# CPU DETECTION (Intel + AMD)
+# #
+$Script:IsHybridCPU = $false
+$Script:PCoreCount = 0
+$Script:ECoreCount = 0
+$Script:HybridArchitecture = "Unknown"
+$Script:CPUVendor = "Unknown"
+$Script:CPUModel = "Unknown"
+$Script:CPUGeneration = "Unknown"
+$Script:TotalCores = 0
+$Script:TotalThreads = 0
+function Detect-CPU {
+    try {
+        $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+        $cpuName = $cpu.Name
+        $Script:TotalCores = $cpu.NumberOfCores
+        $Script:TotalThreads = $cpu.NumberOfLogicalProcessors
+        # ...existing code...
+        # #
+        # INTEL DETECTION
+        # #
+        if ($cpuName -match "Intel") {
+            $Script:CPUVendor = "Intel"
+            $Script:CPUType = "Intel"  # Synchronizacja ze starsza zmienna
+            # Intel Alder Lake (12th gen) - Hybrid P+E cores
+            if ($cpuName -match "12\d\d\d") {
+                $Script:IsHybridCPU = $true
+                $Script:HybridArchitecture = "Alder Lake (12th Gen)"
+                $Script:CPUGeneration = "12th Gen"
+                # Typowe konfiguracje Alder Lake
+                if ($Script:TotalCores -ge 16) {
+                    $Script:PCoreCount = 8; $Script:ECoreCount = $Script:TotalCores - 8
+                } elseif ($Script:TotalCores -ge 12) {
+                    $Script:PCoreCount = 6; $Script:ECoreCount = $Script:TotalCores - 6
+                } elseif ($Script:TotalCores -ge 10) {
+                    $Script:PCoreCount = 6; $Script:ECoreCount = 4
+                } else {
+                    $Script:PCoreCount = [Math]::Floor($Script:TotalCores * 0.5)
+                    $Script:ECoreCount = $Script:TotalCores - $Script:PCoreCount
+                }
+                # ...existing code...
+            }
+            # Intel Raptor Lake (13th gen) - Hybrid P+E cores
+            elseif ($cpuName -match "13\d\d\d") {
+                $Script:IsHybridCPU = $true
+                $Script:HybridArchitecture = "Raptor Lake (13th Gen)"
+                $Script:CPUGeneration = "13th Gen"
+                if ($Script:TotalCores -ge 24) {
+                    $Script:PCoreCount = 8; $Script:ECoreCount = $Script:TotalCores - 8
+                } elseif ($Script:TotalCores -ge 16) {
+                    $Script:PCoreCount = 8; $Script:ECoreCount = $Script:TotalCores - 8
+                } elseif ($Script:TotalCores -ge 12) {
+                    $Script:PCoreCount = 6; $Script:ECoreCount = $Script:TotalCores - 6
+                } else {
+                    $Script:PCoreCount = [Math]::Floor($Script:TotalCores * 0.5)
+                    $Script:ECoreCount = $Script:TotalCores - $Script:PCoreCount
+                }
+                # ...existing code...
+            }
+            # Intel Raptor Lake Refresh (14th gen) - Hybrid P+E cores
+            elseif ($cpuName -match "14\d\d\d") {
+                $Script:IsHybridCPU = $true
+                $Script:HybridArchitecture = "Raptor Lake Refresh (14th Gen)"
+                $Script:CPUGeneration = "14th Gen"
+                if ($Script:TotalCores -ge 24) {
+                    $Script:PCoreCount = 8; $Script:ECoreCount = $Script:TotalCores - 8
+                } elseif ($Script:TotalCores -ge 16) {
+                    $Script:PCoreCount = 8; $Script:ECoreCount = $Script:TotalCores - 8
+                } elseif ($Script:TotalCores -ge 12) {
+                    $Script:PCoreCount = 6; $Script:ECoreCount = $Script:TotalCores - 6
+                } else {
+                    $Script:PCoreCount = [Math]::Floor($Script:TotalCores * 0.5)
+                    $Script:ECoreCount = $Script:TotalCores - $Script:PCoreCount
+                }
+                # ...existing code...
+            }
+            # Starsze generacje Intel (10th, 11th) - brak hybrid
+            elseif ($cpuName -match "10\d\d\d|11\d\d\d") {
+                $Script:HybridArchitecture = if ($cpuName -match "10\d\d\d") { "Comet Lake (10th Gen)" } else { "Rocket Lake (11th Gen)" }
+                $Script:CPUGeneration = if ($cpuName -match "10\d\d\d") { "10th Gen" } else { "11th Gen" }
+                # ...existing code...
+            }
+            else {
+                # ...existing code...
+            }
+            # Wykryj model (i3/i5/i7/i9)
+            if ($cpuName -match "i9") { $Script:CPUModel = "Core i9" }
+            elseif ($cpuName -match "i7") { $Script:CPUModel = "Core i7" }
+            elseif ($cpuName -match "i5") { $Script:CPUModel = "Core i5" }
+            elseif ($cpuName -match "i3") { $Script:CPUModel = "Core i3" }
+            return $true
+        }
+        # #
+        # AMD DETECTION
+        # #
+        elseif ($cpuName -match "AMD") {
+            $Script:CPUVendor = "AMD"
+            $Script:CPUType = "AMD"  # Synchronizacja ze starsza zmienna
+            $Script:IsHybridCPU = $false  # AMD nie ma P/E cores
+            # AMD Ryzen 9000 Series (Zen 5)
+            if ($cpuName -match "9\d\d\d") {
+                $Script:HybridArchitecture = "Zen 5"
+                $Script:CPUGeneration = "Ryzen 9000"
+                if ($cpuName -match "X3D") {
+                    # ...existing code...
+                } else {
+                    # ...existing code...
+                }
+            }
+            # AMD Ryzen 7000 Series (Zen 4)
+            elseif ($cpuName -match "7\d\d\d") {
+                $Script:HybridArchitecture = "Zen 4"
+                $Script:CPUGeneration = "Ryzen 7000"
+                if ($cpuName -match "X3D") {
+                    # ...existing code...
+                } else {
+                    # ...existing code...
+                }
+            }
+            # AMD Ryzen 5000 Series (Zen 3)
+            elseif ($cpuName -match "5\d\d\d") {
+                $Script:HybridArchitecture = "Zen 3"
+                $Script:CPUGeneration = "Ryzen 5000"
+                if ($cpuName -match "X3D") {
+                    # ...existing code...
+                } else {
+                    # ...existing code...
+                }
+            }
+            # AMD Ryzen 3000 Series (Zen 2)
+            elseif ($cpuName -match "3\d\d\d") {
+                $Script:HybridArchitecture = "Zen 2"
+                $Script:CPUGeneration = "Ryzen 3000"
+                # ...existing code...
+            }
+            # Starsze AMD
+            else {
+                # ...existing code...
+            }
+            # Wykryj model (Ryzen 3/5/7/9)
+            if ($cpuName -match "Ryzen 9") { $Script:CPUModel = "Ryzen 9" }
+            elseif ($cpuName -match "Ryzen 7") { $Script:CPUModel = "Ryzen 7" }
+            elseif ($cpuName -match "Ryzen 5") { $Script:CPUModel = "Ryzen 5" }
+            elseif ($cpuName -match "Ryzen 3") { $Script:CPUModel = "Ryzen 3" }
+            elseif ($cpuName -match "Threadripper") { $Script:CPUModel = "Threadripper" }
+            return $true
+        }
+        # Nieznany producent
+        else {
+            # ...existing code...
+            return $false
+        }
+    } catch {
+        # ...existing code...
+        return $false
+    }
+}
+# Alias dla kompatybilnosci wstecznej
+function Detect-HybridCPU { return Detect-CPU }
+# #
+# GPU DETECTION (iGPU vs dGPU - Intel/AMD/NVIDIA)
+# #
+$Script:GPUList = @()           # Lista wszystkich GPU
+$Script:HasiGPU = $false        # Czy jest zintegrowana grafika
+$Script:HasdGPU = $false        # Czy jest dedykowana karta
+$Script:PrimaryGPU = $null      # Główny GPU (dla gier)
+$Script:iGPUName = ""           # Nazwa iGPU
+$Script:dGPUName = ""           # Nazwa dGPU
+$Script:dGPUVendor = ""         # NVIDIA/AMD
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEBUG LOGGING TO FILE - GPU-BOUND DETECTION TRACKER
+# ═══════════════════════════════════════════════════════════════════════════════
+$Script:DebugLogPath = "C:\Temp\CPUManager_GPU-Debug.log"  # Debug/Info/GPU-Bound logi
+$Script:ErrorLogPath = "C:\CPUManager\bledy.txt"           # Tylko błędy (ENGINE + CONFIGURATOR)
+$Script:DebugLogEnabled = $true
+$Script:DebugLogIterationCounter = 0
+
+function Write-DebugLog {
+    param(
+        [string]$Message,
+        [string]$Type = "INFO",  # INFO, GPU-BOUND, MODE, METRICS, EVENT
+        [string]$Source = "ENGINE"  # ENGINE lub CONFIGURATOR
+    )
+    
+    if (-not $Script:DebugLogEnabled) { return }
+    
+    try {
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+        $logLine = "[$timestamp] [$Source] [$Type] $Message"
+        
+        # Upewnij się że folder istnieje
+        $logDir = Split-Path $Script:DebugLogPath -Parent
+        if (-not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+        
+        # Append do pliku (thread-safe jeśli możliwe)
+        # Limit 200KB - gdy przekroczy, zacznij od nowa
+        if (Test-Path $Script:DebugLogPath) {
+            $fileSize = (Get-Item $Script:DebugLogPath -ErrorAction SilentlyContinue).Length
+            if ($fileSize -gt 204800) {
+                Set-Content -Path $Script:DebugLogPath -Value "[$timestamp] [ENGINE] [INFO] === LOG ROTATED (exceeded 200KB) ===" -Encoding UTF8 -ErrorAction SilentlyContinue
+            }
+        }
+        Add-Content -Path $Script:DebugLogPath -Value $logLine -Encoding UTF8 -ErrorAction SilentlyContinue
+    }
+    catch {
+        # Cichy błąd - nie przerywaj ENGINE jeśli logging fails
+    }
+}
+
+function Write-ErrorLog {
+    param(
+        [string]$Component = "ENGINE",  # ENGINE, CONFIGURATOR, GPU-BOUND, PROPHET, etc.
+        [string]$ErrorMessage,
+        [string]$Details = ""
+    )
+    
+    try {
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $logLine = "[$timestamp] [$Component] ERROR: $ErrorMessage"
+        if ($Details) {
+            $logLine += "`n    Details: $Details"
+        }
+        $logLine += "`n"
+        
+        # Upewnij się że folder istnieje
+        $logDir = Split-Path $Script:ErrorLogPath -Parent
+        if (-not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+        
+        # Append do pliku C:\CPUManager\bledy.txt
+        Add-Content -Path $Script:ErrorLogPath -Value $logLine -Encoding UTF8 -ErrorAction SilentlyContinue
+        
+        # Opcjonalnie też do debug log (jeśli włączony)
+        if ($Script:DebugLogEnabled) {
+            Write-DebugLog "$Component ERROR: $ErrorMessage" "ERROR" $Component
+        }
+    }
+    catch {
+        # Cichy błąd - nie crashuj jeśli logging fails
+    }
+}
+
+function Initialize-DebugLog {
+    try {
+        # Sprawdź czy folder istnieje
+        $logDir = Split-Path $Script:DebugLogPath -Parent
+        if (-not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+        
+        # Nagłówek nowej sesji
+        $separator = "=" * 80
+        $header = @"
+
+$separator
+CPUManager ENGINE v42.4 DEBUG - GPU-BOUND FULL FIX + DEBUG - New Session Started
+$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+$separator
+
+"@
+        Add-Content -Path $Script:DebugLogPath -Value $header -Encoding UTF8
+        Write-DebugLog "Debug logging initialized to: $Script:DebugLogPath" "INFO"
+        Write-Host "  [DEBUG] Logging to: $Script:DebugLogPath" -ForegroundColor Yellow
+    }
+    catch {
+        Write-Host "  [DEBUG] Failed to initialize log file: $_" -ForegroundColor Red
+        $Script:DebugLogEnabled = $false
+    }
+}
+
+function Detect-GPU {
+    try {
+        $allGPUs = Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop
+        $Script:GPUList = @()
+        
+        foreach ($gpu in $allGPUs) {
+            $gpuInfo = @{
+                Name = $gpu.Name
+                VideoProcessor = $gpu.VideoProcessor
+                AdapterRAM = $gpu.AdapterRAM
+                Status = $gpu.Status
+                Type = "Unknown"
+                Vendor = "Unknown"
+                IsPrimary = $false
+            }
+            
+            $gpuName = $gpu.Name
+            $ramGB = [Math]::Round($gpu.AdapterRAM / 1GB, 2)
+            
+            # #
+            # KLASYFIKACJA: iGPU (Zintegrowana)
+            # V40.2: Rozszerzone wzorce dla AMD APU (Vega, RDNA2, RDNA3 integrated)
+            # #
+            if ($gpuName -match "Intel.*UHD|Intel.*HD|Intel.*Iris|Intel.*Graphics") {
+                $gpuInfo.Type = "iGPU"
+                $gpuInfo.Vendor = "Intel"
+                $Script:HasiGPU = $true
+                $Script:iGPUName = $gpuName
+                Write-Host "  [GPU] Intel iGPU: $gpuName ($ramGB GB)" -ForegroundColor Cyan
+            }
+            # AMD APU - różne warianty nazewnictwa
+            # "AMD Radeon Graphics", "AMD Radeon(TM) Graphics", "Radeon Vega 8", "Radeon 680M", "Radeon 780M"
+            elseif ($gpuName -match "AMD.*Graphics|Radeon.*Graphics|Radeon.*Vega|Radeon\s+\d{3}M" -and $gpuName -notmatch "Radeon.*RX|Radeon.*Pro|Radeon.*VII") {
+                # AMD APU (np. Ryzen z Vega/RDNA Graphics)
+                $gpuInfo.Type = "iGPU"
+                $gpuInfo.Vendor = "AMD"
+                $Script:HasiGPU = $true
+                $Script:iGPUName = $gpuName
+                Write-Host "  [GPU] AMD iGPU (APU): $gpuName ($ramGB GB)" -ForegroundColor Cyan
+            }
+            # #
+            # KLASYFIKACJA: dGPU (Dedykowana)
+            # V40 FIX: Rozszerzone wzorce dla AMD dGPU (RX 6xxx, RX 7xxx, WX, W-series)
+            # #
+            elseif ($gpuName -match "NVIDIA|GeForce|RTX|GTX|Quadro|Tesla") {
+                $gpuInfo.Type = "dGPU"
+                $gpuInfo.Vendor = "NVIDIA"
+                $gpuInfo.IsPrimary = $true  # NVIDIA = primary dla gier
+                $Script:HasdGPU = $true
+                $Script:dGPUName = $gpuName
+                $Script:dGPUVendor = "NVIDIA"
+                $Script:PrimaryGPU = $gpuInfo
+                Write-Host "  [GPU] NVIDIA dGPU: $gpuName ($ramGB GB) PRIMARY" -ForegroundColor Green
+            }
+            elseif ($gpuName -match "Radeon\s*(RX|Pro|VII|WX|W\d)|AMD.*RX\s*\d{4}") {
+                $gpuInfo.Type = "dGPU"
+                $gpuInfo.Vendor = "AMD"
+                $gpuInfo.IsPrimary = $true  # AMD dGPU = primary dla gier
+                $Script:HasdGPU = $true
+                $Script:dGPUName = $gpuName
+                $Script:dGPUVendor = "AMD"
+                $Script:PrimaryGPU = $gpuInfo
+                Write-Host "  [GPU] AMD dGPU: $gpuName ($ramGB GB) PRIMARY" -ForegroundColor Green
+            }
+            else {
+                # Nieznany GPU - spróbuj jeszcze raz dla AMD
+                if ($gpuName -match "Radeon|AMD") {
+                    # Prawdopodobnie AMD APU z niestandardową nazwą
+                    $gpuInfo.Type = "iGPU"
+                    $gpuInfo.Vendor = "AMD"
+                    $Script:HasiGPU = $true
+                    $Script:iGPUName = $gpuName
+                    Write-Host "  [GPU] AMD iGPU (fallback): $gpuName ($ramGB GB)" -ForegroundColor Cyan
+                } else {
+                    $gpuInfo.Type = "Unknown"
+                    Write-Host "  [GPU] Unknown GPU: $gpuName ($ramGB GB)" -ForegroundColor Yellow
+                }
+            }
+            
+            $Script:GPUList += $gpuInfo
+        }
+        
+        # Podsumowanie
+        if ($Script:HasiGPU -and $Script:HasdGPU) {
+            Write-Host "  [GPU] Hybrid Graphics: iGPU + dGPU detected (switchable)" -ForegroundColor Magenta
+        }
+        elseif ($Script:HasdGPU) {
+            Write-Host "  [GPU] Dedicated Graphics Only: $($Script:dGPUVendor)" -ForegroundColor Green
+        }
+        elseif ($Script:HasiGPU) {
+            Write-Host "  [GPU] Integrated Graphics Only" -ForegroundColor Cyan
+        }
+        
+        return $true
+    }
+    catch {
+        $errorMsg = $_.Exception.Message
+        Write-Host "  [GPU] Detection failed: $errorMsg" -ForegroundColor Red
+        Write-ErrorLog -Component "ENGINE-GPU" -ErrorMessage "GPU Detection failed" -Details $errorMsg
+        return $false
+    }
+}
+# #
+# PowerShell parses classes at compile time, so [Win32] must exist first
+# #
+Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+if (-not ([System.Management.Automation.PSTypeName]'Win32').Type) {
+$win32SignatureEarly = @'
+using System;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)]
+public struct LASTINPUTINFO {
+    public uint cbSize;
+    public uint dwTime;
+}
+public static class Win32 {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    [DllImport("kernel32.dll")]
+    public static extern uint GetTickCount();
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+    [DllImport("user32.dll")]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
+    [DllImport("psapi.dll")]
+    public static extern int EmptyWorkingSet(IntPtr hwProc);
+    [DllImport("ntdll.dll", SetLastError = true)]
+    public static extern int NtSuspendProcess(IntPtr processHandle);
+    [DllImport("ntdll.dll", SetLastError = true)]
+    public static extern int NtResumeProcess(IntPtr processHandle);
+}
+public static class ConsoleWindow {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("kernel32.dll")]
+    public static extern bool SetConsoleCtrlHandler(ConsoleCtrlDelegate handler, bool add);
+    public delegate bool ConsoleCtrlDelegate(int ctrlType);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert);
+    [DllImport("user32.dll")]
+    public static extern bool DeleteMenu(IntPtr hMenu, uint uPosition, uint uFlags);
+    public const uint SC_CLOSE = 0xF060;
+    public const uint MF_BYCOMMAND = 0x00000000;
+}
+'@
+Add-Type -Language CSharp -TypeDefinition $win32SignatureEarly -ErrorAction Stop
+}
+# ═══════════════════════════════════════════════════════════════════════════════
+# CACHE RELOCATOR - Cache Relocator zintegrowany z ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+# ProBalance Class - Throttle High-CPU Processes
+# #
+# PERFORMANCE MONITORING - Frame Time & Stuttering Detection
+# #
+class PerformanceMonitor {
+    [System.Collections.Generic.List[double]] $FrameTimes
+    [int] $MaxSamples
+    [double] $LastFPS
+    [double] $AvgFrameTime
+    [double] $FrameTimeVariance
+    [bool] $StutteringDetected
+    [int] $StutterCount
+    [datetime] $LastStutter
+    PerformanceMonitor() {
+        $this.FrameTimes = [System.Collections.Generic.List[double]]::new()
+        $this.MaxSamples = 60  # Last 60 frames
+        $this.LastFPS = 0
+        $this.AvgFrameTime = 0
+        $this.FrameTimeVariance = 0
+        $this.StutteringDetected = $false
+        $this.StutterCount = 0
+        $this.LastStutter = [datetime]::MinValue
+    }
+    [void] RecordFrame([double]$frameTimeMs) {
+        $this.FrameTimes.Add($frameTimeMs)
+        if ($this.FrameTimes.Count -gt $this.MaxSamples) {
+            $this.FrameTimes.RemoveAt(0)
+        }
+        if ($this.FrameTimes.Count -ge 10) {
+            $this.AnalyzePerformance()
+        }
+    }
+    [void] AnalyzePerformance() {
+        # Oblicz srednia
+        $sum = 0.0
+        foreach ($ft in $this.FrameTimes) { $sum += $ft }
+        $this.AvgFrameTime = $sum / $this.FrameTimes.Count
+        $this.LastFPS = if ($this.AvgFrameTime -gt 0) { 1000.0 / $this.AvgFrameTime } else { 0 }
+        # Oblicz wariancje (wykrycie stutteringu)
+        $variance = 0.0
+        foreach ($ft in $this.FrameTimes) {
+            $diff = $ft - $this.AvgFrameTime
+            $variance += $diff * $diff
+        }
+        $this.FrameTimeVariance = [Math]::Sqrt($variance / $this.FrameTimes.Count)
+        # Detekcja stutteringu: variance > 30% sredniej
+        # LUB pojedyncza frame time > 2x sredniej
+        $stutterThreshold = $this.AvgFrameTime * 0.3
+        $this.StutteringDetected = $false
+        if ($this.FrameTimeVariance -gt $stutterThreshold) {
+            $this.StutteringDetected = $true
+        }
+        # Sprawdz ostatnie 10 frame times
+        $recentFrames = $this.FrameTimes.GetRange([Math]::Max(0, $this.FrameTimes.Count - 10), [Math]::Min(10, $this.FrameTimes.Count))
+        foreach ($ft in $recentFrames) {
+            if ($ft -gt ($this.AvgFrameTime * 2.0)) {
+                $this.StutteringDetected = $true
+                break
+            }
+        }
+        if ($this.StutteringDetected) {
+            $this.StutterCount++
+            $this.LastStutter = [datetime]::Now
+        }
+    }
+    [hashtable] GetMetrics() {
+        return @{
+            FPS = [Math]::Round($this.LastFPS, 1)
+            AvgFrameTime = [Math]::Round($this.AvgFrameTime, 2)
+            Variance = [Math]::Round($this.FrameTimeVariance, 2)
+            Stuttering = $this.StutteringDetected
+            StutterCount = $this.StutterCount
+        }
+    }
+    [bool] HasRecentStutter() {
+        # Stutter w ostatnich 5 sekundach
+        return (([datetime]::Now - $this.LastStutter).TotalSeconds -lt 5)
+    }
+}
+$Script:PerfMonitor = [PerformanceMonitor]::new()
+# STARTUP BOOST TRACKING (global Turbo for first launch)
+function Start-StartupBoost {
+    param([System.Diagnostics.Process]$Process)
+    if (-not $Script:StartupBoostEnabled -or -not $Process) { return }
+    try {
+        if ($Process.HasExited) { return }
+    } catch { return }
+    
+    # v43.10 FIX: Sprawdź HardLock PRZED włączeniem StartupBoost
+    $processName = $Process.ProcessName
+    if ($Script:AppCategoryPreferences) {
+        $appLower = $processName.ToLower() -replace '\.exe$', ''
+        
+        # DEBUG: Log wszystkie klucze
+        if ($Global:DebugMode -and $Script:AppCategoryPreferences.Count -gt 0) {
+            $allKeys = $Script:AppCategoryPreferences.Keys -join ", "
+            Add-Log " [DEBUG] StartupBoost checking HardLock for: $processName against: $allKeys" -Debug
+        }
+        
+        foreach ($key in $Script:AppCategoryPreferences.Keys) {
+            $keyLower = $key.ToLower() -replace '\.exe$', ''
+            
+            # v43.10b: Rozszerzone dopasowanie
+            $matches = ($keyLower -eq $appLower) -or 
+                      ($appLower -like "*$keyLower*") -or 
+                      ($keyLower -like "*$appLower*") -or
+                      ($keyLower -eq "google chrome" -and $appLower -eq "chrome") -or
+                      ($keyLower -eq "chrome" -and $appLower -eq "chrome")
+            
+            if ($matches) {
+                $pref = $Script:AppCategoryPreferences[$key]
+                if ($pref.HardLock) {
+                    # ZAWSZE LOG gdy blokujemy
+                    Add-Log " STARTUP BOOST BLOCKED: $processName (HardLock for '$key' - Bias=$($pref.Bias))"
+                    return  # Pomiń StartupBoost dla aplikacji z HardLock
+                }
+            }
+        }
+    }
+    
+    $processId = $Process.Id
+    if ($Script:ActivityBoostApps.ContainsKey($processId)) { return }
+    $entry = [pscustomobject]@{
+        Pid = $processId
+        ProcessName = $Process.ProcessName
+        Started = Get-Date
+        LastCPUTime = $Process.TotalProcessorTime.TotalSeconds
+        LastCheck = Get-Date
+        IdleCount = 0           # Ile razy z rzędu CPU < próg
+        BoostActive = $true
+        PeakCPU = 0.0
+    }
+    $Script:ActivityBoostApps[$processId] = $entry
+    Add-Log "[ACTIVITY BOOST] Started: $($Process.ProcessName) (PID:$processId)"
+}
+function Update-StartupBoostState {
+    if (-not $Script:ActivityBoostApps -or $Script:ActivityBoostApps.Count -eq 0) {
+        $Script:ActiveStartupBoost = $null
+        return $null
+    }
+    $now = Get-Date
+    $active = $null
+    $idleThreshold = if ($null -ne $Script:ActivityIdleThreshold) { $Script:ActivityIdleThreshold } else { 5 }
+    $maxIdleChecks = 3          # Ile razy idle = koniec boost
+    $maxBoostTime = if ($null -ne $Script:ActivityMaxBoostTime) { $Script:ActivityMaxBoostTime } else { 30 }
+    foreach ($procId in @($Script:ActivityBoostApps.Keys)) {
+        $entry = $Script:ActivityBoostApps[$procId]
+        # Safety: Max boost time
+        $elapsed = ($now - $entry.Started).TotalSeconds
+        if ($elapsed -gt $maxBoostTime) {
+            Add-Log "[ACTIVITY BOOST] Timeout: $($entry.ProcessName) after ${maxBoostTime}s"
+            $Script:ActivityBoostApps.Remove($procId)
+            continue
+        }
+        # Sprawdź czy proces jeszcze żyje
+        try {
+            $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            if (-not $proc -or $proc.HasExited) {
+                $Script:ActivityBoostApps.Remove($procId)
+                continue
+            }
+            # Oblicz CPU% tej aplikacji
+            $currentCPUTime = $proc.TotalProcessorTime.TotalSeconds
+            $timeDelta = ($now - $entry.LastCheck).TotalSeconds
+            if ($timeDelta -gt 0.5) {  # Min 0.5s między pomiarami
+                $cpuDelta = $currentCPUTime - $entry.LastCPUTime
+                $appCPU = [Math]::Min(100, ($cpuDelta / $timeDelta) * 100)
+                # Update entry
+                $entry.LastCPUTime = $currentCPUTime
+                $entry.LastCheck = $now
+                if ($appCPU -gt $entry.PeakCPU) { $entry.PeakCPU = $appCPU }
+                # Sprawdź czy aktywna (using configurable threshold)
+                if ($appCPU -lt $idleThreshold) {
+                    $entry.IdleCount++
+                    if ($entry.IdleCount -ge $maxIdleChecks) {
+                        # Aplikacja idle - koniec boost
+                        Add-Log "[ACTIVITY BOOST] End: $($entry.ProcessName) idle (peak:$([Math]::Round($entry.PeakCPU))%)"
+                        $entry.BoostActive = $false
+                        $Script:ActivityBoostApps.Remove($procId)
+                        continue
+                    }
+                } else {
+                    # Aktywna - reset idle counter
+                    $entry.IdleCount = 0
+                }
+            }
+            # Jeśli boost aktywny, dodaj do aktywnych
+            if ($entry.BoostActive) {
+                if (-not $active -or $entry.Started -gt $active.Started) {
+                    $active = $entry
+                }
+            }
+        } catch {
+            $Script:ActivityBoostApps.Remove($procId)
+        }
+    }
+    $Script:ActiveStartupBoost = $active
+    return $Script:ActiveStartupBoost
+}
+if (-not $Script:ActivityBoostApps) { $Script:ActivityBoostApps = @{} }
+# Funkcje narzedziowe do refaktoryzacji powtarzajacych sie fragmentow
+function Ensure-FileExists {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { New-Item -ItemType File -Path $Path -Force | Out-Null }
+}
+function Ensure-DirectoryExists {
+    param([string]$Path)
+    
+    # Sprawdź czy ścieżka to Junction/SymLink (przekierowanie na RAM dysk)
+    $isJunction = $false
+    $targetPath = $Path
+    
+    try {
+        $item = Get-Item -Path $Path -Force -ErrorAction SilentlyContinue
+        if ($item -and $item.LinkType -eq 'Junction') {
+            $isJunction = $true
+            $targetPath = $item.Target
+            Write-Host "  [INIT] Wykryto Junction: $Path -> $targetPath" -ForegroundColor Cyan
+        }
+    } catch {
+        # Ścieżka nie istnieje lub nie jest Junction - sprawdzimy dalej
+    }
+    
+    # Jeśli to Junction, upewnij się że folder docelowy istnieje
+    if ($isJunction -and $targetPath) {
+        if (-not (Test-Path $targetPath)) {
+            try {
+                Write-Host "  [INIT] Tworzę folder docelowy na RAM dysku: $targetPath" -ForegroundColor Yellow
+                New-Item -ItemType Directory -Path $targetPath -Force -ErrorAction Stop | Out-Null
+                Start-Sleep -Milliseconds 200
+                
+                if (Test-Path $targetPath) {
+                    Write-Host "  [INIT] Folder na RAM dysku utworzony: $targetPath" -ForegroundColor Green
+                } else {
+                    Write-Host "  [INIT] BŁĄD: Nie można utworzyć folderu na RAM dysku!" -ForegroundColor Red
+                }
+            } catch {
+                Write-Host "  [INIT] BŁĄD tworzenia folderu na RAM dysku: $_" -ForegroundColor Red
+            }
+        }
+    }
+    
+    # Standardowe sprawdzenie i tworzenie folderu
+    if (-not (Test-Path $Path)) {
+        try {
+            Write-Host "  [INIT] Tworzę folder: $Path" -ForegroundColor Cyan
+            New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+            
+            # Retry dla RAM dysków - czekaj aż system zarejestruje folder
+            $retries = 0
+            while ((-not (Test-Path $Path)) -and ($retries -lt 5)) {
+                Start-Sleep -Milliseconds 200
+                $retries++
+            }
+            
+            if (Test-Path $Path) {
+                Write-Host "  [INIT] Folder utworzony: $Path" -ForegroundColor Green
+            } else {
+                Write-Host "  [INIT] Ostrzeżenie: Folder może nie być dostępny: $Path" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "  [INIT] Błąd tworzenia folderu $Path - $_" -ForegroundColor Red
+        }
+    }
+}
+function Find-FirstExistingPath {
+    param([string[]]$Paths)
+    foreach ($p in $Paths) { if ($p -and (Test-Path $p)) { return $p } }
+    return $null
+}
+function Remove-ExistingFiles {
+    param([string[]]$Files)
+    foreach ($f in $Files) { if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue } }
+}
+# Backwards-compatible wrapper: some code calls Remove-FilesIfExist (older name)
+if (-not (Get-Command -Name Remove-FilesIfExist -ErrorAction SilentlyContinue)) {
+    function Remove-FilesIfExist {
+        param([string[]]$Files)
+        foreach ($f in $Files) { if ($f -and (Test-Path $f)) { Remove-Item $f -Force -ErrorAction SilentlyContinue } }
+    }
+}
+# Lightweight fallback for Write-Log during early startup (will be superseded by real implementation later)
+if (-not (Get-Command -Name Write-Log -ErrorAction SilentlyContinue)) {
+    function Write-Log {
+        param(
+            [string]$Message,
+            [string]$Type = "INFO"
+        )
+        try {
+            $Timestamp = Get-Date -Format "HH:mm:ss.fff"
+            $LogEntry = "[$Timestamp] [$Type] $Message"
+            Write-Host $LogEntry -ForegroundColor Gray
+            if ($Type -match "ERROR|CRITICAL|FATAL|WARN") {
+                try { Add-Content -Path 'C:\CPUManager\ErrorLog.txt' -Value $LogEntry -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+            }
+        } catch {}
+    }
+}
+$ErrorLogPath = "C:\CPUManager\ErrorLog.txt"
+Ensure-FileExists $ErrorLogPath
+# RAMMANAGER v2.0 + STORAGE MANAGER + THERMAL GUARD
+# RAMManager v2.0 - TRUE SHARED MEMORY (Memory-Mapped Files)
+# NOWOSC: Uzywa Memory-Mapped Files zamiast lokalnego hashtable
+# RESULT: ENGINE i CONSOLE faktycznie wspoldziela dane w pamieci RAM
+Add-Type -AssemblyName System.Core
+class RAMManager {
+    [System.IO.MemoryMappedFiles.MemoryMappedFile]$MMF
+    [System.IO.MemoryMappedFiles.MemoryMappedViewAccessor]$Accessor
+    [System.Threading.Mutex]$Mutex
+    [string]$MutexName
+    [string]$MMFName
+    [int]$TimeoutMs
+    [int]$MaxSize
+    [string]$ErrorLogPath
+    [string]$CachedJson
+    [object]$CachedLock  # v39 FIX: Lock dla CachedJson
+    [System.Collections.Concurrent.ConcurrentQueue[string]]$WriteQueue
+    [int]$MaxQueue
+    [int]$QueueDrops
+    [int]$BackgroundWrites
+    [int]$BackgroundRetries
+    [bool]$UseLockFree
+    [System.Threading.CancellationTokenSource]$WriterCTS
+    [bool]$IsInitialized  # v39 FIX: Flaga inicjalizacji
+    static [int]$HEADER_ACTIVE_OFFSET = 0      # Int32 - aktywny slot (0 lub 1)
+    static [int]$HEADER_SIZE = 4               # Rozmiar naglowka globalnego
+    static [int]$SLOT_VER_OFFSET = 0           # Int64 - wersja w slocie
+    static [int]$SLOT_LEN_OFFSET = 8           # Int32 - dlugosc danych w slocie
+    static [int]$SLOT_DATA_OFFSET = 12         # Poczatek danych w slocie
+    static [int]$MIN_MMF_SIZE = 4096           # Minimalny rozmiar MMF
+    RAMManager([string]$name) {
+        $this.MutexName = "Global\CPUManager_RAM_$name"
+        $this.MMFName = "Global\CPUManager_MMF_$name"
+        $this.TimeoutMs = 200
+        $this.MaxSize = 2097152
+        $this.ErrorLogPath = "C:\CPUManager\ErrorLog.txt"
+        $this.CachedJson = "{}"
+        $this.CachedLock = New-Object Object
+        $this.IsInitialized = $false
+        if ($this.MaxSize -lt [RAMManager]::MIN_MMF_SIZE) {
+            $this.LogError("MMF size too small: $($this.MaxSize), minimum: $([RAMManager]::MIN_MMF_SIZE)")
+            throw "MMF size too small"
+        }
+        try { 
+            $this.Mutex = [System.Threading.Mutex]::OpenExisting($this.MutexName) 
+        } catch { 
+            try {
+                $this.Mutex = [System.Threading.Mutex]::new($false, $this.MutexName) 
+            } catch {
+                $this.LogError("Mutex create failed: $_")
+                throw
+            }
+        }
+        try {
+            $this.MMF = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting($this.MMFName)
+        } catch {
+            try {
+                $this.MMF = [System.IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew($this.MMFName, $this.MaxSize, [System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::ReadWrite)
+            } catch {
+                $this.LogError("MMF create failed: $_")
+                if ($this.Mutex) { try { $this.Mutex.Dispose() } catch {} }
+                throw
+            }
+        }
+        try {
+            $this.Accessor = $this.MMF.CreateViewAccessor(0, $this.MaxSize)
+        } catch {
+            $this.LogError("Accessor create failed: $_")
+            if ($this.MMF) { try { $this.MMF.Dispose() } catch {} }
+            if ($this.Mutex) { try { $this.Mutex.Dispose() } catch {} }
+            throw
+        }
+        # Initialize queue/telemetry
+        $this.WriteQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $this.MaxQueue = 1000
+        $this.QueueDrops = 0
+        $this.BackgroundWrites = 0
+        $this.BackgroundRetries = 0
+        $this.UseLockFree = $true
+        $this.WriterCTS = [System.Threading.CancellationTokenSource]::new()
+        try {
+            $slotSize = $this.GetSlotSize()
+            if ($slotSize -lt [RAMManager]::SLOT_DATA_OFFSET + 10) {
+                $this.LogError("Slot size too small: $slotSize")
+            } else {
+                $empty = [System.Text.Encoding]::UTF8.GetBytes("{}")
+                if ($empty.Length -le ($slotSize - [RAMManager]::SLOT_DATA_OFFSET)) {
+                    # Inicjalizuj slot 0
+                    $base0 = [RAMManager]::HEADER_SIZE + (0 * $slotSize)
+                    $ver0 = [Int64]([DateTime]::UtcNow.Ticks)
+                    $this.Accessor.Write($base0 + [RAMManager]::SLOT_VER_OFFSET, [Int64]$ver0)
+                    $this.Accessor.Write($base0 + [RAMManager]::SLOT_LEN_OFFSET, [int]$empty.Length)
+                    $this.Accessor.WriteArray($base0 + [RAMManager]::SLOT_DATA_OFFSET, $empty, 0, $empty.Length)
+                    # Inicjalizuj slot 1
+                    $base1 = [RAMManager]::HEADER_SIZE + (1 * $slotSize)
+                    $ver1 = [Int64]([DateTime]::UtcNow.Ticks)
+                    $this.Accessor.Write($base1 + [RAMManager]::SLOT_VER_OFFSET, [Int64]$ver1)
+                    $this.Accessor.Write($base1 + [RAMManager]::SLOT_LEN_OFFSET, [int]$empty.Length)
+                    $this.Accessor.WriteArray($base1 + [RAMManager]::SLOT_DATA_OFFSET, $empty, 0, $empty.Length)
+                    # Ustaw aktywny slot na 0
+                    $this.Accessor.Write([RAMManager]::HEADER_ACTIVE_OFFSET, [int]0)
+                    $this.SetCachedJson("{}")
+                    $this.IsInitialized = $true
+                }
+            }
+        } catch {
+            $this.LogError("Slot init failed: $_")
+        }
+        # Start background writer
+        $self = $this
+        $cts = $this.WriterCTS
+        [System.Threading.Tasks.Task]::Run([Action]{
+            while (-not $cts.IsCancellationRequested) {
+                $itemRef = [ref]$null
+                if ($self.WriteQueue.TryDequeue([ref]$itemRef)) {
+                    $jsonItem = $itemRef.Value
+                    $written = $false
+                    $retries = 0
+                    while (-not $written -and $retries -lt 10) {
+                        try {
+                            if ($self.UseLockFree) {
+                                $active = $self.Accessor.ReadInt32([RAMManager]::HEADER_ACTIVE_OFFSET)
+                                if ($active -ne 0 -and $active -ne 1) { $active = 0 }
+                                $slotSize = $self.GetSlotSize()
+                                $slot = 1 - $active
+                                $base = [RAMManager]::HEADER_SIZE + ($slot * $slotSize)
+                                $bytes = [System.Text.Encoding]::UTF8.GetBytes($jsonItem)
+                                $maxDataSize = $slotSize - [RAMManager]::SLOT_DATA_OFFSET
+                                if ($bytes.Length -gt $maxDataSize) {
+                                    $self.LogError("Background writer: data too large ($($bytes.Length) > $maxDataSize) - dropped")
+                                    $written = $true; break
+                                }
+                                $ver = [Int64]([DateTime]::UtcNow.Ticks)
+                                $self.Accessor.Write($base + [RAMManager]::SLOT_VER_OFFSET, [Int64]$ver)
+                                $self.Accessor.Write($base + [RAMManager]::SLOT_LEN_OFFSET, [int]$bytes.Length)
+                                $self.Accessor.WriteArray($base + [RAMManager]::SLOT_DATA_OFFSET, $bytes, 0, $bytes.Length)
+                                # publish
+                                $self.Accessor.Write([RAMManager]::HEADER_ACTIVE_OFFSET, [int]$slot)
+                                $self.SetCachedJson($jsonItem)
+                                $self.BackgroundWrites++
+                                $written = $true
+                            } else {
+                                if ($self.Mutex.WaitOne(500)) {
+                                    try {
+                                        $bytes = [System.Text.Encoding]::UTF8.GetBytes($jsonItem)
+                                        if ($bytes.Length -le ($self.MaxSize - 12)) {
+                                            $ver = [Int64]([DateTime]::UtcNow.Ticks)
+                                            $self.Accessor.Write(0, [Int64]$ver)
+                                            $self.Accessor.Write(8, [int]$bytes.Length)
+                                            $self.Accessor.WriteArray(12, $bytes, 0, $bytes.Length)
+                                            $self.SetCachedJson($jsonItem)
+                                            $self.BackgroundWrites++
+                                            $written = $true
+                                        } else {
+                                            $self.LogError("Background writer (mutex): data too large - dropped")
+                                            $written = $true
+                                        }
+                                    } finally { $self.Mutex.ReleaseMutex() }
+                                } else { $retries++; $self.BackgroundRetries++; Start-Sleep -Milliseconds (50 * $retries) }
+                            }
+                        } catch { $self.LogError("Background writer exception: $_"); $retries++; $self.BackgroundRetries++; Start-Sleep -Milliseconds (200 * $retries) }
+                    }
+                } else { Start-Sleep -Milliseconds 50 }
+            }
+        }) | Out-Null
+    }
+    [int]GetSlotSize() {
+        return [Math]::Floor(($this.MaxSize - [RAMManager]::HEADER_SIZE) / 2)
+    }
+    [void]SetCachedJson([string]$json) {
+        [System.Threading.Monitor]::Enter($this.CachedLock)
+        try { $this.CachedJson = $json }
+        finally { [System.Threading.Monitor]::Exit($this.CachedLock) }
+    }
+    [string]GetCachedJson() {
+        [System.Threading.Monitor]::Enter($this.CachedLock)
+        try { return $this.CachedJson }
+        finally { [System.Threading.Monitor]::Exit($this.CachedLock) }
+    }
+    [void]WriteRaw([string]$json) {
+        try {
+            if ($this.WriteQueue.Count -ge $this.MaxQueue) { $this.QueueDrops++; $this.LogError("WriteRaw: queue full, drop event"); return }
+            $this.WriteQueue.Enqueue($json)
+        } catch { $this.LogError("WriteRaw enqueue ERROR: $_") }
+    }
+    [string]ReadRaw() {
+        try {
+            if ($this.UseLockFree) {
+                $slotSize = $this.GetSlotSize()
+                $maxDataSize = $slotSize - [RAMManager]::SLOT_DATA_OFFSET
+                for ($retry = 0; $retry -lt 5; $retry++) {
+                    $active = $this.Accessor.ReadInt32([RAMManager]::HEADER_ACTIVE_OFFSET)
+                    if ($active -ne 0 -and $active -ne 1) { 
+                        Start-Sleep -Milliseconds 5
+                        continue 
+                    }
+                    $base = [RAMManager]::HEADER_SIZE + ($active * $slotSize)
+                    $ver1 = $this.Accessor.ReadInt64($base + [RAMManager]::SLOT_VER_OFFSET)
+                    $length = $this.Accessor.ReadInt32($base + [RAMManager]::SLOT_LEN_OFFSET)
+                    if ($length -le 0 -or $length -gt $maxDataSize) { 
+                        Start-Sleep -Milliseconds 5
+                        continue 
+                    }
+                    $bytes = New-Object byte[] $length
+                    $this.Accessor.ReadArray($base + [RAMManager]::SLOT_DATA_OFFSET, $bytes, 0, $length)
+                    $ver2 = $this.Accessor.ReadInt64($base + [RAMManager]::SLOT_VER_OFFSET)
+                    if ($ver1 -ne $ver2) { 
+                        # Writer collision - retry
+                        Start-Sleep -Milliseconds 5
+                        continue 
+                    }
+                    $result = [System.Text.Encoding]::UTF8.GetString($bytes)
+                    $this.SetCachedJson($result)
+                    return $result
+                }
+                # Po wszystkich retry - zwroc cached
+                return $this.GetCachedJson()
+            } else {
+                if ($this.Mutex.WaitOne(50)) {
+                    try {
+                        $length = $this.Accessor.ReadInt32(8)
+                        if ($length -le 0 -or $length -gt ($this.MaxSize - 12)) { return $this.GetCachedJson() }
+                        $bytes = New-Object byte[] $length
+                        $this.Accessor.ReadArray(12, $bytes, 0, $length)
+                        $result = [System.Text.Encoding]::UTF8.GetString($bytes)
+                        $this.SetCachedJson($result)
+                        return $result
+                    } finally { $this.Mutex.ReleaseMutex() }
+                } else { return $this.GetCachedJson() }
+            }
+        } catch { $this.LogError("ReadRaw ERROR: $_"); return $this.GetCachedJson() }
+    }
+    [void]Write([string]$key, $value) {
+        try {
+            $json = $this.ReadRaw()
+            $data = $null
+            try { $data = $json | ConvertFrom-Json -ErrorAction SilentlyContinue } catch {}
+            if (-not $data) { $data = @{} }
+            elseif ($data -is [System.Array]) { $data = @{ Items = $data } }
+            if ($data -is [PSCustomObject]) { $data | Add-Member -NotePropertyName $key -NotePropertyValue $value -Force } else { $data[$key] = $value }
+            $newJson = $data | ConvertTo-Json -Depth 20 -Compress
+            $jsonSize = [System.Text.Encoding]::UTF8.GetByteCount($newJson)
+            if ($jsonSize -gt 1048576) {
+                $this.LogError("Write($key) WARNING: JSON size $jsonSize bytes exceeds 1MB limit - data may be dropped")
+            }
+            $this.WriteRaw($newJson)
+        } catch { $this.LogError("Write($key) ERROR: $_") }
+    }
+    [object]Read([string]$key) {
+        try { 
+            $json = $this.ReadRaw()
+            $data = $null
+            try { $data = $json | ConvertFrom-Json -ErrorAction SilentlyContinue } catch {}
+            if (-not $data) { return $null }
+            if ($data -is [System.Array]) { return $null }
+            if ($data -is [PSCustomObject]) { return $data.PSObject.Properties[$key].Value } 
+            else { return $data[$key] }
+        } catch { $this.LogError("Read($key) ERROR: $_"); return $null }
+    }
+    [bool]Exists([string]$key) {
+        try { 
+            $json = $this.ReadRaw()
+            $data = $null
+            try { $data = $json | ConvertFrom-Json -ErrorAction SilentlyContinue } catch {}
+            if (-not $data) { return $false }
+            if ($data -is [System.Array]) { return $false }
+            if ($data -is [PSCustomObject]) { return $null -ne $data.PSObject.Properties[$key] } 
+            else { return $data.ContainsKey($key) }
+        } catch { $this.LogError("Exists($key) ERROR: $_"); return $false }
+    }
+    [void]Clear() {
+        $this.WriteRaw("{}")
+        $this.SetCachedJson("{}")
+    }
+    [bool]BackupToJSON([string]$filePath) {
+        try { 
+            $json = $this.ReadRaw()
+            $tmpPath = "$filePath.tmp"
+            $json | Set-Content $tmpPath -Encoding UTF8 -Force
+            Move-Item $tmpPath $filePath -Force
+            return $true 
+        } catch { $this.LogError("BackupToJSON ERROR: $_"); return $false }
+    }
+    [bool]RestoreFromJSON([string]$filePath) {
+        try { 
+            if (-not (Test-Path $filePath)) { return $false }
+            $json = Get-Content $filePath -Raw -Encoding UTF8
+            try { $null = $json | ConvertFrom-Json -ErrorAction Stop } 
+            catch { $this.LogError("RestoreFromJSON: Invalid JSON in $filePath"); return $false }
+            $this.WriteRaw($json)
+            return $true 
+        } catch { $this.LogError("RestoreFromJSON ERROR: $_"); return $false }
+    }
+    [void]LogError([string]$message) {
+        try { $logEntry = "$(Get-Date -Format 'HH:mm:ss') - RAMManager: $message"; Add-Content -Path $this.ErrorLogPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+    }
+    [void]LogDebug([string]$message) {
+    }
+    [hashtable]GetTelemetry() {
+        return @{ QueueSize = $this.WriteQueue.Count; QueueDrops = $this.QueueDrops; BackgroundWrites = $this.BackgroundWrites; BackgroundRetries = $this.BackgroundRetries; IsInitialized = $this.IsInitialized }
+    }
+    [void]Dispose() {
+        if ($this.WriterCTS) { 
+            try { 
+                $this.WriterCTS.Cancel()
+                Start-Sleep -Milliseconds 200
+                $this.WriterCTS.Dispose()
+            } catch {} 
+        }
+        try { if ($this.Accessor) { $this.Accessor.Dispose() } } catch {}
+        try { if ($this.MMF) { $this.MMF.Dispose() } } catch {}
+        try { if ($this.Mutex) { $this.Mutex.Dispose() } } catch {}
+    }
+}
+# STORAGE MODE MANAGER - Zarzadza trybami JSON/RAM/BOTH + Auto-Backup
+class StorageModeManager {
+    [RAMManager]$RAM
+    [string]$JSONPath
+    [string]$ConfigPath
+    [bool]$UseJSON
+    [bool]$UseRAM
+    [DateTime]$LastBackup
+    [int]$BackupIntervalSeconds
+    [string]$ErrorLogPath
+    StorageModeManager([string]$jsonPath, [string]$configPath) {
+        $this.JSONPath = $jsonPath
+        $this.ConfigPath = $configPath
+        $this.ErrorLogPath = "C:\CPUManager\ErrorLog.txt"
+        $this.LastBackup = [DateTime]::MinValue
+        # Wczytaj tryb z config
+        $this.LoadMode()
+        # Inicjalizuj RAMManager jesli potrzebny
+        if ($this.UseRAM) {
+            $this.RAM = [RAMManager]::new("MainEngine")
+        }
+        # Ustaw interval backupu zaleznie od trybu
+        $this.UpdateBackupInterval()
+    }
+    [void]LoadMode() {
+        if (Test-Path $this.ConfigPath) {
+            try {
+                $config = Get-Content $this.ConfigPath -Raw | ConvertFrom-Json
+                # v40.2 FIX: Obsłuż oba formaty - UseJSON/UseRAM i Mode
+                if ($null -ne $config.UseJSON -and $null -ne $config.UseRAM) {
+                    $this.UseJSON = [bool]$config.UseJSON
+                    $this.UseRAM = [bool]$config.UseRAM
+                } elseif ($config.Mode) {
+                    # Fallback: parsuj z Mode string
+                    $this.UseJSON = ($config.Mode -eq "JSON" -or $config.Mode -eq "BOTH")
+                    $this.UseRAM = ($config.Mode -eq "RAM" -or $config.Mode -eq "BOTH")
+                } else {
+                    $this.UseJSON = $true
+                    $this.UseRAM = $false
+                }
+                return
+            }
+            catch {
+                $this.LogError("LoadMode ERROR: $_")
+            }
+        }
+        # Default: JSON only (safe)
+        $this.UseJSON = $true
+        $this.UseRAM = $false
+    }
+    [void]SaveMode() {
+        try {
+            @{
+                UseJSON = $this.UseJSON
+                UseRAM = $this.UseRAM
+            } | ConvertTo-Json | Set-Content $this.ConfigPath -Force
+        }
+        catch {
+            $this.LogError("SaveMode ERROR: $_")
+        }
+    }
+    [void]SetMode([string]$mode) {
+        $oldUseRAM = $this.UseRAM
+        $oldUseJSON = $this.UseJSON
+        switch ($mode.ToUpper()) {
+            "JSON" {
+                $this.UseJSON = $true
+                $this.UseRAM = $false
+            }
+            "RAM" {
+                $this.UseJSON = $false
+                $this.UseRAM = $true
+            }
+            "BOTH" {
+                $this.UseJSON = $true
+                $this.UseRAM = $true
+            }
+        }
+        # Sync danych przed zmiana trybu
+        $this.SyncStorage($oldUseRAM, $oldUseJSON)
+        # Inicjalizuj RAM jesli trzeba
+        if ($this.UseRAM -and -not $this.RAM) {
+            $this.RAM = [RAMManager]::new("MainEngine")
+        }
+        $this.UpdateBackupInterval()
+        $this.SaveMode()
+        $this.LogError("Storage mode changed to: $mode")
+    }
+    [void]UpdateBackupInterval() {
+        if ($this.UseRAM -and $this.UseJSON) {
+            # BOTH: backup co 1 minute
+            $this.BackupIntervalSeconds = 60
+        }
+        elseif ($this.UseRAM -and -not $this.UseJSON) {
+            # RAM only: backup co 5 minut (safety)
+            $this.BackupIntervalSeconds = 300
+        }
+        else {
+            # JSON only: nie potrzeba backupu
+            $this.BackupIntervalSeconds = 0
+        }
+    }
+    # KLUCZOWA FUNKCJA: Sync danych miedzy RAM a JSON przy zmianie trybu
+    [void]SyncStorage([bool]$oldUseRAM, [bool]$oldUseJSON) {
+        try {
+            # Przechodzimy Z RAM -> cokolwiek innego = zrzuc RAM do JSON
+            if ($oldUseRAM -and -not $this.UseRAM) {
+                if ($this.RAM) {
+                    $this.LogError("SyncStorage: Dumping RAM -> JSON (mode change)")
+                    $this.RAM.BackupToJSON($this.JSONPath)
+                }
+            }
+            # Przechodzimy Z JSON -> RAM = wczytaj JSON do RAM
+            if (-not $oldUseRAM -and $this.UseRAM) {
+                if ($this.RAM) {
+                    $this.LogError("SyncStorage: Loading JSON -> RAM (mode change)")
+                    $this.RAM.RestoreFromJSON($this.JSONPath)
+                }
+            }
+            # BOTH -> BOTH = sync obu kierunkow (preferuj RAM jako nowsze)
+            if ($oldUseRAM -and $this.UseRAM -and $oldUseJSON -and $this.UseJSON) {
+                if ($this.RAM) {
+                    $this.RAM.BackupToJSON($this.JSONPath)
+                }
+            }
+        }
+        catch {
+            $this.LogError("SyncStorage ERROR: $_")
+        }
+    }
+    # Zapis danych (auto-routing zaleznie od trybu)
+    [void]WriteData([hashtable]$data) {
+        try {
+            # RAM
+            if ($this.UseRAM -and $this.RAM) {
+                $this.RAM.Write("WidgetData", $data)
+            }
+            # JSON
+            if ($this.UseJSON) {
+                $json = $data | ConvertTo-Json -Depth 10 -Compress
+                # Atomic write
+                $tmpPath = "$($this.JSONPath).tmp"
+                $json | Set-Content $tmpPath -Encoding UTF8 -Force
+                Move-Item $tmpPath $this.JSONPath -Force
+            }
+        }
+        catch {
+            $this.LogError("WriteData ERROR: $_")
+        }
+    }
+    # Odczyt danych (auto-routing)
+    [object]ReadData() {
+        try {
+            # RAM ma priorytet (szybszy)
+            if ($this.UseRAM -and $this.RAM) {
+                $data = $this.RAM.Read("WidgetData")
+                if ($data) {
+                    return $data
+                }
+            }
+            # Fallback: JSON
+            if ($this.UseJSON -and (Test-Path $this.JSONPath)) {
+                $json = Get-Content $this.JSONPath -Raw -Encoding UTF8
+                return $json | ConvertFrom-Json
+            }
+        }
+        catch {
+            $this.LogError("ReadData ERROR: $_")
+        }
+        return $null
+    }
+    # Auto-Backup (wywoluj w glownej petli)
+    [void]AutoBackup() {
+        if ($this.BackupIntervalSeconds -eq 0) {
+            return  # Backup wylaczony
+        }
+        $elapsed = ([DateTime]::Now - $this.LastBackup).TotalSeconds
+        if ($elapsed -ge $this.BackupIntervalSeconds) {
+            if ($this.RAM) {
+                $this.LogError("AutoBackup: RAM -> JSON")
+                $this.RAM.BackupToJSON($this.JSONPath)
+                $this.LastBackup = [DateTime]::Now
+            }
+        }
+    }
+    # Force sync (z GUI)
+    [void]ForceSyncNow() {
+        if ($this.RAM) {
+            $this.LogError("ForceSyncNow: RAM -> JSON")
+            $this.RAM.BackupToJSON($this.JSONPath)
+            $this.LastBackup = [DateTime]::Now
+        }
+    }
+    [void]LogError([string]$message) {
+        try {
+            $logEntry = "$(Get-Date -Format 'HH:mm:ss') - StorageModeManager: $message"
+            Add-Content -Path $this.ErrorLogPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
+        }
+        catch { }
+    }
+    [void]Dispose() {
+        if ($this.RAM) {
+            # Final backup przed zamknieciem
+            $this.RAM.BackupToJSON($this.JSONPath)
+            $this.RAM.Dispose()
+        }
+    }
+}
+# REACTIVE THERMAL GUARD - Natychmiastowa reakcja na przegrzanie
+class ReactiveThermalGuard {
+    [int]$EmergencyTemp         # Temp ktora wymusza Silent (default 95°C)
+    [int]$CriticalTemp          # Temp ktora wymusza shutdown CPU (default 100°C)
+    [int]$RecoveryTemp          # Temp ponizej ktorej mozna wrocic do AI (default 85°C)
+    [bool]$EmergencyActive      # Czy jestesmy w trybie emergency
+    [DateTime]$EmergencyStart   # Kiedy rozpoczal sie emergency
+    [int]$EmergencyCount        # Ile razy emergency zostal wywolany
+    [string]$ForcedMode         # Jaki tryb zostal wymusony
+    [string]$LastMode           # Ostatni tryb przed emergency
+    [string]$ErrorLogPath
+    ReactiveThermalGuard() {
+        $this.EmergencyTemp = 95
+        $this.CriticalTemp = 100
+        $this.RecoveryTemp = 85
+        $this.EmergencyActive = $false
+        $this.EmergencyStart = [DateTime]::MinValue
+        $this.EmergencyCount = 0
+        $this.ForcedMode = ""
+        $this.LastMode = ""
+        $this.ErrorLogPath = "C:\CPUManager\ErrorLog.txt"
+    }
+    # Glowna funkcja sprawdzajaca - wywoluj w kazdej iteracji
+    [hashtable]Check([int]$currentTemp, [string]$currentMode) {
+        $result = @{
+            Action = "NONE"           # NONE / FORCE_SILENT / FORCE_SHUTDOWN / RECOVER
+            NewMode = $currentMode    # Jaki tryb ustawic
+            Message = ""
+            IsEmergency = $this.EmergencyActive
+        }
+        # CRITICAL: Shutdown CPU (100°C+)
+        if ($currentTemp -ge $this.CriticalTemp) {
+            $result.Action = "FORCE_SHUTDOWN"
+            $result.NewMode = "Silent"
+            $result.Message = " CRITICAL THERMAL SHUTDOWN: ${currentTemp}°C >= $($this.CriticalTemp)°C - EMERGENCY SILENT + TDP MINIMUM"
+            if (-not $this.EmergencyActive) {
+                $this.EmergencyActive = $true
+                $this.EmergencyStart = [DateTime]::Now
+                $this.LastMode = $currentMode
+                $this.EmergencyCount++
+            }
+            $this.ForcedMode = "Silent"
+            $this.LogError($result.Message)
+            return $result
+        }
+        # EMERGENCY: Force Silent (95°C+)
+        if ($currentTemp -ge $this.EmergencyTemp) {
+            $result.Action = "FORCE_SILENT"
+            $result.NewMode = "Silent"
+            $result.Message = " THERMAL EMERGENCY: ${currentTemp}°C >= $($this.EmergencyTemp)°C - FORCING SILENT MODE"
+            if (-not $this.EmergencyActive) {
+                $this.EmergencyActive = $true
+                $this.EmergencyStart = [DateTime]::Now
+                $this.LastMode = $currentMode
+                $this.EmergencyCount++
+            }
+            $this.ForcedMode = "Silent"
+            $this.LogError($result.Message)
+            return $result
+        }
+        # RECOVERY: Temperatura spadla ponizej recovery threshold
+        if ($this.EmergencyActive -and $currentTemp -le $this.RecoveryTemp) {
+            $duration = ([DateTime]::Now - $this.EmergencyStart).TotalSeconds
+            $result.Action = "RECOVER"
+            $result.NewMode = $this.LastMode  # Wroc do trybu sprzed emergency
+            $result.Message = " THERMAL RECOVERY: ${currentTemp}°C <= $($this.RecoveryTemp)°C - Restoring mode: $($this.LastMode) (emergency lasted ${duration}s)"
+            $this.EmergencyActive = $false
+            $this.ForcedMode = ""
+            $this.LogError($result.Message)
+            return $result
+        }
+        # NORMAL: Temperatura OK
+        if ($this.EmergencyActive) {
+            # Dalej w emergency (temp miedzy recovery a emergency)
+            $result.Action = "MAINTAIN_SILENT"
+            $result.NewMode = "Silent"
+            $result.Message = "[WARN] THERMAL COOLDOWN: ${currentTemp}°C (waiting for <=$($this.RecoveryTemp)°C to recover)"
+            $result.IsEmergency = $true
+        }
+        return $result
+    }
+    [string]GetStatus() {
+        if ($this.EmergencyActive) {
+            $duration = [int]([DateTime]::Now - $this.EmergencyStart).TotalSeconds
+            return " EMERGENCY (${duration}s) - Events: $($this.EmergencyCount)"
+        }
+        return " Normal - Events: $($this.EmergencyCount)"
+    }
+    [void]Reset() {
+        $this.EmergencyActive = $false
+        $this.EmergencyCount = 0
+        $this.ForcedMode = ""
+        $this.LastMode = ""
+    }
+    [void]LogError([string]$message) {
+        try {
+            $logEntry = "$(Get-Date -Format 'HH:mm:ss') - ThermalGuard: $message"
+            Add-Content -Path $this.ErrorLogPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
+        }
+        catch { }
+    }
+}
+# RYZENADJ VERIFIER - Weryfikacja czy TDP faktycznie sie zaaplikowal
+class RyzenAdjVerifier {
+    [string]$RyzenAdjPath
+    [bool]$Available
+    [int]$LastSTAPM
+    [int]$LastFast
+    [int]$LastSlow
+    [int]$LastTctl
+    [int]$VerificationAttempts
+    [int]$VerificationFailures
+    [DateTime]$LastVerification
+    [string]$ErrorLogPath
+    RyzenAdjVerifier([string]$ryzenAdjPath) {
+        $this.RyzenAdjPath = $ryzenAdjPath
+        $this.Available = Test-Path $this.RyzenAdjPath
+        $this.LastSTAPM = 0
+        $this.LastFast = 0
+        $this.LastSlow = 0
+        $this.LastTctl = 0
+        $this.VerificationAttempts = 0
+        $this.VerificationFailures = 0
+        $this.LastVerification = [DateTime]::MinValue
+        $this.ErrorLogPath = "C:\CPUManager\ErrorLog.txt"
+    }
+    # Ustaw TDP z weryfikacja
+    [hashtable]SetTDP([int]$stapm, [int]$fast, [int]$slow, [int]$tctl) {
+        $result = @{
+            Success = $false
+            Applied = $false
+            Verified = $false
+            Message = ""
+            ActualSTAPM = 0
+            ActualFast = 0
+            ActualSlow = 0
+            ActualTctl = 0
+        }
+        if (-not $this.Available) {
+            $result.Message = "RyzenADJ not available at: $($this.RyzenAdjPath)"
+            $this.LogError($result.Message)
+            return $result
+        }
+        try {
+            # Buduj argumenty
+            $args = @(
+                "--stapm-limit=$stapm",
+                "--fast-limit=$fast",
+                "--slow-limit=$slow",
+                "--tctl-temp=$tctl"
+            )
+            # Wykonaj RyzenADJ
+            $process = Start-Process -FilePath $this.RyzenAdjPath `
+                                    -ArgumentList $args `
+                                    -NoNewWindow `
+                                    -Wait `
+                                    -PassThru `
+                                    -RedirectStandardOutput "C:\CPUManager\ryzenadj_output.txt" `
+                                    -RedirectStandardError "C:\CPUManager\ryzenadj_error.txt"
+            if ($process.ExitCode -eq 0) {
+                $result.Applied = $true
+                $result.Message = " RyzenADJ executed: STAPM=$stapm Fast=$fast Slow=$slow Tctl=$tctl"
+                $this.LogError($result.Message)
+                # Poczekaj chwile na zastosowanie
+                Start-Sleep -Milliseconds 500
+                # WERYFIKACJA: Odczytaj faktyczne wartosci
+                $verified = $this.VerifyTDP($stapm, $fast, $slow, $tctl)
+                if ($verified.Success) {
+                    $result.Success = $true
+                    $result.Verified = $true
+                    $result.ActualSTAPM = $verified.ActualSTAPM
+                    $result.ActualFast = $verified.ActualFast
+                    $result.ActualSlow = $verified.ActualSlow
+                    $result.ActualTctl = $verified.ActualTctl
+                    $result.Message += " |  VERIFIED"
+                }
+                else {
+                    $result.Verified = $false
+                    $result.Message += " | [WARN] VERIFICATION FAILED: $($verified.Message)"
+                    $this.VerificationFailures++
+                }
+                # Zapisz wartosci
+                $this.LastSTAPM = $stapm
+                $this.LastFast = $fast
+                $this.LastSlow = $slow
+                $this.LastTctl = $tctl
+                $this.LastVerification = [DateTime]::Now
+                $this.VerificationAttempts++
+            }
+            else {
+                $result.Message = "- RyzenADJ failed with exit code: $($process.ExitCode)"
+                $this.LogError($result.Message)
+                $this.VerificationFailures++
+            }
+        }
+        catch {
+            $result.Message = "- RyzenADJ exception: $_"
+            $this.LogError($result.Message)
+            $this.VerificationFailures++
+        }
+        return $result
+    }
+    # Weryfikuj faktyczne wartosci TDP (odczyt z -i)
+    [hashtable]VerifyTDP([int]$expectedSTAPM, [int]$expectedFast, [int]$expectedSlow, [int]$expectedTctl) {
+        $result = @{
+            Success = $false
+            Message = ""
+            ActualSTAPM = 0
+            ActualFast = 0
+            ActualSlow = 0
+            ActualTctl = 0
+        }
+        try {
+            # Wywolaj RyzenADJ -i (info mode)
+            $infoOutput = & $this.RyzenAdjPath -i 2>&1
+            if (-not $infoOutput) {
+                $result.Message = "No output from RyzenADJ -i"
+                return $result
+            }
+            # Parsuj output (przyklad: "STAPM LIMIT                | 25000")
+            foreach ($line in $infoOutput) {
+                if ($line -match "STAPM LIMIT.*\|\s*(\d+)") {
+                    $result.ActualSTAPM = [int]([int]$matches[1] / 1000)  # mW -> W
+                }
+                if ($line -match "FAST LIMIT.*\|\s*(\d+)") {
+                    $result.ActualFast = [int]([int]$matches[1] / 1000)
+                }
+                if ($line -match "SLOW LIMIT.*\|\s*(\d+)") {
+                    $result.ActualSlow = [int]([int]$matches[1] / 1000)
+                }
+                if ($line -match "TCTL TEMP.*\|\s*(\d+)") {
+                    $result.ActualTctl = [int]$matches[1]
+                }
+            }
+            # Sprawdz zgodnosc (tolerancja +/-1W / +/-2°C)
+            $stapmOK = [Math]::Abs($result.ActualSTAPM - $expectedSTAPM) -le 1
+            $fastOK = [Math]::Abs($result.ActualFast - $expectedFast) -le 1
+            $slowOK = [Math]::Abs($result.ActualSlow - $expectedSlow) -le 1
+            $tctlOK = [Math]::Abs($result.ActualTctl - $expectedTctl) -le 2
+            if ($stapmOK -and $fastOK -and $slowOK -and $tctlOK) {
+                $result.Success = $true
+                $result.Message = "Values match (tolerance +/-1W/+/-2°C)"
+            }
+            else {
+                $result.Success = $false
+                $mismatch = @()
+                if (-not $stapmOK) { $mismatch += "STAPM: expected $expectedSTAPM, got $($result.ActualSTAPM)" }
+                if (-not $fastOK) { $mismatch += "Fast: expected $expectedFast, got $($result.ActualFast)" }
+                if (-not $slowOK) { $mismatch += "Slow: expected $expectedSlow, got $($result.ActualSlow)" }
+                if (-not $tctlOK) { $mismatch += "Tctl: expected $expectedTctl, got $($result.ActualTctl)" }
+                $result.Message = "Mismatch: " + ($mismatch -join ", ")
+            }
+        }
+        catch {
+            $result.Message = "Verification exception: $_"
+        }
+        return $result
+    }
+    [string]GetStatus() {
+        $successRate = if ($this.VerificationAttempts -gt 0) {
+            [int](($this.VerificationAttempts - $this.VerificationFailures) / $this.VerificationAttempts * 100)
+        } else { 0 }
+        return "Attempts: $($this.VerificationAttempts) | Failures: $($this.VerificationFailures) | Success: $successRate%"
+    }
+    [void]LogError([string]$message) {
+        try {
+            $logEntry = "$(Get-Date -Format 'HH:mm:ss') - RyzenAdjVerifier: $message"
+            Add-Content -Path $this.ErrorLogPath -Value $logEntry -Encoding UTF8 -ErrorAction SilentlyContinue
+        }
+        catch { }
+    }
+}
+# STORAGE MODE CONFIG - RAM vs JSON
+$Script:StorageModeConfigPath = "C:\CPUManager\StorageMode.json"
+function Get-StorageMode {
+    try {
+        if (Test-Path $Script:StorageModeConfigPath) {
+            $config = Get-Content $Script:StorageModeConfigPath -Raw | ConvertFrom-Json
+            if ($config.Mode) {
+                # New format: "JSON" / "RAM" / "BOTH"
+                return $config.Mode
+            } elseif ($null -ne $config.UseRAM) {
+                if ($config.UseJSON -and $config.UseRAM) {
+                    return "BOTH"  #  FIX: bylo tylko "RAM"
+                } elseif ($config.UseRAM) {
+                    return "RAM"
+                } else {
+                    return "JSON"
+                }
+            }
+        }
+    } catch { }
+    return "JSON"  # Default: JSON mode
+}
+function Set-StorageMode {
+    param([string]$Mode)  # "JSON" / "RAM" / "BOTH"
+    try {
+        # v40.2 FIX: Zapisuj ZARÓWNO Mode jak i UseJSON/UseRAM (kompatybilność z StorageModeManager.LoadMode)
+        $useJSON = ($Mode -eq "JSON" -or $Mode -eq "BOTH")
+        $useRAM = ($Mode -eq "RAM" -or $Mode -eq "BOTH")
+        @{ Mode = $Mode; UseJSON = $useJSON; UseRAM = $useRAM } | ConvertTo-Json | Set-Content $Script:StorageModeConfigPath -Force
+        $Script:StorageMode = $Mode
+        # Reinicjalizuj RAMManager jesli RAM lub BOTH
+        if (($Mode -eq "RAM" -or $Mode -eq "BOTH") -and -not $Script:SharedRAM) {
+            $Script:SharedRAM = [RAMManager]::new("MainEngine")
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+# #
+# #
+$Script:StorageManager = [StorageModeManager]::new(
+    "C:\CPUManager\WidgetData.json",
+    "C:\CPUManager\StorageMode.json"
+)
+Write-Host " Storage: JSON=$($Script:StorageManager.UseJSON) RAM=$($Script:StorageManager.UseRAM)" -ForegroundColor Green
+$Script:ThermalGuard = [ReactiveThermalGuard]::new()
+$Script:ThermalGuard.EmergencyTemp = 95
+$Script:ThermalGuard.CriticalTemp = 100
+$Script:ThermalGuard.RecoveryTemp = 85
+Write-Host " ThermalGuard: Emergency=95°C Critical=100°C" -ForegroundColor Green
+$Script:RyzenVerifier = $null
+$Script:ThermalEmergencyActive = $false
+$Script:LastVerifiedTDP = $null
+if ($Script:RyzenAdjAvailable -and $Script:RyzenAdjPath) {
+    $Script:RyzenVerifier = [RyzenAdjVerifier]::new($Script:RyzenAdjPath)
+    if ($Script:RyzenVerifier.Available) {
+        Write-Host " RyzenVerifier: Enabled" -ForegroundColor Green
+    }
+}
+# RyzenADJ async cache + lock
+if (-not $Script:RyzenAdjLock) { $Script:RyzenAdjLock = New-Object System.Object }
+if (-not $Script:RyzenAdjCache) { $Script:RyzenAdjCache = @{ Info = $null; InfoTime = $null; LastApplyResult = $null; LastApplyTime = $null; LastJob = $null } }
+if (-not $Script:RyzenInfoPollMs) { $Script:RyzenInfoPollMs = 10000 }
+if (-not $Script:LastRyzenInfoPollTime) { $Script:LastRyzenInfoPollTime = [DateTime]::MinValue }
+# Inicjalizacja
+$Script:StorageMode = Get-StorageMode
+$Script:SharedRAM = $null
+$Script:UseRAMStorage = $false  # v39.4 FIX: Initialize UseRAMStorage flag
+if ($Script:StorageMode -eq "RAM" -or $Script:StorageMode -eq "BOTH") {
+    $Script:SharedRAM = [RAMManager]::new("MainEngine")
+    $Script:UseRAMStorage = $true  # v39.4 FIX: Enable RAM storage
+    $backupInfo = if ($Script:StorageMode -eq "RAM") { "backup every 5 min" } else { "backup every 1 min" }
+    Write-Host "  [RAM] Storage mode: $($Script:StorageMode) ($backupInfo)" -ForegroundColor Cyan
+} else {
+    Write-Host "  [JSON] Storage mode: JSON (AI auto-save every 5 min)" -ForegroundColor Cyan
+}
+# ROTACJA LOGOW - limituj rozmiar do 5MB
+function Rotate-ErrorLog {
+    try {
+        if (Test-Path $script:ErrorLogPath) {
+            $logSize = (Get-Item $script:ErrorLogPath).Length / 1MB
+            if ($logSize -gt 5) {
+                $backupPath = $script:ErrorLogPath + ".old"
+                Remove-ExistingFiles @($backupPath)
+                Move-Item $script:ErrorLogPath $backupPath -Force
+                Ensure-FileExists $script:ErrorLogPath
+                "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] ErrorLog rotated - backup: $backupPath" | Out-File -FilePath $script:ErrorLogPath -Encoding utf8
+            }
+        }
+    } catch { }
+}
+# Wykonaj rotacje na starcie
+Rotate-ErrorLog
+$global:ErrorActionPreference = "Continue"
+# Inicjalizacja sciezki logow
+$Script:LogDir = "C:\CPUManager"
+$null = Ensure-DirectoryExists $Script:LogDir
+$Global:LogFile = Join-Path $Script:LogDir "CPUManager_$(Get-Date -Format 'yyyy-MM-dd').log"
+try { $Host.UI.RawUI.WindowTitle = "CPU Manager AI ULTRA" } catch { }
+# Domyslne katalogi konfiguracyjne (upewnij sie ze istnieja przed operacjami sygnalowymi)
+if (-not $Script:ConfigDir) { $Script:ConfigDir = "C:\CPUManager" }
+$null = Ensure-DirectoryExists $Script:ConfigDir
+# --- Ustawienie sciezki do pliku TDPConfig.json oraz funkcji ladowania ---
+$Script:TDPConfigPath = Join-Path $Script:ConfigDir 'TDPConfig.json'
+function Load-TDPConfig {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    if (-not (Test-Path $Path)) { return $false }
+    try {
+        $json = Get-Content $Path -Raw | ConvertFrom-Json -ErrorAction Stop
+        if (-not $Script:TDPProfiles) {
+            $Script:TDPProfiles = @{}
+        }
+        foreach ($mode in @('Silent','Balanced','Turbo','Extreme')) {
+            $node = $null
+            try { $node = $json.$mode } catch { $node = $null }
+            if ($null -ne $node) {
+                # Ensure existing profile exists to fall back to
+                if (-not $Script:TDPProfiles[$mode]) { $Script:TDPProfiles[$mode] = @{ STAPM = 0; Fast = 0; Slow = 0; Tctl = 85 } }
+                $cur = $Script:TDPProfiles[$mode]
+                $Script:TDPProfiles[$mode] = @{ 
+                    STAPM = if ($node.STAPM -ne $null) { [int]$node.STAPM } else { $cur.STAPM }
+                    Fast   = if ($node.Fast -ne $null)  { [int]$node.Fast }  else { $cur.Fast }
+                    Slow   = if ($node.Slow -ne $null)  { [int]$node.Slow }  else { $cur.Slow }
+                    Tctl   = if ($node.Tctl -ne $null)  { [int]$node.Tctl }  else { $cur.Tctl }
+                }
+            }
+        }
+        foreach ($mode in @('Silent','Balanced','Turbo','Extreme')) {
+            if ($Script:TDPProfiles[$mode]) {
+                $validation = Validate-TDP -TDPProfile $Script:TDPProfiles[$mode] -Mode $mode
+                $Script:TDPProfiles[$mode] = $validation.Profile
+                if (-not $validation.Safe) {
+                    Write-Log " TDP Safety: $mode profile exceeded HARD LIMITS - values were capped" "TDP-SAFETY"
+                }
+            }
+        }
+        # Synchronizuj Performance z Extreme (fallback to Turbo if Extreme missing)
+        if ($Script:TDPProfiles['Extreme']) {
+            try { $Script:TDPProfiles['Performance'] = $Script:TDPProfiles['Extreme'].Clone() } catch { $Script:TDPProfiles['Performance'] = $Script:TDPProfiles['Extreme'] }
+        } elseif ($Script:TDPProfiles['Turbo']) {
+            $Script:TDPProfiles['Performance'] = $Script:TDPProfiles['Turbo']
+        }
+        if ($json.Turbo -and $json.Turbo.STAPM) { $Script:TurboSTAPM = [int]$json.Turbo.STAPM }
+        # Loguj zaladowane wartosci dla diagnostyki
+        foreach ($m in @('Silent','Balanced','Turbo','Extreme')) {
+            try { $p = $Script:TDPProfiles[$m]; if ($p) { Write-Log "TDP profile loaded: $m STAPM=$($p.STAPM)W Fast=$($p.Fast)W Slow=$($p.Slow)W Tctl=$($p.Tctl)C" "TDP" } } catch {}
+        }
+        Write-Log "Zaladowano TDPConfig.json z Konfiguratora" "TDP"
+        return $true
+    } catch {
+        Write-Log "Blad ladowania TDPConfig.json: $_" "WARN"
+        return $false
+    }
+}
+# Wczytaj od razu przy starcie (jesli istnieje)
+try { Load-TDPConfig -Path $Script:TDPConfigPath | Out-Null } catch {}
+# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+$Script:AppCategoriesPath = Join-Path $Script:ConfigDir 'AppCategories.json'
+$Script:AppCategoryPreferences = @{}
+function Load-AppCategories {
+    <#
+    .SYNOPSIS
+    Wczytuje AppCategories.json z CONFIGURATOR
+    Zawiera preferencje użytkownika dotyczące kategoryzacji aplikacji
+    #>
+    param([string]$Path)
+    if (-not $Path) { $Path = $Script:AppCategoriesPath }
+    if (-not (Test-Path $Path)) { return $false }
+    try {
+        $json = Get-Content $Path -Raw -ErrorAction Stop | ConvertFrom-Json
+        # Wczytaj UserPreferences
+        if ($json.UserPreferences) {
+            $Script:AppCategoryPreferences = @{}
+            foreach ($prop in $json.UserPreferences.PSObject.Properties) {
+                $appName = $prop.Name
+                $pref = $prop.Value
+                
+                $Script:AppCategoryPreferences[$appName] = @{
+                    Bias = if ($pref.Bias -ne $null) { [double]$pref.Bias } else { 0.5 }
+                    Confidence = if ($pref.Confidence -ne $null) { [double]$pref.Confidence } else { 0.7 }
+                    Samples = if ($pref.Samples -ne $null) { [int]$pref.Samples } else { 1 }
+                    LastUsed = if ($pref.LastUsed) { $pref.LastUsed } else { "" }
+                    HardLock = if ($pref.HardLock -ne $null) { [bool]$pref.HardLock } else { $false }
+                }
+            }
+            Write-Log "AppCategories loaded: $($Script:AppCategoryPreferences.Count) apps with preferences" "CONFIG"
+            
+            # v43.10b: DEBUG - log wszystkie aplikacje z HardLock
+            $hardLockApps = @()
+            foreach ($key in $Script:AppCategoryPreferences.Keys) {
+                if ($Script:AppCategoryPreferences[$key].HardLock) {
+                    $bias = $Script:AppCategoryPreferences[$key].Bias
+                    $mode = if ($bias -le 0.2) { "Silent" } elseif ($bias -ge 0.8) { "Turbo" } else { "Balanced" }
+                    $hardLockApps += "$key=$mode"
+                }
+            }
+            if ($hardLockApps.Count -gt 0) {
+                Write-Log " AppCategories HardLock apps: $($hardLockApps -join ', ')" "CONFIG"
+            }
+        }
+        return $true
+    } catch {
+        Write-Log "Error loading AppCategories: $_" "WARN"
+        return $false
+    }
+}
+# Wczytaj AppCategories przy starcie
+try { 
+    $loaded = Load-AppCategories
+    if ($loaded) {
+        Write-DebugLog "AppCategories.json loaded successfully at startup" "CONFIG" "INFO"
+    } else {
+        Write-DebugLog "AppCategories.json NOT FOUND at startup - file: $Script:AppCategoriesPath" "CONFIG" "WARN"
+    }
+} catch {
+    Write-DebugLog "AppCategories.json FAILED to load: $_" "CONFIG" "ERROR"
+}
+# Timer do odświeżania AppCategories.json (co 10s)
+$global:LastAppCategoriesWrite = $null
+if (Test-Path $Script:AppCategoriesPath) { $global:LastAppCategoriesWrite = (Get-Item $Script:AppCategoriesPath).LastWriteTime }
+$global:AppCategoriesRefreshTimer = [System.Timers.Timer]::new(10000)
+$global:AppCategoriesRefreshTimer.AutoReset = $true
+$global:AppCategoriesRefreshTimer.Add_Elapsed({
+    try {
+        if (Test-Path $Script:AppCategoriesPath) {
+            $now = (Get-Item $Script:AppCategoriesPath).LastWriteTime
+            if ($global:LastAppCategoriesWrite -eq $null -or $now -ne $global:LastAppCategoriesWrite) {
+                $global:LastAppCategoriesWrite = $now
+                Load-AppCategories | Out-Null
+                Write-Log "AppCategories.json changed - reloaded preferences" "CONFIG"
+            }
+        }
+    } catch { Write-Log "Error refreshing AppCategories: $_" "WARN" }
+})
+$global:AppCategoriesRefreshTimer.Start()
+# Funkcja pomocnicza - pobiera bias dla aplikacji z preferencji użytkownika
+function Get-AppCategoryBias {
+    <#
+    .SYNOPSIS
+    Zwraca bias (preferencję mocy) dla aplikacji z AppCategories.json
+    Bias > 0.5 = więcej mocy, Bias < 0.5 = mniej mocy
+    #>
+    param([string]$AppName)
+    if (-not $AppName) { return 0.5 }
+    $appLower = $AppName.ToLower() -replace '\.exe$', ''
+    # Sprawdź czy mamy preferencje dla tej aplikacji
+    if ($Script:AppCategoryPreferences -and $Script:AppCategoryPreferences.Count -gt 0) {
+        foreach ($key in $Script:AppCategoryPreferences.Keys) {
+            $keyLower = $key.ToLower() -replace '\.exe$', ''
+            if ($keyLower -eq $appLower -or $appLower -like "*$keyLower*" -or $keyLower -like "*$appLower*") {
+                $pref = $Script:AppCategoryPreferences[$key]
+                if ($pref.HardLock) {
+                    # HardLock = użytkownik wymusił kategorię - używaj tego!
+                    return $pref.Bias
+                }
+                # Zwykła preferencja - używaj z confidence
+                return $pref.Bias
+            }
+        }
+    }
+    # Brak preferencji - zwróć neutralny bias
+    return 0.5
+}
+#  PERFORMANCE FIX: Usunieto dedykowany timer TDPConfig.json
+#  TDPConfig jest teraz monitorowany TYLKO przez reload.signal (wydajniejsze)
+#  Eliminuje podwojne sprawdzanie i zmniejsza obciazenie I/O
+
+# USTAWIENIE KODOWANIA KONSOLI NA UTF-8 (dla emoji/ikon)
+try {
+    # Ustaw strone kodowa na UTF-8
+    chcp 65001 | Out-Null
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
+# CLEANUP SIGNAL FILES ON STARTUP - CRITICAL!
+# Usun stare pliki sygnalowe ktore mogly zostac po poprzedniej sesji
+$signalDir = $Script:ConfigDir
+$signalFiles = @(
+    "$signalDir\shutdown.signal",
+    "$signalDir\reload.signal",
+    "$signalDir\WidgetCommand.txt",
+    "$signalDir\Widget.pid"
+)
+Remove-FilesIfExist $signalFiles
+# Reset WidgetData.json to default values on startup
+# NOTE: Avoid unconditional overwrite -- only create defaults when file is missing or empty.
+$widgetDataPath = Join-Path $signalDir 'WidgetData.json'
+try {
+    if (-not (Test-Path $widgetDataPath) -or ((Get-Item $widgetDataPath).Length -eq 0)) {
+        $defaultWidget = @{
+            CPU = 0
+            Temp = 0
+            Mode = "BALANCED"
+            AI = $false
+            Context = "Init"
+            Activity = "Starting"
+            App = "CPUManager"
+            Iteration = 0
+        }
+        $defaultWidget | ConvertTo-Json -Depth 6 | Set-Content $widgetDataPath -Force -ErrorAction SilentlyContinue
+        Write-Log "WidgetData.json: utworzono domyslny plik (brak lub pusty)" "INFO"
+    } else {
+        Write-Log "WidgetData.json: istnieje -- pomijam nadpisanie." "INFO"
+    }
+} catch { Write-Log "WidgetData.json: blad przy tworzeniu domyslnego pliku: $_" "ERROR" }
+# AUTO-KOPIOWANIE SKRYPTU DO C:\CPUManager\ (jesli uruchamiany z innego miejsca)
+try {
+    $targetDir = "C:\CPUManager"
+    $targetScript = Join-Path $targetDir "CPUManager_v40.ps1"
+    $currentScript = $MyInvocation.MyCommand.Path
+    # Upewnij sie ze folder istnieje
+    Ensure-DirectoryExists $targetDir
+    # Jesli skrypt jest uruchamiany spoza C:\CPUManager - skopiuj go
+    if ($currentScript -and (Test-Path $currentScript)) {
+        $currentDir = Split-Path -Parent $currentScript
+        if ($currentDir -ne $targetDir) {
+            # Skopiuj skrypt do C:\CPUManager
+            Copy-Item -Path $currentScript -Destination $targetScript -Force
+            Write-Host "  [OK] Skrypt skopiowany do $targetDir" -ForegroundColor Green
+        }
+    }
+    # Utworz tez Start_CPUManager.bat jesli nie istnieje
+    $batFile = Join-Path $targetDir "Start_CPUManager.bat"
+    if (-not (Test-Path $batFile)) {
+        $batContent = @"
+@echo off
+title CPU Manager AI ULTRA
+cd /d "$targetDir"
+powershell.exe -ExecutionPolicy Bypass -NoProfile -File "$targetScript"
+pause
+"@
+        [System.IO.File]::WriteAllText($batFile, $batContent)
+    }
+} catch { }
+# TWORZENIE SKROTU NA PULPICIE (przy pierwszym uruchomieniu)
+try {
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    $shortcutPath = Join-Path $desktopPath "CPU Manager AI.lnk"
+    # Sprawdz czy skrot juz istnieje
+    if (-not (Test-Path $shortcutPath)) {
+        $WshShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut($shortcutPath)
+        # Sprawdz czy istnieje EXE w roznych lokalizacjach
+        $exePaths = @(
+            "C:\CPUManager\CPUManagerAI.exe",
+            (Join-Path $PSScriptRoot "CPUManagerAI.exe"),
+            (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "CPUManagerAI.exe")
+        )
+        $foundExe = Find-FirstExistingPath $exePaths
+        if ($foundExe) {
+            # Mamy EXE - uzyj go
+            $Shortcut.TargetPath = $foundExe
+            $Shortcut.WorkingDirectory = Split-Path -Parent $foundExe
+        } else {
+            # Brak EXE - uzyj skryptu PS1
+            $ps1Paths = @(
+                "C:\CPUManager\CPUManager_v40.ps1",
+                $MyInvocation.MyCommand.Path
+            )
+            $foundPs1 = Find-FirstExistingPath $ps1Paths
+            if ($foundPs1) {
+                $Shortcut.TargetPath = "powershell.exe"
+                $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$foundPs1`""
+                $Shortcut.WorkingDirectory = Split-Path -Parent $foundPs1
+            }
+        }
+        $Shortcut.Description = "CPU Manager AI ULTRA"
+        $Shortcut.Save()
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($WshShell) | Out-Null
+    }
+} catch { }
+# AUTOMATYCZNE USTAWIENIE ROZMIARU OKNA
+try {
+    # Wymagane wymiary: 100 kolumn x 45 wierszy (dopasowane do pelnego UI)
+    $targetWidth = 100
+    $targetHeight = 50
+    # Pobierz maksymalny rozmiar okna
+    $maxSize = $Host.UI.RawUI.MaxPhysicalWindowSize
+    # Ogranicz do maksymalnego rozmiaru
+    $newWidth = [Math]::Min($targetWidth, $maxSize.Width)
+    $newHeight = [Math]::Min($targetHeight, $maxSize.Height)
+    # Ustaw bufor (musi byc >= rozmiar okna)
+    $bufferSize = $Host.UI.RawUI.BufferSize
+    if ($bufferSize.Width -lt $newWidth) {
+        $bufferSize.Width = $newWidth + 10
+    }
+    if ($bufferSize.Height -lt 3000) {
+        $bufferSize.Height = 3000  # Duzy bufor dla scrollowania
+    }
+    $Host.UI.RawUI.BufferSize = $bufferSize
+    # Ustaw rozmiar okna
+    $windowSize = New-Object System.Management.Automation.Host.Size($newWidth, $newHeight)
+    $Host.UI.RawUI.WindowSize = $windowSize
+    # Ustaw pozycje okna (lewa gorna czesc ekranu)
+    $Host.UI.RawUI.WindowPosition = New-Object System.Management.Automation.Host.Coordinates(0, 0)
+} catch {
+    # Fallback: uzyj mode con (dziala w CMD i starszych PowerShell)
+    try {
+        $null = cmd /c "mode con: cols=100 lines=45" 2>$null
+    } catch { }
+}
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Type = "INFO"
+    )
+    # Throttling ustawienia (domyslnie: INFO co 10s)
+    if (-not $Script:LogMinIntervalSec) { $Script:LogMinIntervalSec = 60 }
+    if (-not $Script:LastLogTime) { $Script:LastLogTime = [DateTime]::MinValue }
+    $Timestamp = Get-Date -Format "HH:mm:ss.fff"
+    $LogEntry = "[$Timestamp] [$Type] $Message"
+    # Kolor konsoli
+    $Color = switch ($Type) {
+        "BOOST"    { "Yellow" }
+        "TURBO"    { "Red" }
+        "BALANCED" { "Green" }
+        "SILENT"   { "Cyan" }
+        "ERROR"    { "DarkRed" }
+        "INFO"     { "Gray" }
+        default    { "White" }
+    }
+    # Typy, ktore zawsze logujemy
+                               # Set-RyzenAdjMode "Silent" (bledne wywolanie)
+    $alwaysLog = @('ERROR','WARN','WARNING','TURBO','BOOST','SUCCESS')
+    $now = Get-Date
+    $shouldLog = $false
+    if ($alwaysLog -contains $Type.ToUpper()) {
+        $shouldLog = $true
+    } else {
+        $elapsed = ($now - $Script:LastLogTime).TotalSeconds
+                               # Set-RyzenAdjMode "Balanced" (bledne wywolanie)
+        if ($elapsed -ge $Script:LogMinIntervalSec) { $shouldLog = $true }
+    }
+    if ($shouldLog) {
+        Write-Host $LogEntry -ForegroundColor $Color
+        try {
+            Add-Content -Path $Global:LogFile -Value $LogEntry -Encoding UTF8 -ErrorAction SilentlyContinue
+        } catch {}
+        # Also forward important messages to the Activity window (if Add-Log is available)
+        try {
+            if (Get-Command -Name Add-Log -ErrorAction SilentlyContinue) {
+                if ($Type.ToUpper() -ne 'DEBUG') {
+                        # Prefer concise TDP/activity entries when possible
+                        $forward = $null
+                        try {
+                            if ($Type.ToUpper() -eq 'TDP' -or $Message -match 'RyzenADJ cmd') {
+                                if ($Message -match '--stapm-limit=(\d+)') {
+                                    $st = [int]($Matches[1]) / 1000
+                                    $forward = "TDP - ${st}W"
+                                } elseif ($Message -match 'TDP:\s*(\w+)\s*(\d+)') {
+                                    $forward = "$($Matches[1]) - $($Matches[2])W"
+                                } else {
+                                    # Generic short TDP tag
+                                    $forward = "TDP: action"
+                                }
+                            } elseif ($Message -match 'TDP:\s*(\w+)\s*(\d+)') {
+                                $forward = "$($Matches[1]) - $($Matches[2])W"
+                            }
+                        } catch {}
+                        if (-not $forward) {
+                            # Sanitize multiline or very long messages before forwarding to Activity
+                            $forward = $Message -replace "[\r\n]+", ' | '
+                            $forward = $forward -replace '\s{2,}', ' '
+                            if ($forward.Length -gt 140) { $forward = $forward.Substring(0,137) + '...' }
+                        }
+                        Add-Log $forward
+                }
+            }
+        } catch {}
+        $Script:LastLogTime = $now
+    }
+}
+Write-Log "#" "INFO"
+Write-Log "-           CPUManager AI v40 - SESJA STARTUJE                      		      ?" "INFO"
+Write-Log "#" "INFO"
+Write-Log "Data: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" "INFO"
+Write-Log "Log: $Global:LogFile" "INFO"
+                               # Set-RyzenAdjMode "Turbo" (bledne wywolanie)
+$Global:LastLoggedMode = ""
+$Global:BoostCount = 0
+$Global:ModeChangeCount = 0
+$Global:LastStatsTime = Get-Date
+# WIN32 API - Already defined at the top of the script (lines 396-447)
+# Global variables for new features
+$Global:WebDashboardPort = 8080
+# TRAY ICON - Szybkie menu (bez Runspace)
+$Script:TrayBaseDir = "C:\CPUManager"
+$Script:TrayCommandFile = "$Script:TrayBaseDir\WidgetCommand.txt"
+$Script:TrayAIEnginesFile = "$Script:TrayBaseDir\AIEngines.json"
+$Script:TrayCPUConfigFile = "$Script:TrayBaseDir\CPUConfig.json"
+# Zapisz PID
+$pidFile = Join-Path $Script:TrayBaseDir 'CPUManager.pid'
+# Funkcje tray
+function Start-BackgroundWrite {
+    param(
+        [string]$Path,
+        [string]$Content,
+        [string]$Encoding = 'UTF8'
+    )
+    try {
+        $ps = New-TrackedPowerShell 'Start-BackgroundWrite'
+        $null = $ps.AddScript({ param($p, $c, $enc)
+            $tmp = "$p.tmp"
+            $bytes = [System.Text.Encoding]::GetEncoding($enc).GetBytes($c)
+            [System.IO.File]::WriteAllBytes($tmp, $bytes)
+            try { Move-Item -Path $tmp -Destination $p -Force } catch { Copy-Item -Path $tmp -Destination $p -Force; Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+        }).AddArgument($Path).AddArgument($Content).AddArgument($Encoding)
+        $null = $ps.BeginInvoke()
+    } catch { try { $Content | Set-Content $Path -Encoding $Encoding -Force } catch {} }
+}
+# Diagnostic helper: create PowerShell instance and log call stack to file
+function New-TrackedPowerShell {
+    param([string]$Tag = "unknown")
+    try {
+        $ps = [powershell]::Create()
+        try {
+            $preferredDirs = @(
+                "C:\CPUManager",
+                (Join-Path $env:LOCALAPPDATA 'CPUManager'),
+                (Join-Path $env:TEMP 'CPUManager')
+            )
+            $logDir = $null
+            foreach ($d in $preferredDirs) {
+                try {
+                    if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force -ErrorAction Stop | Out-Null }
+                    $logDir = $d
+                    break
+                } catch {}
+            }
+            if (-not $logDir) { $logDir = Join-Path $env:TEMP 'CPUManager'; New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+            $logFile = Join-Path $logDir 'ps_create_traces.log'
+            try {
+                $stack = (Get-PSCallStack -ErrorAction Stop | Out-String).Trim()
+            } catch {
+                $stack = [Environment]::StackTrace
+            }
+            $entry = "$(Get-Date -Format o) | Tag=$Tag`n$stack`n---`n"
+            Add-Content -Path $logFile -Value $entry -Encoding UTF8 -ErrorAction SilentlyContinue
+        } catch {}
+        return $ps
+    } catch {
+        return [powershell]::Create()
+    }
+}
+function Send-TrayCommand { 
+    param([string]$Cmd)
+    $path = if ($Script:TrayCommandFile) { $Script:TrayCommandFile } else { Join-Path $Script:ConfigDir 'WidgetCommand.txt' }
+    try {
+        Start-BackgroundWrite $path $Cmd 'UTF8'
+    } catch { try { $Cmd | Set-Content $path -Force -ErrorAction SilentlyContinue } catch { } }
+}
+# After defining helper, write PID atomically in background
+try { Start-BackgroundWrite $pidFile $PID 'UTF8' } catch { try { $PID | Out-File -FilePath $pidFile -Encoding UTF8 -Force } catch {} }
+# Bezpieczne zadanie zamkniecia aplikacji (ustawia flage zamiast rzucac wyjatek)
+function Request-Shutdown {
+    param([string]$Reason = "Requested")
+    try {
+        if (-not $Script:ShutdownRequested) {
+            $Script:ShutdownRequested = $true
+            Add-Log "Shutdown requested: $Reason" "INFO"
+            # Zapisz sygnal takze do pliku, zeby inne skrypty / widgety wiedzialy (format: { Timestamp, Reason })
+            try { $sig = @{ Timestamp = (Get-Date).ToString("o"); Reason = $Reason } | ConvertTo-Json -Depth 2; Start-BackgroundWrite $Script:ShutdownSignalPath $sig 'UTF8' } catch {}
+        }
+    } catch {}
+}
+function Load-TrayAIEngines {
+    if (Test-Path $Script:TrayAIEnginesFile) {
+        try { return Get-Content $Script:TrayAIEnginesFile -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+    }
+    return @{ QLearning=$true; Ensemble=$false; Prophet=$true; NeuralBrain=$false; AnomalyDetector=$true; SelfTuner=$true; ChainPredictor=$true; LoadPredictor=$true }
+}
+function Save-TrayAIEngines {
+    param($Engines)
+    try {
+        if ($Engines -is [hashtable]) { $json = $Engines | ConvertTo-Json } else { $ht = @{}; $Engines.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value }; $json = $ht | ConvertTo-Json }
+        Start-BackgroundWrite $Script:TrayAIEnginesFile $json 'UTF8'
+    } catch {}
+}
+function Set-TrayCPUType {
+    param([string]$Type)
+    $ct = @{CPUType=$Type} | ConvertTo-Json
+    Start-BackgroundWrite $Script:TrayCPUConfigFile $ct 'UTF8'
+    Send-TrayCommand "CPU_$Type"
+}
+function Stop-AllProcesses {
+    $Script:MainTray.Visible = $false
+    try {
+        $procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and ($_.CommandLine -match 'MiniWidget_v40.ps1|CPUManager_Configurator_v40.ps1|CPUManager_v40.ps1|CPUManagerAI') }
+        foreach ($p in $procs) {
+            try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    } catch {
+        try { Get-Process powershell,pwsh,powershell_ise -ErrorAction SilentlyContinue | Stop-Process -Force } catch {}
+    }
+}
+# Wykryj CPU (wstepnie - dokladne wykrycie pozniej w Detect-CPUType)
+$Script:TrayCPUType = "Unknown"
+if (Test-Path $Script:TrayCPUConfigFile) {
+    try { $cfg = Get-Content $Script:TrayCPUConfigFile -Raw | ConvertFrom-Json; if ($cfg.CPUType) { $Script:TrayCPUType = $cfg.CPUType } } catch {}
+}
+# Jesli nie ma zapisanego, sprobuj wykryc
+if ($Script:TrayCPUType -eq "Unknown") {
+    try {
+        $cpuName = (Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Name
+        if ($cpuName -match "AMD|Ryzen") { $Script:TrayCPUType = "AMD" }
+        elseif ($cpuName -match "Intel|Core") { $Script:TrayCPUType = "Intel" }
+        else { $Script:TrayCPUType = "AMD" }  # Fallback
+    } catch { $Script:TrayCPUType = "AMD" }
+}
+# === TRAY ICON ===
+$Script:MainTray = New-Object System.Windows.Forms.NotifyIcon
+$Script:MainTray.Text = "CPU Manager AI v40"
+$Script:MainTray.Visible = $true
+# Ikona "C" zielona
+$bmpTray = New-Object System.Drawing.Bitmap(16, 16)
+$gTray = [System.Drawing.Graphics]::FromImage($bmpTray)
+$gTray.SmoothingMode = 'AntiAlias'
+$gTray.Clear([System.Drawing.Color]::FromArgb(50, 180, 80))
+$fontTray = New-Object System.Drawing.Font("Arial", 10, [System.Drawing.FontStyle]::Bold)
+$gTray.DrawString("C", $fontTray, [System.Drawing.Brushes]::White, 1, -1)
+$fontTray.Dispose(); $gTray.Dispose()
+$Script:MainTray.Icon = [System.Drawing.Icon]::FromHandle($bmpTray.GetHicon())
+# Tray icon initialized
+# === MENU TRAY ===
+$Script:TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+# Status
+$trayStatus = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayStatus.Text = "CPU Manager AI v40"
+$trayStatus.Enabled = $false
+$Script:TrayMenu.Items.Add($trayStatus)
+$Script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+# === TRYBY PRACY ===
+$trayModes = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayModes.Text = "Tryb pracy"
+$traySilent = New-Object System.Windows.Forms.ToolStripMenuItem
+$traySilent.Text = "Silent (cichy)"
+$traySilent.Add_Click({ Send-TrayCommand "SILENT" })
+$trayModes.DropDownItems.Add($traySilent)
+$trayBalanced = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayBalanced.Text = "Balanced (zrownowazony)"
+$trayBalanced.Add_Click({ Send-TrayCommand "BALANCED" })
+$trayModes.DropDownItems.Add($trayBalanced)
+$trayTurbo = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayTurbo.Text = "Turbo (wydajnosc)"
+$trayTurbo.Add_Click({ Send-TrayCommand "TURBO" })
+$trayModes.DropDownItems.Add($trayTurbo)
+$trayModes.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$trayAI = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayAI.Text = "Toggle AI"
+$trayAI.Add_Click({ Send-TrayCommand "AI" })
+$trayModes.DropDownItems.Add($trayAI)
+$Script:TrayMenu.Items.Add($trayModes)
+$Script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+# === PROFILE ===
+$trayProfiles = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayProfiles.Text = "Profile"
+$trayGaming = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayGaming.Text = "GAMING (Turbo + Fast AI)"
+$trayGaming.Add_Click({ Send-TrayCommand "PROFILE_GAMING" })
+$trayProfiles.DropDownItems.Add($trayGaming)
+$trayWork = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayWork.Text = "WORK (Balanced + All AI)"
+$trayWork.Add_Click({ Send-TrayCommand "PROFILE_WORK" })
+$trayProfiles.DropDownItems.Add($trayWork)
+$trayMovie = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayMovie.Text = "MOVIE (Silent + Min AI)"
+$trayMovie.Add_Click({ Send-TrayCommand "PROFILE_MOVIE" })
+$trayProfiles.DropDownItems.Add($trayMovie)
+$Script:TrayMenu.Items.Add($trayProfiles)
+$Script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+# === PROCESOR ===
+$trayProc = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayProc.Text = "Procesor [$Script:TrayCPUType]"
+$trayAMD = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayAMD.Text = "AMD Ryzen"
+$trayAMD.Checked = ($Script:TrayCPUType -eq "AMD")
+$trayAMD.Add_Click({ Set-TrayCPUType "AMD"; $trayAMD.Checked = $true; $trayIntel.Checked = $false; $trayProc.Text = "Procesor [AMD]" })
+$trayProc.DropDownItems.Add($trayAMD)
+$trayIntel = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayIntel.Text = "Intel Core"
+$trayIntel.Checked = ($Script:TrayCPUType -eq "Intel")
+$trayIntel.Add_Click({ Set-TrayCPUType "Intel"; $trayIntel.Checked = $true; $trayAMD.Checked = $false; $trayProc.Text = "Procesor [Intel]" })
+$trayProc.DropDownItems.Add($trayIntel)
+$Script:TrayMenu.Items.Add($trayProc)
+$Script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+# === SILNIKI AI ===
+$trayEngines = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayEngines.Text = "Silniki AI"
+$trayEnableAll = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayEnableAll.Text = "Wlacz CORE"
+$trayEnableAll.Add_Click({
+    $all = @{ QLearning=$true; Ensemble=$false; Prophet=$true; NeuralBrain=$false; AnomalyDetector=$true; SelfTuner=$true; ChainPredictor=$true; LoadPredictor=$true }
+    Save-TrayAIEngines $all | Out-Null
+    $Script:TrayEngineItems['QLearning'].Checked = $true
+    $Script:TrayEngineItems['Ensemble'].Checked = $false
+    $Script:TrayEngineItems['Prophet'].Checked = $true
+    $Script:TrayEngineItems['NeuralBrain'].Checked = $false
+    $Script:TrayEngineItems['AnomalyDetector'].Checked = $true
+    $Script:TrayEngineItems['SelfTuner'].Checked = $true
+    $Script:TrayEngineItems['ChainPredictor'].Checked = $true
+    $Script:TrayEngineItems['LoadPredictor'].Checked = $true
+})
+$trayEngines.DropDownItems.Add($trayEnableAll)
+$trayDisableAll = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayDisableAll.Text = "Wylacz WSZYSTKIE"
+$trayDisableAll.Add_Click({
+    $all = @{ QLearning=$false; Ensemble=$false; Prophet=$false; NeuralBrain=$false; AnomalyDetector=$false; SelfTuner=$false; ChainPredictor=$false; LoadPredictor=$false }
+    Save-TrayAIEngines $all | Out-Null
+    foreach ($k in $Script:TrayEngineItems.Keys) { $Script:TrayEngineItems[$k].Checked = $false }
+})
+$trayEngines.DropDownItems.Add($trayDisableAll)
+$trayEngines.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$Script:TrayEngineItems = @{}
+$trayEngineList = @(
+    @{Key="QLearning"; Name="QLearning - uczenie"},
+    @{Key="Ensemble"; Name="Ensemble - glosowanie"},
+    @{Key="Prophet"; Name="Prophet - wzorce"},
+    @{Key="NeuralBrain"; Name="NeuralBrain - siec"},
+    @{Key="AnomalyDetector"; Name="AnomalyDetector - anomalie"},
+    @{Key="SelfTuner"; Name="SelfTuner - optymalizacja"},
+    @{Key="ChainPredictor"; Name="ChainPredictor - sekwencje"},
+    @{Key="LoadPredictor"; Name="LoadPredictor - obciazenie"}
+)
+$trayCurrentEngines = Load-TrayAIEngines
+foreach ($eng in $trayEngineList) {
+    $mi = New-Object System.Windows.Forms.ToolStripMenuItem
+    $mi.Text = $eng.Name
+    $mi.CheckOnClick = $true
+    $mi.Checked = if ($trayCurrentEngines.($eng.Key) -eq $true) { $true } else { $false }
+    $mi.Tag = $eng.Key
+    $mi.Add_CheckedChanged({
+        param($eventSender, $e)
+        $engs = Load-TrayAIEngines
+        $key = $eventSender.Tag
+        $ht = @{}
+        if ($engs -is [PSCustomObject]) { $engs.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value } }
+        else { $ht = $engs }
+        $ht[$key] = $eventSender.Checked
+        Save-TrayAIEngines $ht | Out-Null
+    })
+    $Script:TrayEngineItems[$eng.Key] = $mi
+    $trayEngines.DropDownItems.Add($mi)
+}
+$Script:TrayMenu.Items.Add($trayEngines)
+$Script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+# === URUCHOM KOMPONENTY ===
+$trayComponents = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayComponents.Text = "Components"
+$trayWidget = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayWidget.Text = "Desktop Widget"
+    $trayWidget.Add_Click({ Start-Process pwsh.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",(Join-Path $Script:ConfigDir 'Widget_v40.ps1') -WindowStyle Hidden | Out-Null })
+$trayComponents.DropDownItems.Add($trayWidget)
+$trayMiniWidget = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayMiniWidget.Text = "Mini Widget"
+    $trayMiniWidget.Add_Click({ Start-Process pwsh.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",(Join-Path $Script:ConfigDir 'MiniWidget_v40.ps1') -WindowStyle Hidden | Out-Null })
+$trayComponents.DropDownItems.Add($trayMiniWidget)
+$trayConfig = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayConfig.Text = "Configurator"
+    $trayConfig.Add_Click({ Start-Process pwsh.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",(Join-Path $Script:ConfigDir 'CPUManager_Configurator_v40.ps1') -WindowStyle Hidden | Out-Null })
+$trayComponents.DropDownItems.Add($trayConfig)
+$trayComponents.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$trayStartAll = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayStartAll.Text = "Start ALL"
+$trayStartAll.Add_Click({
+    Start-Process pwsh.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",(Join-Path $Script:ConfigDir 'Widget_v40.ps1') -WindowStyle Hidden | Out-Null
+    Start-Process pwsh.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",(Join-Path $Script:ConfigDir 'MiniWidget_v40.ps1') -WindowStyle Hidden | Out-Null
+    Start-Process pwsh.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",(Join-Path $Script:ConfigDir 'CPUManager_Configurator_v40.ps1') -WindowStyle Hidden | Out-Null
+})
+$trayComponents.DropDownItems.Add($trayStartAll)
+$Script:TrayMenu.Items.Add($trayComponents)
+# === INSTRUKCJA ===
+$trayHelp = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayHelp.Text = "Instrukcja"
+$trayHelp.Add_Click({ if (Test-Path "$Script:TrayBaseDir\INSTRUKCJA.txt") { Start-Process notepad.exe -ArgumentList "$Script:TrayBaseDir\INSTRUKCJA.txt" | Out-Null } })
+$Script:TrayMenu.Items.Add($trayHelp)
+$Script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+# === ZAMKNIJ CPUMANAGER ===
+$trayClose = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayClose.Text = "Zamknij CPUManager"
+$trayClose.Add_Click({ Send-TrayCommand "EXIT"; $Script:MainTray.Visible = $false })
+$Script:TrayMenu.Items.Add($trayClose)
+$Script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+# === KILL ALL ===
+$trayKillAll = New-Object System.Windows.Forms.ToolStripMenuItem
+$trayKillAll.Text = "KILL ALL"
+$trayKillAll.BackColor = [System.Drawing.Color]::FromArgb(120, 30, 30)
+$trayKillAll.ForeColor = [System.Drawing.Color]::Red
+$trayKillAll.Add_Click({ Stop-AllProcesses })
+$Script:TrayMenu.Items.Add($trayKillAll)
+$Script:MainTray.ContextMenuStrip = $Script:TrayMenu
+# KONFIGURACJA
+$Script:ConfigDir     = "C:\CPUManager"
+$Script:BrainPath     = Join-Path $Script:ConfigDir "BrainState.json"
+$Script:ProphetPath   = Join-Path $Script:ConfigDir "ProphetMemory.json"
+$Script:AnomalyPath   = Join-Path $Script:ConfigDir "AnomalyProfiles.json"
+$Script:PredictorPath = Join-Path $Script:ConfigDir "LoadPatterns.json"
+$Script:SettingsPath  = Join-Path $Script:ConfigDir "ProgramSettings.json"
+$Script:AILearningPath = Join-Path $Script:ConfigDir "AILearningState.json"
+$Script:ManualBoostDataPath = Join-Path $Script:ConfigDir "ManualBoostData.json"
+# === READ MANUAL BOOST DATA (user learned preferences) ===
+function Read-ManualBoostData {
+    if (-not (Test-Path $Script:ManualBoostDataPath)) { return $null }
+    try {
+        $json = [System.IO.File]::ReadAllText($Script:ManualBoostDataPath, [System.Text.Encoding]::UTF8)
+        return $json | ConvertFrom-Json
+    } catch { return $null }
+}
+# === GET LEARNED PREFERENCE FOR APP ===
+function Get-LearnedPreferenceForApp {
+    param([string]$AppName)
+    if ([string]::IsNullOrWhiteSpace($AppName)) { return $null }
+    $boostData = Read-ManualBoostData
+    if (-not $boostData -or -not $boostData.Apps) { return $null }
+    $appKey = $AppName.ToLower()
+    $appData = $null
+    if ($boostData.Apps -is [PSCustomObject]) {
+        $prop = $boostData.Apps.PSObject.Properties | Where-Object { $_.Name -eq $appKey } | Select-Object -First 1
+        if ($prop) { $appData = $prop.Value }
+    } elseif ($boostData.Apps -is [hashtable] -and $boostData.Apps.ContainsKey($appKey)) {
+        $appData = $boostData.Apps[$appKey]
+    }
+    if ($appData -and $appData.LearnedPreference -and $appData.ManualInterventions -ge 1) {
+        return @{
+            Mode = $appData.LearnedPreference
+            Interventions = $appData.ManualInterventions
+            LastSeen = $appData.LastSeen
+        }
+    }
+    return $null
+}
+# #
+# #
+function Test-IsSystemProcess {
+    param([string]$ProcessName)
+    if ([string]::IsNullOrWhiteSpace($ProcessName)) { return $true }
+    # Sprawdz glowna blackliste
+    if ($Script:BlacklistSet -and $Script:BlacklistSet.Contains($ProcessName)) { return $true }
+    # Sprawdz wzorce nazw procesow systemowych
+    $systemPatterns = @(
+        "^svc",           # svchost, svcs...
+        "^wmi",           # WMI procesy
+        "^dllhost",       # COM+ host
+        "^rundll",        # rundll32
+        "^msiexec",       # Instalator
+        "^setup",         # Instalatory
+        "^update",        # Updater procesy
+        "Helper$",        # Procesy pomocnicze
+        "Service$",       # Serwisy
+        "Worker$",        # Workery
+        "Agent$",         # Agenty
+        "Broker$",        # Brokery
+        "Host$"           # Hosty
+    )
+    foreach ($pattern in $systemPatterns) {
+        if ($ProcessName -match $pattern) { return $true }
+    }
+    return $false
+}
+# ═══════════════════════════════════════════════════════════════════════════════
+# HELPER: Save-JsonAtomic - Bezpieczny zapis JSON (atomic write pattern)
+# ═══════════════════════════════════════════════════════════════════════════════
+function Save-JsonAtomic {
+    <#
+    .SYNOPSIS
+    Zapisuje dane JSON w sposób atomowy (najpierw .tmp, potem Move-Item)
+    Zapobiega błędom "File is being used" gdy GUI czyta plik w tym samym momencie
+    .PARAMETER Path
+    Docelowa ścieżka pliku JSON
+    .PARAMETER Data
+    Dane do zapisania (hashtable/object)
+    .PARAMETER Depth
+    Głębokość konwersji JSON (domyślnie 5)
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path,
+        [Parameter(Mandatory=$true)]
+        $Data,
+        [int]$Depth = 5
+    )
+    try {
+        # 1. Konwertuj do JSON
+        $json = $Data | ConvertTo-Json -Depth $Depth -Compress
+        # 2. Zapisz do pliku tymczasowego
+        $tmpPath = "$Path.tmp"
+        [System.IO.File]::WriteAllText($tmpPath, $json, [System.Text.Encoding]::UTF8)
+        # 3. Atomowe przeniesienie (nadpisuje docelowy plik)
+        Move-Item -Path $tmpPath -Destination $Path -Force
+        return $true
+    } catch {
+        Write-Log "Save-JsonAtomic failed for $Path : $_" "ERROR"
+        return $false
+    }
+}
+# #
+# #
+function Show-BoostNotification {
+    param(
+        [string]$AppName,
+        [int]$CPUUsage,
+        [string]$RecommendedMode
+    )
+    if (-not $Script:UserApprovedBoosts.Contains($AppName)) {
+        $Script:UserApprovedBoosts.Add($AppName) | Out-Null
+        Add-Log " AI learned: $AppName -> $RecommendedMode (CPU: $CPUUsage%)"
+    }
+    return $true
+}
+function Get-DefaultConfigTemplate {
+    return @{
+        ForceMode = ""
+        PowerModes = @{
+            Silent   = @{ Min = 50;  Max = 85  }
+            Balanced = @{ Min = 70;  Max = 99  }
+            Turbo    = @{ Min = 85;  Max = 100 }
+            Extreme  = @{ Min = 100; Max = 100 }
+        }
+        PowerModesIntel = @{
+            Silent   = @{ Min = 50;  Max = 85  }
+            Balanced = @{ Min = 85;  Max = 99  }
+            Turbo    = @{ Min = 99;  Max = 100 }
+            Extreme  = @{ Min = 100; Max = 100 }
+        }
+        BoostSettings = @{
+            BoostDuration = $Script:BoostDuration
+            BoostCooldown = $Script:BoostCooldown
+            AppLaunchSensitivity = @{
+                CPUDelta = $Script:AppLaunchCPUDelta
+                CPUThreshold = $Script:AppLaunchCPUThreshold
+            }
+            AutoBoostEnabled = $Script:AutoBoostEnabled
+            AutoBoostSampleMs = $Script:AutoBoostSampleMs
+            EnableBoostForAllAppsOnStart = $Script:StartupBoostEnabled
+            StartupBoostDurationSeconds = $Script:StartupBoostDurationSeconds
+        }
+        AdaptiveTimer = @{
+            DefaultInterval = $Script:DefaultTimerInterval
+            MinInterval = $Script:MinTimerInterval
+            MaxInterval = $Script:MaxTimerInterval
+            GamingInterval = $Script:GamingTimerInterval
+        }
+        AIThresholds = @{
+            ForceSilentCPU = $Script:ForceSilentCPU
+            ForceSilentCPUInactive = $Script:ForceSilentCPUInactive
+            TurboThreshold = $Script:TurboThreshold
+            BalancedThreshold = $Script:BalancedThreshold
+        }
+        IOSettings = @{
+            ReadThreshold = $Script:IOReadThreshold
+            WriteThreshold = $Script:IOWriteThreshold
+            Sensitivity = $Script:IOSensitivity
+            CheckInterval = $Script:IOCheckInterval
+            TurboThreshold = $Script:IOTurboThreshold
+            OverrideForceMode = $Script:IOOverrideForceMode
+            ExtremeGraceSeconds = $Script:IOExtremeGraceSeconds
+        }
+        DatabaseSettings = @{
+            ProphetAutosaveSeconds = $Script:ProphetAutosaveSeconds
+        }
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # V40 FIX: Dodano brakujące sekcje Network, Privacy, Performance, Services
+        # Synchronizacja z CONFIGURATOR DefaultConfig
+        # ═══════════════════════════════════════════════════════════════════════════════
+        Network = @{
+            Enabled = $Script:NetworkOptimizerEnabled
+            DisableNagle = $Script:NetworkDisableNagle
+            OptimizeTCP = $Script:NetworkOptimizeTCP
+            OptimizeDNS = $Script:NetworkOptimizeDNS
+            MaximizeTCPBuffers = $Script:NetworkMaximizeTCPBuffers
+            EnableWindowScaling = $Script:NetworkEnableWindowScaling
+            EnableRSS = $Script:NetworkEnableRSS
+            EnableLSO = $Script:NetworkEnableLSO
+            DisableChimney = $Script:NetworkDisableChimney
+        }
+        Privacy = @{
+            Enabled = $Script:PrivacyShieldEnabled
+            BlockTelemetry = $Script:PrivacyBlockTelemetry
+            DisableCortana = $Script:PrivacyDisableCortana
+            DisableLocation = $Script:PrivacyDisableLocation
+            DisableAds = $Script:PrivacyDisableAds
+            DisableTimeline = $Script:PrivacyDisableTimeline
+        }
+        Performance = @{
+            OptimizeMemory = $Script:PerfOptimizeMemory
+            OptimizeFileSystem = $Script:PerfOptimizeFileSystem
+            OptimizeVisualEffects = $Script:PerfOptimizeVisualEffects
+            OptimizeStartup = $Script:PerfOptimizeStartup
+            OptimizeNetwork = $Script:PerfOptimizeNetwork
+        }
+        Services = @{
+            DisableFax = $Script:SvcDisableFax
+            DisableRemoteAccess = $Script:SvcDisableRemoteAccess
+            DisableTablet = $Script:SvcDisableTablet
+            DisableSearch = $Script:SvcDisableSearch
+        }
+    }
+}
+function Initialize-ConfigJson {
+    if (Test-Path $Script:ConfigJsonPath) { return $true }
+    try {
+        # CRITICAL FIX: Sprawdź czy ConfigDir to Junction (przekierowanie na RAM dysk)
+        $targetPath = $Script:ConfigDir
+        try {
+            $item = Get-Item -Path $Script:ConfigDir -Force -ErrorAction SilentlyContinue
+            if ($item -and $item.LinkType -eq 'Junction') {
+                $targetPath = $item.Target
+                Write-Host "  [CONFIG] Wykryto przekierowanie: $Script:ConfigDir -> $targetPath" -ForegroundColor Cyan
+                
+                # Upewnij się że folder docelowy istnieje na RAM dysku
+                if (-not (Test-Path $targetPath)) {
+                    Write-Host "  [CONFIG] Tworzę folder na RAM dysku: $targetPath" -ForegroundColor Yellow
+                    New-Item -Path $targetPath -ItemType Directory -Force | Out-Null
+                    Start-Sleep -Milliseconds 200
+                }
+            }
+        } catch {
+            # Ignoruj błąd sprawdzania Junction
+        }
+        
+        # Upewnij się że folder istnieje (dla RAM dysków)
+        if (-not (Test-Path $Script:ConfigDir)) {
+            Write-Host "  [CONFIG] Tworzę folder: $Script:ConfigDir" -ForegroundColor Yellow
+            New-Item -Path $Script:ConfigDir -ItemType Directory -Force | Out-Null
+            Start-Sleep -Milliseconds 100
+        }
+        
+        # Sprawdź czy folder jest dostępny (ważne dla RAM dysków)
+        if (-not (Test-Path $Script:ConfigDir)) {
+            Write-Host "  [CONFIG] BŁĄD: Folder $Script:ConfigDir nie jest dostępny!" -ForegroundColor Red
+            Write-Host "  [CONFIG] Sprawdź czy RAM dysk jest zamontowany i czy przekierowanie działa" -ForegroundColor Yellow
+            return $false
+        }
+        
+        $template = Get-DefaultConfigTemplate
+        if (-not $template) { return $false }
+        $json = $template | ConvertTo-Json -Depth 8
+        
+        # Retry mechanizm dla RAM dysków
+        $retries = 0
+        $success = $false
+        while ((-not $success) -and ($retries -lt 3)) {
+            try {
+                Set-Content -Path $Script:ConfigJsonPath -Value $json -Encoding UTF8 -Force -ErrorAction Stop
+                $success = $true
+                Write-Host "  [CONFIG] Utworzono domyslny config.json" -ForegroundColor Green
+            } catch {
+                $retries++
+                Write-Host "  [CONFIG] Próba $retries/3 zapisu config.json: $_" -ForegroundColor Yellow
+                if ($retries -lt 3) {
+                    Start-Sleep -Milliseconds 300
+                }
+            }
+        }
+        
+        if (-not $success) {
+            Write-Host "  [CONFIG] BŁĄD: Nie można zapisać config.json po 3 próbach!" -ForegroundColor Red
+            Write-Host "  [CONFIG] Docelowa ścieżka: $Script:ConfigJsonPath" -ForegroundColor Yellow
+            return $false
+        }
+        
+        $Script:LastConfigModified = (Get-Date)
+        return $true
+    } catch {
+        Write-Host "  [CONFIG] Blad tworzenia config.json: $_" -ForegroundColor Red
+        return $false
+    }
+}
+# HOT-RELOAD CONFIG - Ladowanie config.json na biezaco
+$Script:ConfigJsonPath = Join-Path $Script:ConfigDir "config.json"
+$Script:ReloadSignalPath = Join-Path $Script:ConfigDir "reload.signal"
+$Script:ShutdownSignalPath = Join-Path $Script:ConfigDir "shutdown.signal"
+$Script:LastConfigModified = [DateTime]::MinValue
+$Script:LastReloadSignalTime = [DateTime]::Now  # FIX v40.2: Uzyj Now zamiast MinValue zeby po restarcie nie przetwarzac starych sygnalow
+$Script:ConfigCheckInterval = 5  # Sprawdzaj co 5 sekund
+$Script:LastConfigCheck = [DateTime]::Now
+# AI ENGINES CONFIG - Wlaczone/wylaczone silniki AI
+$Script:AIEnginesPath = Join-Path $Script:ConfigDir "AIEngines.json"
+$Script:LastAIEnginesCheck = [DateTime]::Now
+$Script:AIEnginesCheckInterval = 10  #  PERFORMANCE: Zmieniono z 3s na 10s (wystarczajaco czesto)
+$Script:DefaultAIEngines = @{
+    # CORE - zawsze ON (zalecane)
+    QLearning = $true
+    Prophet = $true
+    AnomalyDetector = $true
+    SelfTuner = $true
+    # ADVANCED - opcjonalne
+    ChainPredictor = $true
+    LoadPredictor = $true
+    Bandit = $true           # v42.6: Dodano
+    Genetic = $true          # v42.6: Dodano
+    Energy = $true           # v42.6: Dodano
+    # HEAVY - domyslnie OFF (wysokie zuzycie CPU)
+    Ensemble = $false
+    NeuralBrain = $false
+}
+$Script:AIEngines = $Script:DefaultAIEngines.Clone()
+function Load-AIEnginesConfig {
+    <#
+    .SYNOPSIS
+    Laduje konfiguracje silnikow AI z pliku
+    #>
+    if (Test-Path $Script:AIEnginesPath) {
+        try {
+            $json = Get-Content $Script:AIEnginesPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $Script:AIEngines = @{
+                QLearning = if ($null -ne $json.QLearning) { $json.QLearning } else { $true }
+                Ensemble = if ($null -ne $json.Ensemble) { $json.Ensemble } else { $false }
+                Prophet = if ($null -ne $json.Prophet) { $json.Prophet } else { $true }
+                NeuralBrain = if ($null -ne $json.NeuralBrain) { $json.NeuralBrain } else { $false }
+                AnomalyDetector = if ($null -ne $json.AnomalyDetector) { $json.AnomalyDetector } else { $true }
+                SelfTuner = if ($null -ne $json.SelfTuner) { $json.SelfTuner } else { $true }
+                ChainPredictor = if ($null -ne $json.ChainPredictor) { $json.ChainPredictor } else { $true }
+                LoadPredictor = if ($null -ne $json.LoadPredictor) { $json.LoadPredictor } else { $true }
+                Bandit = if ($null -ne $json.Bandit) { $json.Bandit } else { $true }           # v42.6
+                Genetic = if ($null -ne $json.Genetic) { $json.Genetic } else { $true }       # v42.6
+                Energy = if ($null -ne $json.Energy) { $json.Energy } else { $true }          # v42.6
+            }
+            $Script:CurrentAIEngines = $Script:AIEngines
+            return $true
+        } catch {
+            return $false
+        }
+    } else {
+        # Utworz domyslny plik
+        Ensure-FileExists $Script:AIEnginesPath
+        try {
+            $Script:DefaultAIEngines | ConvertTo-Json | Set-Content $Script:AIEnginesPath -Force
+        } catch {}
+        return $false
+    }
+}
+function Acquire-FileLock {
+    param([string]$FilePath, [int]$TimeoutMs = 2000)
+    $lockPath = "$FilePath.lock"
+    $start = Get-Date
+    while (Test-Path $lockPath) {
+        Start-Sleep -Milliseconds 20
+        if (((Get-Date) - $start).TotalMilliseconds -gt $TimeoutMs) {
+            throw "Timeout waiting for file lock: $FilePath"
+        }
+    }
+    New-Item -ItemType File -Path $lockPath -Force | Out-Null
+}
+function Release-FileLock {
+    param([string]$FilePath)
+    $lockPath = "$FilePath.lock"
+    if (Test-Path $lockPath) { Remove-Item $lockPath -Force }
+}
+function Save-AIEnginesConfig {
+    try {
+        Acquire-FileLock $Script:AIEnginesPath
+        $Script:AIEngines | ConvertTo-Json | Set-Content $Script:AIEnginesPath -Force
+        Release-FileLock $Script:AIEnginesPath
+        return $true
+    } catch {
+        try { Release-FileLock $Script:AIEnginesPath } catch {}
+        return $false
+    }
+}
+function Test-AIEngine {
+    <#
+    .SYNOPSIS
+    Sprawdza czy dany silnik AI jest wlaczony
+    #>
+    param([string]$EngineName)
+    if ($Script:AIEngines.ContainsKey($EngineName)) {
+        return $Script:AIEngines[$EngineName]
+    }
+    return $true  # Domyslnie wlaczony jesli nie znaleziono
+}
+# Zaladuj przy starcie
+Load-AIEnginesConfig | Out-Null
+# Alias dla kompatybilnosci z nowa logika decyzyjna
+$Script:CurrentAIEngines = $Script:AIEngines
+$Script:RyzenAdjPath = "C:\ryzenadj-win64\ryzenadj.exe"
+$Script:RyzenAdjAvailable = $false
+$Script:LastTDPMode = ""
+$Script:CurrentTDP = @{ STAPM = 0; Fast = 0; Slow = 0; Tctl = 0 }
+# Profile TDP dla roznych trybow (w Watach) - domyslne wartosci
+$Script:TDPProfiles = @{
+    Silent = @{ STAPM = 12; Fast = 28; Slow = 15; Tctl = 75 }
+    Balanced = @{ STAPM = 15; Fast = 28; Slow = 22; Tctl = 80 }
+    Turbo = @{ STAPM = 25; Fast = 35; Slow = 30; Tctl = 88 }
+    Extreme = @{ STAPM = 28; Fast = 40; Slow = 35; Tctl = 92 }
+    Boost = @{ STAPM = 30; Fast = 40; Slow = 32; Tctl = 85 }
+    Performance = @{ STAPM = 35; Fast = 45; Slow = 38; Tctl = 90 }
+}
+# Inicjalizacja i test RyzenADJ
+function Initialize-RyzenAdj {
+    # Sprawdz rozne lokalizacje
+    $paths = @(
+        "C:\ryzenadj-win64\ryzenadj.exe",
+        "C:\CPUManager\ryzenadj\ryzenadj.exe",
+        "$env:ProgramFiles\ryzenadj\ryzenadj.exe",
+        "$env:USERPROFILE\ryzenadj\ryzenadj.exe"
+    )
+    $found = Find-FirstExistingPath $paths
+    if ($found) {
+        try {
+            $result = & $found --info 2>&1
+            if ($result -match "STAPM|PPT|Tctl") {
+                $Script:RyzenAdjPath = $found
+                $Script:RyzenAdjAvailable = $true
+                Write-Log "RyzenADJ znaleziony: $found" "SUCCESS"
+                return $true
+            }
+        } catch { }
+    }
+    Write-Log "RyzenADJ niedostepny - uzywam tylko powercfg" "WARN"
+    $Script:RyzenAdjAvailable = $false
+    return $false
+}
+# Pobierz aktualne wartosci TDP
+function Get-RyzenAdjInfo {
+    if (-not $Script:RyzenAdjAvailable) { return $null }
+    try {
+        $output = & $Script:RyzenAdjPath --info 2>&1
+        $info = @{ STAPM = 0; Fast = 0; Slow = 0; Tctl = 0; TctlValue = 0 }
+        foreach ($line in $output) {
+            if ($line -match "STAPM LIMIT\s*\|\s*(\d+)") { $info.STAPM = [int]$Matches[1] / 1000 }
+            if ($line -match "PPT LIMIT FAST\s*\|\s*(\d+)") { $info.Fast = [int]$Matches[1] / 1000 }
+            if ($line -match "PPT LIMIT SLOW\s*\|\s*(\d+)") { $info.Slow = [int]$Matches[1] / 1000 }
+            if ($line -match "THM LIMIT\s*\|\s*(\d+)") { $info.Tctl = [int]$Matches[1] }
+            if ($line -match "THM VALUE\s*\|\s*(\d+\.?\d*)") { $info.TctlValue = [double]$Matches[1] }
+        }
+        return $info
+    } catch { return $null }
+}
+# Start async refresh of RyzenAdj info (non-blocking)
+function Start-RyzenAdjInfoRefresh {
+    if (-not $Script:RyzenAdjAvailable) { return $false }
+    try {
+        $state = @{ }
+        $cb = [System.Threading.WaitCallback]::new({ param($st)
+            try {
+                $info = Get-RyzenAdjInfo
+                if ($info) {
+                    if ([System.Threading.Monitor]::TryEnter($Script:RyzenAdjLock, 500)) {
+                        try { $Script:RyzenAdjCache.Info = $info; $Script:RyzenAdjCache.InfoTime = Get-Date } finally { [System.Threading.Monitor]::Exit($Script:RyzenAdjLock) }
+                    }
+                }
+            } catch { }
+        })
+        [System.Threading.ThreadPool]::QueueUserWorkItem($cb, $state) | Out-Null
+        return $true
+    } catch { return $false }
+}
+# Start async apply of RyzenAdj TDP (non-blocking). Stores last result in $Script:RyzenAdjCache.LastApplyResult
+function Start-RyzenAdjSetTDP {
+    param([int]$STAPM, [int]$Fast, [int]$Slow, [int]$Tctl = 85)
+    if (-not $Script:RyzenAdjAvailable) { return $false }
+    try {
+        $jobId = [guid]::NewGuid().ToString()
+        $state = @{ STAPM = $STAPM; Fast = $Fast; Slow = $Slow; Tctl = $Tctl; JobId = $jobId }
+        $cb = [System.Threading.WaitCallback]::new({ param($st)
+            try {
+                $s = $st.STAPM; $f = $st.Fast; $sl = $st.Slow; $t = $st.Tctl; $jid = $st.JobId
+                $res = Set-RyzenAdjTDP -STAPM $s -Fast $f -Slow $sl -Tctl $t
+                if ([System.Threading.Monitor]::TryEnter($Script:RyzenAdjLock, 1000)) {
+                    try {
+                        $Script:RyzenAdjCache.LastApplyResult = $res
+                        $Script:RyzenAdjCache.LastApplyTime = Get-Date
+                        $Script:RyzenAdjCache.LastJob = $jid
+                    } finally { [System.Threading.Monitor]::Exit($Script:RyzenAdjLock) }
+                }
+                try { Add-Log "RyzenAdj async applied: $($res) (job=$jid)" } catch { }
+            } catch {
+                try { Add-Log "RyzenAdj async exception: $_" } catch { }
+            }
+        })
+        [System.Threading.ThreadPool]::QueueUserWorkItem($cb, $state) | Out-Null
+        return @{ Started = $true; JobId = $jobId }
+    } catch { return @{ Started = $false; Error = $_ } }
+}
+# Return cached RyzenAdj info (if any)
+function Get-RyzenAdjCachedInfo {
+    if ([System.Threading.Monitor]::TryEnter($Script:RyzenAdjLock, 200)) {
+        try { return $Script:RyzenAdjCache.Info } finally { [System.Threading.Monitor]::Exit($Script:RyzenAdjLock) }
+    }
+    return $null
+}
+# Ustaw TDP przez RyzenADJ
+function Set-RyzenAdjTDP {
+    param([int]$STAPM, [int]$Fast, [int]$Slow, [int]$Tctl = 85)
+    if (-not $Script:RyzenAdjAvailable) { return $false }
+    try {
+        $myArgs = @(
+            "--stapm-limit=$($STAPM * 1000)",
+            "--fast-limit=$($Fast * 1000)",
+            "--slow-limit=$($Slow * 1000)",
+            "--tctl-temp=$Tctl"
+        )
+        $output = & $Script:RyzenAdjPath $myArgs 2>&1
+        $exit = $LASTEXITCODE
+        $cmdLine = "$($Script:RyzenAdjPath) $($myArgs -join ' ')"
+        Write-Log "RyzenADJ cmd: $cmdLine" "TDP"
+        if ($output) { Write-Log "RyzenADJ output: $([string]::Join('`n', $output))" "TDP" }
+        Write-Log "RyzenADJ exit code: $exit" "TDP"
+        if ($exit -eq 0) {
+            $Script:CurrentTDP = @{ STAPM = $STAPM; Fast = $Fast; Slow = $Slow; Tctl = $Tctl }
+            return $true
+        } else {
+            return $false
+        }
+    } catch {
+        Write-Log "RyzenADJ exception: $_" "ERROR"
+        return $false
+    }
+}
+# Zastosuj profil TDP na podstawie trybu
+function Set-RyzenAdjMode {
+    param([string]$Mode)
+    if (-not $Script:RyzenAdjAvailable) { return $false }
+    if ($Script:LastTDPMode -eq $Mode) { return $true }
+    $myProfile = $Script:TDPProfiles[$Mode]
+    if (-not $myProfile) {
+           # Fallback do Balanced
+           # Uzyj domyslnego profilu Balanced
+        $myProfile = $Script:TDPProfiles["Balanced"]
+    }
+    $res = Start-RyzenAdjSetTDP -STAPM $myProfile.STAPM -Fast $myProfile.Fast -Slow $myProfile.Slow -Tctl $myProfile.Tctl
+    if ($res -and $res.Started) {
+        $Script:LastTDPMode = $Mode
+        Write-Log "RyzenADJ: Scheduled $Mode (STAPM=$($myProfile.STAPM)W Fast=$($myProfile.Fast)W Tctl=$($myProfile.Tctl)C)" "TDP"
+        Add-Log "TDP: scheduled $Mode $($myProfile.STAPM)W"
+        return $true
+    }
+    return $false
+}
+# AI Learning - zapisuje efektywnosc profili TDP
+$Script:TDPLearningPath = "C:\CPUManager\TDPLearning.json"
+$Script:TDPLearning = @{}
+function Update-TDPLearning {
+    param([string]$Mode, [double]$CPU, [double]$Temp, [double]$Score)
+    if (-not $Script:RyzenAdjAvailable) { return }
+    if (-not $Script:TDPLearning[$Mode]) {
+        $Script:TDPLearning[$Mode] = @{ Samples = 0; AvgCPU = 0; AvgTemp = 0; AvgScore = 0; TotalTime = 0 }
+    }
+    $s = $Script:TDPLearning[$Mode]
+    $s.Samples++
+    $s.TotalTime++
+    $s.AvgCPU = (($s.AvgCPU * ($s.Samples - 1)) + $CPU) / $s.Samples
+    $s.AvgTemp = (($s.AvgTemp * ($s.Samples - 1)) + $Temp) / $s.Samples
+    $s.AvgScore = (($s.AvgScore * ($s.Samples - 1)) + $Score) / $s.Samples
+    # Zapisz co 100 probek
+    if ($s.Samples % 100 -eq 0) {
+        try { $Script:TDPLearning | ConvertTo-Json -Depth 3 | Set-Content $Script:TDPLearningPath -Force } catch {}
+    }
+}
+# Ladowanie wczesniej nauczonych danych TDP
+function Load-TDPLearning {
+    if (Test-Path $Script:TDPLearningPath) {
+        try {
+            $json = Get-Content $Script:TDPLearningPath -Raw | ConvertFrom-Json
+            $json.PSObject.Properties | ForEach-Object {
+                $Script:TDPLearning[$_.Name] = @{
+                    Samples = $_.Value.Samples
+                    AvgCPU = $_.Value.AvgCPU
+                    AvgTemp = $_.Value.AvgTemp
+                    AvgScore = $_.Value.AvgScore
+                    TotalTime = $_.Value.TotalTime
+                }
+            }
+            Write-Log "Zaladowano dane TDP Learning ($($Script:TDPLearning.Count) profili)" "INFO"
+        } catch {}
+    }
+}
+# Inteligentny wybor profilu TDP na podstawie AI learning
+function Get-OptimalTDPProfile {
+    param([double]$CPU, [double]$Temp, [string]$Context, [bool]$IsGaming = $false)
+    # Bezpieczenstwo termiczne - zawsze priorytet
+    if ($Temp -gt 88) { return "Silent" }
+    if ($Temp -gt 82) { return "Balanced" }
+    # Gaming - maksymalna wydajnosc
+    if ($IsGaming -or $Context -eq "Gaming") {
+        if ($Temp -lt 75) { return "Extreme" }
+        return "Turbo"
+    }
+    # Heavy work
+    if ($Context -eq "Heavy" -or $CPU -gt $Script:TurboThreshold) {
+        if ($Temp -lt 78) { return "Turbo" }
+        return "Balanced"
+    }
+    # Normalne uzycie - FAWORYZUJ SILENT przy niskim CPU
+    if ($CPU -lt $Script:ForceSilentCPU) { return "Silent" }
+    # ZMIANA: Rozszerzony zakres dla Silent (bylo < BalancedThreshold -> Balanced)
+    if ($CPU -lt ($Script:BalancedThreshold - 10)) { return "Silent" }  # CPU < 28% -> Silent
+    if ($CPU -lt $Script:BalancedThreshold) { return "Balanced" }        # CPU 28-38% -> Balanced
+    return "Turbo"
+}
+# WYKRYWANIE PROCESORA AMD/INTEL
+$Script:CPUType = "Unknown"
+$Script:CPUName = "Unknown"
+$Script:CPUConfigPath = Join-Path $Script:ConfigDir "CPUConfig.json"
+function Detect-CPUType {
+    try {
+        $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        $Script:CPUName = $cpu.Name
+        if ($cpu.Name -match "AMD|Ryzen|EPYC|Athlon|Threadripper") {
+            $Script:CPUType = "AMD"
+        } elseif ($cpu.Name -match "Intel|Core|Xeon|Pentium|Celeron") {
+            $Script:CPUType = "Intel"
+        } else {
+            $Script:CPUType = "Unknown"
+        }
+    } catch {
+        $Script:CPUType = "Unknown"
+    }
+    # Sprawdz zapisana konfiguracje (reczny wybor nadpisuje auto)
+    if (Test-Path $Script:CPUConfigPath) {
+        try {
+            $cfg = Get-Content $Script:CPUConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
+            if ($cfg.CPUType) { $Script:CPUType = $cfg.CPUType }
+        } catch {}
+    }
+    return $Script:CPUType
+}
+function Set-CPUTypeManual {
+    param([string]$Type)
+    $Script:CPUType = $Type
+    try {
+        @{ CPUType = $Type; CPUName = $Script:CPUName } | ConvertTo-Json | Set-Content $Script:CPUConfigPath -Force
+    } catch {}
+}
+# Wykryj przy starcie
+Detect-CPUType | Out-Null
+# - V40: Wykryj GPU (iGPU/dGPU)
+Detect-GPU | Out-Null
+
+# DEBUG: Log GPU detection results
+if ($Script:DebugLogEnabled) {
+    if ($Script:HasiGPU -and $Script:HasdGPU) {
+        Write-DebugLog "GPU DETECTION: Hybrid Graphics detected - iGPU: $($Script:iGPUName) | dGPU: $($Script:dGPUName) ($($Script:dGPUVendor))" "INFO"
+    } elseif ($Script:HasdGPU) {
+        Write-DebugLog "GPU DETECTION: Dedicated GPU only - $($Script:dGPUName) ($($Script:dGPUVendor))" "INFO"
+    } elseif ($Script:HasiGPU) {
+        Write-DebugLog "GPU DETECTION: Integrated GPU only - $($Script:iGPUName)" "INFO"
+    } else {
+        Write-DebugLog "GPU DETECTION: No GPU detected or detection failed" "INFO"
+    }
+}
+
+# Synchronizuj TrayCPUType z wykrytym CPUType
+$Script:TrayCPUType = $Script:CPUType
+if ($Script:CPUType -eq "AMD") {
+    Write-Host "  [CPU] Wykryto AMD: $($Script:CPUName)" -ForegroundColor Green
+    Initialize-RyzenAdj | Out-Null
+    Load-TDPLearning | Out-Null
+    Load-TDPConfig -Path $Script:TDPConfigPath | Out-Null
+    if ($Script:RyzenAdjAvailable) {
+        Start-RyzenAdjInfoRefresh | Out-Null
+        $info = Get-RyzenAdjCachedInfo
+        if ($info) {
+            Write-Log "RyzenADJ: STAPM=$($info.STAPM)W Fast=$($info.Fast)W Slow=$($info.Slow)W Tctl=$($info.Tctl)C" "INFO"
+        }
+    }
+} elseif ($Script:CPUType -eq "Intel") {
+    Write-Host "  [CPU] Wykryto Intel: $($Script:CPUName)" -ForegroundColor Cyan
+    Write-Host "  [CPU] Intel Speed Shift + EPP enabled" -ForegroundColor Cyan
+    Write-Log "Intel CPU detected: $($Script:CPUName) - using Speed Shift + EPP" "INFO"
+} else {
+    Write-Host "  [CPU] Nieznany CPU: $($Script:CPUName) - uzywam ustawien AMD" -ForegroundColor Yellow
+    $Script:CPUType = "AMD"  # Fallback do AMD
+}
+function Load-ExternalConfig {
+    <#
+    .SYNOPSIS
+    Laduje config.json i aktualizuje ustawienia na biezaco
+    #>
+    param([switch]$Silent)
+    if (-not (Test-Path $Script:ConfigJsonPath)) {
+        if (-not (Initialize-ConfigJson)) {
+            if (-not $Silent) { Write-Host "  [CONFIG] Brak config.json - uzywam domyslnych" -ForegroundColor Yellow }
+            return $false
+        }
+    }
+    try {
+        $configJson = Get-Content $Script:ConfigJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        # ForceMode - wymusza tryb z konfiguratora (TYLKO prawidlowe wartosci!)
+        $validModes = @("Silent", "Silent Lock", "Balanced Lock", "Balanced", "Turbo", "Extreme")
+        if ($configJson.PSObject.Properties.Name -contains "ForceMode" -and $configJson.ForceMode -and $validModes -contains $configJson.ForceMode) {
+            $Script:ForceModeFromConfig = $configJson.ForceMode
+            if ($configJson.ForceMode -eq "Silent Lock") {
+                $Script:SilentLockMode = $true
+                $Script:BalancedLockMode = $false
+                $Script:SilentModeActive = $false
+                $Global:AI_Active = $false
+            } elseif ($configJson.ForceMode -eq "Balanced Lock") {
+                $Script:BalancedLockMode = $true
+                $Script:SilentLockMode = $false
+                $Script:SilentModeActive = $false
+                $Global:AI_Active = $false
+            } elseif ($configJson.ForceMode -eq "Silent") {
+                $Script:SilentModeActive = $true
+                $Script:SilentLockMode = $false
+                $Script:BalancedLockMode = $false
+            } else {
+                $Script:SilentModeActive = $false
+                $Script:SilentLockMode = $false
+                $Script:BalancedLockMode = $false
+            }
+        } else {
+            $Script:ForceModeFromConfig = ""
+            $Script:BalancedLockMode = $false
+        }
+        # v43.14: AUTO-MIGRACJA starych config.json
+        # Jeśli brak PowerModes → stary format → dodaj defaults i zapisz
+        if (-not $configJson.PowerModes) {
+            Add-Log "CONFIG MIGRATION: Old config.json detected - adding PowerModes defaults"
+            $configJson | Add-Member -NotePropertyName "PowerModes" -NotePropertyValue @{
+                Silent = @{ Min = 50; Max = 85 }; Balanced = @{ Min = 70; Max = 99 }
+                Turbo = @{ Min = 85; Max = 100 }; Extreme = @{ Min = 100; Max = 100 }
+            } -Force
+            $configJson | Add-Member -NotePropertyName "PowerModesIntel" -NotePropertyValue @{
+                Silent = @{ Min = 50; Max = 85 }; Balanced = @{ Min = 85; Max = 99 }
+                Turbo = @{ Min = 99; Max = 100 }; Extreme = @{ Min = 100; Max = 100 }
+            } -Force
+            if (-not $configJson.PSObject.Properties.Name.Contains("AIThresholds")) {
+                $configJson | Add-Member -NotePropertyName "AIThresholds" -NotePropertyValue @{
+                    TurboThreshold = 72; BalancedThreshold = 35
+                    ForceSilentCPU = 15; ForceSilentCPUInactive = 20
+                } -Force
+            }
+            if (-not $configJson.PSObject.Properties.Name.Contains("CPUAgressiveness")) {
+                $configJson | Add-Member -NotePropertyName "CPUAgressiveness" -NotePropertyValue 50 -Force
+                $configJson | Add-Member -NotePropertyName "MemoryAgressiveness" -NotePropertyValue 30 -Force
+                $configJson | Add-Member -NotePropertyName "IOPriority" -NotePropertyValue 3 -Force
+            }
+            if (-not $configJson.PSObject.Properties.Name.Contains("BoostSettings")) {
+                $configJson | Add-Member -NotePropertyName "BoostSettings" -NotePropertyValue @{
+                    BoostDuration = 8; BoostCooldown = 30; AppLaunchSensitivity = "Medium"
+                } -Force
+            }
+            # Zapisz migrowany config
+            try {
+                $configJson | ConvertTo-Json -Depth 5 | Set-Content $Script:ConfigJsonPath -Encoding UTF8 -Force
+                Add-Log "CONFIG MIGRATION: Saved migrated config.json with PowerModes"
+            } catch { Add-Log "CONFIG MIGRATION: Failed to save - $($_.Exception.Message)" }
+        }
+        # PowerModes -> RyzenStates (AMD) - SYNC v39: rozdzielone AMD/Intel
+        if ($configJson.PowerModes) {
+            if ($configJson.PowerModes.Silent) {
+                $Script:RyzenStates.Silent.Min = [int]$configJson.PowerModes.Silent.Min
+                $Script:RyzenStates.Silent.Max = [int]$configJson.PowerModes.Silent.Max
+            }
+            if ($configJson.PowerModes.Balanced) {
+                $Script:RyzenStates.Balanced.Min = [int]$configJson.PowerModes.Balanced.Min
+                $Script:RyzenStates.Balanced.Max = [int]$configJson.PowerModes.Balanced.Max
+            }
+            if ($configJson.PowerModes.Turbo) {
+                $Script:RyzenStates.Turbo.Min = [int]$configJson.PowerModes.Turbo.Min
+                $Script:RyzenStates.Turbo.Max = [int]$configJson.PowerModes.Turbo.Max
+            }
+            if ($configJson.PowerModes.Extreme) {
+                $Script:RyzenStates.Extreme.Min = [int]$configJson.PowerModes.Extreme.Min
+                $Script:RyzenStates.Extreme.Max = [int]$configJson.PowerModes.Extreme.Max
+            }
+        }
+        #  SYNC v39: PowerModesIntel -> IntelStates (osobne wartosci dla Intel)
+        if ($configJson.PowerModesIntel) {
+            # Uzyj osobnych wartosci Intel jesli sa zdefiniowane
+            if ($configJson.PowerModesIntel.Silent) {
+                $Script:IntelStates.Silent.Min = [int]$configJson.PowerModesIntel.Silent.Min
+                $Script:IntelStates.Silent.Max = [int]$configJson.PowerModesIntel.Silent.Max
+            }
+            if ($configJson.PowerModesIntel.Balanced) {
+                $Script:IntelStates.Balanced.Min = [int]$configJson.PowerModesIntel.Balanced.Min
+                $Script:IntelStates.Balanced.Max = [int]$configJson.PowerModesIntel.Balanced.Max
+            }
+            if ($configJson.PowerModesIntel.Turbo) {
+                $Script:IntelStates.Turbo.Min = [int]$configJson.PowerModesIntel.Turbo.Min
+                $Script:IntelStates.Turbo.Max = [int]$configJson.PowerModesIntel.Turbo.Max
+            }
+            if ($configJson.PowerModesIntel.Extreme) {
+                $Script:IntelStates.Extreme.Min = [int]$configJson.PowerModesIntel.Extreme.Min
+                $Script:IntelStates.Extreme.Max = [int]$configJson.PowerModesIntel.Extreme.Max
+            }
+            Write-Log "CONFIG LOADED: PowerModesIntel applied (separate Intel values)" "CONFIG"
+        } elseif ($configJson.PowerModes) {
+            # Backward compatibility: jesli nie ma PowerModesIntel, uzyj PowerModes dla Intel
+            if ($configJson.PowerModes.Silent) {
+                $Script:IntelStates.Silent.Min = [int]$configJson.PowerModes.Silent.Min
+                $Script:IntelStates.Silent.Max = [int]$configJson.PowerModes.Silent.Max
+            }
+            if ($configJson.PowerModes.Balanced) {
+                $Script:IntelStates.Balanced.Min = [int]$configJson.PowerModes.Balanced.Min
+                $Script:IntelStates.Balanced.Max = [int]$configJson.PowerModes.Balanced.Max
+            }
+            if ($configJson.PowerModes.Turbo) {
+                $Script:IntelStates.Turbo.Min = [int]$configJson.PowerModes.Turbo.Min
+                $Script:IntelStates.Turbo.Max = [int]$configJson.PowerModes.Turbo.Max
+            }
+            if ($configJson.PowerModes.Extreme) {
+                $Script:IntelStates.Extreme.Min = [int]$configJson.PowerModes.Extreme.Min
+                $Script:IntelStates.Extreme.Max = [int]$configJson.PowerModes.Extreme.Max
+            }
+        }
+        # Diagnostics: log what was applied
+        if ($configJson.PowerModes -or $configJson.PowerModesIntel) {
+            try {
+                $rs = $Script:RyzenStates
+                $is = $Script:IntelStates
+                Write-Log "CONFIG LOADED: AMD Silent=$($rs.Silent.Min)-$($rs.Silent.Max) Balanced=$($rs.Balanced.Min)-$($rs.Balanced.Max) Turbo=$($rs.Turbo.Min)-$($rs.Turbo.Max)" "CONFIG"
+                Write-Log "CONFIG LOADED: Intel Silent=$($is.Silent.Min)-$($is.Silent.Max) Balanced=$($is.Balanced.Min)-$($is.Balanced.Max) Turbo=$($is.Turbo.Min)-$($is.Turbo.Max)" "CONFIG"
+            } catch { }
+        }
+        # BoostSettings
+        if ($configJson.BoostSettings) {
+            if ($null -ne $configJson.BoostSettings.BoostDuration) {
+                $Script:BoostDuration = [int]$configJson.BoostSettings.BoostDuration
+            }
+            #  NEW: BoostCooldown - czas miedzy Boostami tej samej aplikacji
+            if ($null -ne $configJson.BoostSettings.BoostCooldown) {
+                $Script:BoostCooldown = [int]$configJson.BoostSettings.BoostCooldown
+            }
+            if ($configJson.BoostSettings.AppLaunchSensitivity) {
+                if ($null -ne $configJson.BoostSettings.AppLaunchSensitivity.CPUDelta) {
+                    $Script:AppLaunchCPUDelta = [int]$configJson.BoostSettings.AppLaunchSensitivity.CPUDelta
+                }
+                if ($null -ne $configJson.BoostSettings.AppLaunchSensitivity.CPUThreshold) {
+                    $Script:AppLaunchCPUThreshold = [int]$configJson.BoostSettings.AppLaunchSensitivity.CPUThreshold
+                }
+            }
+            # AutoBoost settings (optional)
+            if ($null -ne $configJson.BoostSettings.AutoBoostEnabled) {
+                $Script:AutoBoostEnabled = [bool]$configJson.BoostSettings.AutoBoostEnabled
+            }
+            if ($null -ne $configJson.BoostSettings.AutoBoostSampleMs) {
+                $Script:AutoBoostSampleMs = [int]$configJson.BoostSettings.AutoBoostSampleMs
+            }
+            if ($null -ne $configJson.BoostSettings.EnableBoostForAllAppsOnStart) {
+                $Script:StartupBoostEnabled = [bool]$configJson.BoostSettings.EnableBoostForAllAppsOnStart
+            }
+            if ($null -ne $configJson.BoostSettings.ForceBoostOnNewApps) {
+                $Script:ForceBoostOnNewApps = [bool]$configJson.BoostSettings.ForceBoostOnNewApps
+            }
+            if ($null -ne $configJson.BoostSettings.StartupBoostDurationSeconds) {
+                $Script:StartupBoostDurationSeconds = [int]$configJson.BoostSettings.StartupBoostDurationSeconds
+            }
+            if ($null -ne $configJson.BoostSettings.ActivityBasedBoost) {
+                $Script:ActivityBasedBoostEnabled = [bool]$configJson.BoostSettings.ActivityBasedBoost
+            }
+            if ($null -ne $configJson.BoostSettings.ActivityIdleThreshold) {
+                $Script:ActivityIdleThreshold = [int]$configJson.BoostSettings.ActivityIdleThreshold
+            }
+            if ($null -ne $configJson.BoostSettings.ActivityMaxBoostTime) {
+                $Script:ActivityMaxBoostTime = [int]$configJson.BoostSettings.ActivityMaxBoostTime
+            }
+        }
+        # AdaptiveTimer
+        if ($configJson.AdaptiveTimer) {
+            if ($null -ne $configJson.AdaptiveTimer.DefaultInterval) {
+                $Script:DefaultTimerInterval = [int]$configJson.AdaptiveTimer.DefaultInterval
+            }
+            if ($null -ne $configJson.AdaptiveTimer.MinInterval) {
+                $Script:MinTimerInterval = [int]$configJson.AdaptiveTimer.MinInterval
+            }
+            if ($null -ne $configJson.AdaptiveTimer.MaxInterval) {
+                $Script:MaxTimerInterval = [int]$configJson.AdaptiveTimer.MaxInterval
+            }
+            if ($null -ne $configJson.AdaptiveTimer.GamingInterval) {
+                $Script:GamingTimerInterval = [int]$configJson.AdaptiveTimer.GamingInterval
+            }
+        }
+        # AIThresholds
+        if ($configJson.AIThresholds) {
+            if ($null -ne $configJson.AIThresholds.ForceSilentCPU) {
+                $Script:ForceSilentCPU = [int]$configJson.AIThresholds.ForceSilentCPU
+            }
+            if ($null -ne $configJson.AIThresholds.ForceSilentCPUInactive) {
+                $Script:ForceSilentCPUInactive = [int]$configJson.AIThresholds.ForceSilentCPUInactive
+            }
+            if ($null -ne $configJson.AIThresholds.TurboThreshold) {
+                $Script:TurboThreshold = [int]$configJson.AIThresholds.TurboThreshold
+            }
+            if ($null -ne $configJson.AIThresholds.BalancedThreshold) {
+                $Script:BalancedThreshold = [int]$configJson.AIThresholds.BalancedThreshold
+            }
+        }
+        # IOSettings - Ustawienia czulosci I/O (NOWE!)
+        if ($configJson.IOSettings) {
+            if ($null -ne $configJson.IOSettings.ReadThreshold) {
+                $Script:IOReadThreshold = [int]$configJson.IOSettings.ReadThreshold
+            }
+            if ($null -ne $configJson.IOSettings.WriteThreshold) {
+                $Script:IOWriteThreshold = [int]$configJson.IOSettings.WriteThreshold
+            }
+            if ($null -ne $configJson.IOSettings.Sensitivity) {
+                $Script:IOSensitivity = [int]$configJson.IOSettings.Sensitivity
+            }
+            if ($null -ne $configJson.IOSettings.CheckInterval) {
+                $Script:IOCheckInterval = [int]$configJson.IOSettings.CheckInterval
+            }
+            if ($null -ne $configJson.IOSettings.TurboThreshold) {
+                $Script:IOTurboThreshold = [int]$configJson.IOSettings.TurboThreshold
+            }
+            if ($null -ne $configJson.IOSettings.OverrideForceMode) {
+                $Script:IOOverrideForceMode = [bool]$configJson.IOSettings.OverrideForceMode
+            }
+            if ($configJson.IOSettings.PSObject.Properties.Name -contains "ExtremeGraceSeconds" -and $null -ne $configJson.IOSettings.ExtremeGraceSeconds) {
+                $Script:IOExtremeGraceSeconds = [int]$configJson.IOSettings.ExtremeGraceSeconds
+            }
+        }
+        # Database / Prophet autosave settings
+        if ($configJson.DatabaseSettings) {
+            if ($null -ne $configJson.DatabaseSettings.ProphetAutosaveSeconds) {
+                $Script:ProphetAutosaveSeconds = [int]$configJson.DatabaseSettings.ProphetAutosaveSeconds
+            }
+        }
+        # OptimizationSettings - V38 advanced optimization
+        if ($configJson.OptimizationSettings) {
+            if ($null -ne $configJson.OptimizationSettings.PreloadEnabled) {
+                $Script:PreloadEnabled = [bool]$configJson.OptimizationSettings.PreloadEnabled
+            }
+            if ($null -ne $configJson.OptimizationSettings.CacheSize) {
+                $Script:CacheSize = [int]$configJson.OptimizationSettings.CacheSize
+            }
+            if ($null -ne $configJson.OptimizationSettings.PreBoostDuration) {
+                $Script:PreBoostDuration = [int]$configJson.OptimizationSettings.PreBoostDuration
+            }
+            if ($null -ne $configJson.OptimizationSettings.PredictiveBoostEnabled) {
+                $Script:PredictiveBoostEnabled = [bool]$configJson.OptimizationSettings.PredictiveBoostEnabled
+            }
+        }
+        if ($null -ne $configJson.SmartPreload) {
+            $Script:SmartPreload = [bool]$configJson.SmartPreload
+        }
+        if ($null -ne $configJson.MemoryCompression) {
+            $Script:MemoryCompression = [bool]$configJson.MemoryCompression
+        }
+        if ($null -ne $configJson.PowerBoost) {
+            $Script:PowerBoost = [bool]$configJson.PowerBoost
+        }
+        if ($null -ne $configJson.PredictiveIO) {
+            $Script:PredictiveIO = [bool]$configJson.PredictiveIO
+        }
+        if ($null -ne $configJson.CPUAgressiveness) {
+            $Script:CPUAgressiveness = [int]$configJson.CPUAgressiveness
+        }
+        if ($null -ne $configJson.ThermalLimit) {
+            $Script:ThermalLimit = [int]$configJson.ThermalLimit
+        }
+        if ($null -ne $configJson.MemoryAgressiveness) {
+            $Script:MemoryAgressiveness = [int]$configJson.MemoryAgressiveness
+        }
+        if ($null -ne $configJson.IOPriority) {
+            $Script:IOPriority = [int]$configJson.IOPriority
+        }
+        if ($configJson.LearningSettings) {
+            if ($null -ne $configJson.LearningSettings.BiasInfluence) {
+                $Script:BiasInfluence = [Math]::Max(0, [Math]::Min(40, [int]$configJson.LearningSettings.BiasInfluence))
+            }
+            if ($null -ne $configJson.LearningSettings.ConfidenceThreshold) {
+                $Script:ConfidenceThreshold = [Math]::Max(50, [Math]::Min(95, [int]$configJson.LearningSettings.ConfidenceThreshold))
+            }
+            if ($configJson.LearningSettings.LearningMode) {
+                $Script:LearningMode = $configJson.LearningSettings.LearningMode
+            }
+        }
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════════════════════
+        if ($configJson.Network) {
+            if ($null -ne $configJson.Network.Enabled) {
+                $Script:NetworkOptimizerEnabled = [bool]$configJson.Network.Enabled
+            }
+            if ($null -ne $configJson.Network.DisableNagle) {
+                $Script:NetworkDisableNagle = [bool]$configJson.Network.DisableNagle
+            }
+            if ($null -ne $configJson.Network.OptimizeTCP) {
+                $Script:NetworkOptimizeTCP = [bool]$configJson.Network.OptimizeTCP
+            }
+            if ($null -ne $configJson.Network.OptimizeDNS) {
+                $Script:NetworkOptimizeDNS = [bool]$configJson.Network.OptimizeDNS
+            }
+            # ULTRA Network Settings
+            if ($null -ne $configJson.Network.MaximizeTCPBuffers) {
+                $Script:NetworkMaximizeTCPBuffers = [bool]$configJson.Network.MaximizeTCPBuffers
+            }
+            if ($null -ne $configJson.Network.EnableWindowScaling) {
+                $Script:NetworkEnableWindowScaling = [bool]$configJson.Network.EnableWindowScaling
+            }
+            if ($null -ne $configJson.Network.EnableRSS) {
+                $Script:NetworkEnableRSS = [bool]$configJson.Network.EnableRSS
+            }
+            if ($null -ne $configJson.Network.EnableLSO) {
+                $Script:NetworkEnableLSO = [bool]$configJson.Network.EnableLSO
+            }
+            if ($null -ne $configJson.Network.DisableChimney) {
+                $Script:NetworkDisableChimney = [bool]$configJson.Network.DisableChimney
+            }
+        }
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════════════════════
+        if ($configJson.Privacy) {
+            if ($null -ne $configJson.Privacy.Enabled) {
+                $Script:PrivacyShieldEnabled = [bool]$configJson.Privacy.Enabled
+            }
+            if ($null -ne $configJson.Privacy.BlockTelemetry) {
+                $Script:PrivacyBlockTelemetry = [bool]$configJson.Privacy.BlockTelemetry
+            }
+            if ($null -ne $configJson.Privacy.DisableCortana) {
+                $Script:PrivacyDisableCortana = [bool]$configJson.Privacy.DisableCortana
+            }
+            if ($null -ne $configJson.Privacy.DisableLocation) {
+                $Script:PrivacyDisableLocation = [bool]$configJson.Privacy.DisableLocation
+            }
+            if ($null -ne $configJson.Privacy.DisableAds) {
+                $Script:PrivacyDisableAds = [bool]$configJson.Privacy.DisableAds
+            }
+            if ($null -ne $configJson.Privacy.DisableTimeline) {
+                $Script:PrivacyDisableTimeline = [bool]$configJson.Privacy.DisableTimeline
+            }
+        }
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════════════════════
+        if ($configJson.Performance) {
+            if ($null -ne $configJson.Performance.OptimizeMemory) {
+                $Script:PerfOptimizeMemory = [bool]$configJson.Performance.OptimizeMemory
+            }
+            if ($null -ne $configJson.Performance.OptimizeFileSystem) {
+                $Script:PerfOptimizeFileSystem = [bool]$configJson.Performance.OptimizeFileSystem
+            }
+            if ($null -ne $configJson.Performance.OptimizeVisualEffects) {
+                $Script:PerfOptimizeVisualEffects = [bool]$configJson.Performance.OptimizeVisualEffects
+            }
+            if ($null -ne $configJson.Performance.OptimizeStartup) {
+                $Script:PerfOptimizeStartup = [bool]$configJson.Performance.OptimizeStartup
+            }
+            if ($null -ne $configJson.Performance.OptimizeNetwork) {
+                $Script:PerfOptimizeNetwork = [bool]$configJson.Performance.OptimizeNetwork
+            }
+        }
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════════════════════════
+        if ($configJson.Services) {
+            if ($null -ne $configJson.Services.DisableFax) {
+                $Script:SvcDisableFax = [bool]$configJson.Services.DisableFax
+            }
+            if ($null -ne $configJson.Services.DisableRemoteAccess) {
+                $Script:SvcDisableRemoteAccess = [bool]$configJson.Services.DisableRemoteAccess
+            }
+            if ($null -ne $configJson.Services.DisableTablet) {
+                $Script:SvcDisableTablet = [bool]$configJson.Services.DisableTablet
+            }
+            if ($null -ne $configJson.Services.DisableSearch) {
+                $Script:SvcDisableSearch = [bool]$configJson.Services.DisableSearch
+            }
+        }
+        # Zapisz timestamp
+        $Script:LastConfigModified = (Get-Item $Script:ConfigJsonPath).LastWriteTime
+        if (-not $Silent) {
+            Write-Host "  [CONFIG] Zaladowano config.json" -ForegroundColor Green
+            if ($Script:ForceModeFromConfig) {
+                Write-Host "    ForceMode: $($Script:ForceModeFromConfig)" -ForegroundColor Cyan
+            } else {
+                Write-Host "    ForceMode: AI (automatyczny)" -ForegroundColor Gray
+            }
+            Write-Host "    Silent: $($Script:RyzenStates.Silent.Min)-$($Script:RyzenStates.Silent.Max)%" -ForegroundColor Gray
+            Write-Host "    Balanced: $($Script:RyzenStates.Balanced.Min)-$($Script:RyzenStates.Balanced.Max)%" -ForegroundColor Gray
+            Write-Host "    Turbo: $($Script:RyzenStates.Turbo.Min)-$($Script:RyzenStates.Turbo.Max)%" -ForegroundColor Gray
+            Write-Host "    BoostDuration: $($Script:BoostDuration)ms" -ForegroundColor Gray
+            Write-Host "    I/O: Read=$($Script:IOReadThreshold)MB/s Write=$($Script:IOWriteThreshold)MB/s Sens=$($Script:IOSensitivity) Turbo=$($Script:IOTurboThreshold)MB/s Override=$($Script:IOOverrideForceMode) Grace=$($Script:IOExtremeGraceSeconds)s" -ForegroundColor Gray
+            Write-Host "    Optimization: Preload=$($Script:PreloadEnabled) Cache=$($Script:CacheSize) PreBoost=$($Script:PreBoostDuration)ms Predictive=$($Script:PredictiveBoostEnabled)" -ForegroundColor Gray
+            Write-Host "    Advanced: SmartPreload=$($Script:SmartPreload) MemCompress=$($Script:MemoryCompression) PowerBoost=$($Script:PowerBoost) PredIO=$($Script:PredictiveIO)" -ForegroundColor Gray
+            Write-Host "    Aggression: CPU=$($Script:CPUAgressiveness) Memory=$($Script:MemoryAgressiveness) IOPriority=$($Script:IOPriority)" -ForegroundColor Gray
+            Write-Host "    Database: autosave=$($Script:ProphetAutosaveSeconds)s" -ForegroundColor Gray
+            Write-Host "    Network: Enabled=$($Script:NetworkOptimizerEnabled) Nagle=$($Script:NetworkDisableNagle) TCP=$($Script:NetworkOptimizeTCP) DNS=$($Script:NetworkOptimizeDNS)" -ForegroundColor Gray
+            Write-Host "    Network ULTRA: Buffers=$($Script:NetworkMaximizeTCPBuffers) Scaling=$($Script:NetworkEnableWindowScaling) RSS=$($Script:NetworkEnableRSS) LSO=$($Script:NetworkEnableLSO) Chimney=$($Script:NetworkDisableChimney)" -ForegroundColor Cyan
+            Write-Host "    Privacy: Enabled=$($Script:PrivacyShieldEnabled) Telemetry=$($Script:PrivacyBlockTelemetry) Cortana=$($Script:PrivacyDisableCortana) Location=$($Script:PrivacyDisableLocation)" -ForegroundColor Gray
+            Write-Host "    Performance: Memory=$($Script:PerfOptimizeMemory) FS=$($Script:PerfOptimizeFileSystem) Visual=$($Script:PerfOptimizeVisualEffects) Startup=$($Script:PerfOptimizeStartup)" -ForegroundColor Gray
+            Write-Host "    Services: Fax=$($Script:SvcDisableFax) Remote=$($Script:SvcDisableRemoteAccess) Tablet=$($Script:SvcDisableTablet) Search=$($Script:SvcDisableSearch)" -ForegroundColor Gray
+        }
+        return $true
+    } catch {
+        if (-not $Silent) { Write-Host "  [CONFIG] Blad ladowania config.json: $_" -ForegroundColor Red }
+        return $false
+    }
+}
+# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+function Apply-ConfiguratorSettings {
+    <#
+    .SYNOPSIS
+    Stosuje ustawienia Network/Privacy/Performance/Services z config.json do Windows
+    Wywoływane przy starcie ENGINE i przy hot-reload config.json
+    #>
+    param([switch]$Force)
+    # Nie stosuj wielokrotnie w tej samej sesji (chyba że Force)
+    if ($Script:ConfiguratorSettingsApplied -and -not $Force) {
+        return
+    }
+    Write-Host "`n  [v40] Stosowanie ustawień z CONFIGURATOR..." -ForegroundColor Cyan
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PRIVACY - Stosuj ustawienia prywatności
+    # ═══════════════════════════════════════════════════════════════════════════
+    if ($Script:PrivacyShieldEnabled) {
+        Write-Host "  [PRIVACY] Privacy Shield ENABLED" -ForegroundColor Green
+        if ($Script:PrivacyBlockTelemetry) {
+            try {
+                # Wyłącz DiagTrack
+                $diagJob = Start-Job -ScriptBlock {
+                    Stop-Service "DiagTrack" -Force -ErrorAction SilentlyContinue
+                    Set-Service "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
+                    Stop-Service "dmwappushservice" -Force -ErrorAction SilentlyContinue
+                    Set-Service "dmwappushservice" -StartupType Disabled -ErrorAction SilentlyContinue
+                }
+                $null = Wait-Job $diagJob -Timeout 5
+                Remove-Job $diagJob -Force -ErrorAction SilentlyContinue
+                # Registry
+                Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" -Name "AllowTelemetry" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Write-Host "    ✓ Telemetria wyłączona" -ForegroundColor Green
+            } catch { Write-Host "    ✗ Błąd telemetrii: $_" -ForegroundColor Red }
+        }
+        if ($Script:PrivacyDisableCortana) {
+            try {
+                New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Force -ErrorAction SilentlyContinue | Out-Null
+                Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Name "AllowCortana" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Write-Host "    ✓ Cortana wyłączona" -ForegroundColor Green
+            } catch { Write-Host "    ✗ Błąd Cortany: $_" -ForegroundColor Red }
+        }
+        if ($Script:PrivacyDisableLocation) {
+            try {
+                Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" -Name "Value" -Value "Deny" -ErrorAction SilentlyContinue
+                Write-Host "    ✓ Lokalizacja wyłączona" -ForegroundColor Green
+            } catch { Write-Host "    ✗ Błąd lokalizacji: $_" -ForegroundColor Red }
+        }
+        if ($Script:PrivacyDisableAds) {
+            try {
+                Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AdvertisingInfo" -Name "Enabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Write-Host "    ✓ Reklamy wyłączone" -ForegroundColor Green
+            } catch { Write-Host "    ✗ Błąd reklam: $_" -ForegroundColor Red }
+        }
+        if ($Script:PrivacyDisableTimeline) {
+            try {
+                New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Force -ErrorAction SilentlyContinue | Out-Null
+                Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableActivityFeed" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                Write-Host "    ✓ Oś czasu wyłączona" -ForegroundColor Green
+            } catch { Write-Host "    ✗ Błąd osi czasu: $_" -ForegroundColor Red }
+        }
+    } else {
+        Write-Host "  [PRIVACY] Privacy Shield DISABLED" -ForegroundColor Yellow
+    }
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PERFORMANCE - Stosuj ustawienia wydajności
+    # ═══════════════════════════════════════════════════════════════════════════
+    Write-Host "  [PERFORMANCE] Stosowanie optymalizacji wydajności..." -ForegroundColor Cyan
+    if ($Script:PerfOptimizeMemory) {
+        try {
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "LargeSystemCache" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "DisablePagingExecutive" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Write-Host "    ✓ Pamięć zoptymalizowana" -ForegroundColor Green
+        } catch { Write-Host "    ✗ Błąd pamięci: $_" -ForegroundColor Red }
+    }
+    if ($Script:PerfOptimizeFileSystem) {
+        try {
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "NtfsDisableLastAccessUpdate" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Write-Host "    ✓ System plików zoptymalizowany" -ForegroundColor Green
+        } catch { Write-Host "    ✗ Błąd systemu plików: $_" -ForegroundColor Red }
+    }
+    if ($Script:PerfOptimizeVisualEffects) {
+        try {
+            Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+            Write-Host "    ✓ Efekty wizualne zoptymalizowane" -ForegroundColor Green
+        } catch { Write-Host "    ✗ Błąd efektów: $_" -ForegroundColor Red }
+    }
+    if ($Script:PerfOptimizeStartup) {
+        try {
+            New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize" -Force -ErrorAction SilentlyContinue | Out-Null
+            Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize" -Name "StartupDelayInMSec" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Write-Host "    ✓ Startup zoptymalizowany" -ForegroundColor Green
+        } catch { Write-Host "    ✗ Błąd startup: $_" -ForegroundColor Red }
+    }
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SERVICES - Stosuj ustawienia usług
+    # ═══════════════════════════════════════════════════════════════════════════
+    Write-Host "  [SERVICES] Stosowanie ustawień usług..." -ForegroundColor Cyan
+    if ($Script:SvcDisableFax) {
+        try {
+            $faxJob = Start-Job { Stop-Service "Fax" -Force -EA SilentlyContinue; Set-Service "Fax" -StartupType Disabled -EA SilentlyContinue }
+            $null = Wait-Job $faxJob -Timeout 3; Remove-Job $faxJob -Force -EA SilentlyContinue
+            Write-Host "    ✓ Usługa faksów wyłączona" -ForegroundColor Green
+        } catch { }
+    }
+    if ($Script:SvcDisableRemoteAccess) {
+        try {
+            $remoteJob = Start-Job { Stop-Service "RemoteRegistry" -Force -EA SilentlyContinue; Set-Service "RemoteRegistry" -StartupType Disabled -EA SilentlyContinue }
+            $null = Wait-Job $remoteJob -Timeout 3; Remove-Job $remoteJob -Force -EA SilentlyContinue
+            Write-Host "    ✓ Dostęp zdalny wyłączony" -ForegroundColor Green
+        } catch { }
+    }
+    if ($Script:SvcDisableTablet) {
+        try {
+            $tabletJob = Start-Job { Stop-Service "TabletInputService" -Force -EA SilentlyContinue; Set-Service "TabletInputService" -StartupType Disabled -EA SilentlyContinue }
+            $null = Wait-Job $tabletJob -Timeout 3; Remove-Job $tabletJob -Force -EA SilentlyContinue
+            Write-Host "    ✓ Usługi tabletu wyłączone" -ForegroundColor Green
+        } catch { }
+    }
+    if ($Script:SvcDisableSearch) {
+        try {
+            $searchJob = Start-Job { Stop-Service "WSearch" -Force -EA SilentlyContinue; Set-Service "WSearch" -StartupType Disabled -EA SilentlyContinue }
+            $null = Wait-Job $searchJob -Timeout 5; Remove-Job $searchJob -Force -EA SilentlyContinue
+            Write-Host "    ⚠ Windows Search wyłączony (wyszukiwanie nie będzie działać!)" -ForegroundColor Yellow
+        } catch { }
+    }
+    $Script:ConfiguratorSettingsApplied = $true
+    Write-Host "  [v40] Ustawienia CONFIGURATOR zastosowane!`n" -ForegroundColor Green
+}
+
+function Check-ConfigReload {
+    <#
+    .SYNOPSIS
+     UNIFIED CONFIG RELOAD - Konsoliduje sprawdzanie reload.signal i timestamp-based config monitoring
+    .DESCRIPTION
+    Funkcja sprawdza:
+    1. reload.signal (natychmiastowy reload z walidacja timestamp)
+    2. Timestamp config.json (fallback, co 5s)
+    3. AIEngines.json (co 10s w glownej petli)
+    #>
+    param([switch]$Silent)
+    
+    # === 0. NAJWYŻSZY PRIORYTET: Sprawdź ReloadCategories.signal (z zakładki App Categorization) ===
+    $categoriesSignalPath = "C:\CPUManager\ReloadCategories.signal"
+    if (Test-Path $categoriesSignalPath) {
+        try {
+            $signalContent = Get-Content $categoriesSignalPath -Raw -ErrorAction Stop | ConvertFrom-Json
+            if (-not $Silent) {
+                Write-Host "`n  [CATEGORIES.SIGNAL] Otrzymano sygnal przeladowania kategorii aplikacji" -ForegroundColor Magenta
+            }
+            
+            # Przeladuj AppCategories
+            $result = Load-AppCategories
+            if ($result -and -not $Silent) {
+                Write-Host "  [RELOAD] AppCategories.json przeladowany - $($Script:AppCategoryPreferences.Count) apps" -ForegroundColor Green
+                
+                # Log aplikacje z HardLock
+                $hardLockApps = @()
+                foreach ($key in $Script:AppCategoryPreferences.Keys) {
+                    if ($Script:AppCategoryPreferences[$key].HardLock) {
+                        $bias = $Script:AppCategoryPreferences[$key].Bias
+                        $mode = if ($bias -le 0.2) { "Silent" } elseif ($bias -ge 0.8) { "Turbo" } else { "Balanced" }
+                        $hardLockApps += "$key=$mode"
+                    }
+                }
+                if ($hardLockApps.Count -gt 0) {
+                    Write-Host "  [HARDLOCK] Apps: $($hardLockApps -join ', ')" -ForegroundColor Yellow
+                }
+            }
+            
+            # Usun plik sygnalu po przetworzeniu
+            Remove-Item $categoriesSignalPath -Force -ErrorAction SilentlyContinue
+            
+            Add-Log "RELOAD: AppCategories from Configurator signal"
+        } catch {
+            Write-ErrorLog -Component "RELOAD" -ErrorMessage "Failed to process categories signal" -Details $_.Exception.Message
+        }
+    }
+    
+    # === 1. PRIORYTET: Sprawdz reload.signal (najszybsza sciezka) ===
+    # FIX v40.2: Usuwanie reload.signal po przetworzeniu (zapobiega stale signal po restarcie ENGINE)
+    if (Test-Path $Script:ReloadSignalPath) {
+        try {
+            $signalInfo = Get-Item $Script:ReloadSignalPath -ErrorAction Stop
+            $signalTime = $signalInfo.LastWriteTime
+            
+            # Sprawdz czy to nowy sygnal (nowszy niz ostatnio przetworzony)
+            if ($signalTime -gt $Script:LastReloadSignalTime) {
+                $Script:LastReloadSignalTime = $signalTime
+                
+                # Odczytaj zawartosc sygnalu
+                try {
+                    $signalContent = Get-Content $Script:ReloadSignalPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                    $signalFile = if ($signalContent.File) { $signalContent.File } else { "Config" }
+                    
+                    if (-not $Silent) {
+                        Write-Host "`n  [RELOAD.SIGNAL] Otrzymano sygnal od CONFIGURATOR: $signalFile" -ForegroundColor Magenta
+                    }
+                    
+                    # Reaguj na typ sygnalu
+                    switch ($signalFile) {
+                        "Config" {
+                            Load-ExternalConfig -Silent:$Silent | Out-Null
+                            # FIX v40.1: Zastosuj ustawienia Privacy/Services/Performance po reload
+                            $Script:ConfiguratorSettingsApplied = $false  # Reset flagi
+                            Apply-ConfiguratorSettings -Force
+                            $Script:LastPowerMode = ""
+                        }
+                        "AIEngines" {
+                            Load-AIEnginesConfig | Out-Null
+                            if (-not $Silent) {
+                                Write-Host "  [RELOAD] AIEngines.json przeladowany" -ForegroundColor Green
+                            }
+                        }
+                        "TDPConfig" {
+                            # TDP jest ladowany przez Load-ExternalConfig
+                            Load-ExternalConfig -Silent:$Silent | Out-Null
+                            if (-not $Silent) {
+                                Write-Host "  [RELOAD] TDPConfig przeladowany" -ForegroundColor Green
+                            }
+                        }
+                        "NetworkDefaults" {
+                            Load-ExternalConfig -Silent:$Silent | Out-Null
+                            # Zastosuj Network optymalizacje
+                            if ($Script:NetworkOptimizerEnabled -and $Script:NetworkOptimizerInstance) {
+                                $Script:NetworkOptimizerInstance.ApplyOptimizations()
+                                if (-not $Silent) {
+                                    Write-Host "  [RELOAD] Network optimizations re-applied" -ForegroundColor Green
+                                }
+                            }
+                        }
+                        default {
+                            Load-ExternalConfig -Silent:$Silent | Out-Null
+                        }
+                    }
+                    
+                    if ($Script:ProcessWatcherInstance -and $Script:BoostCooldown -gt 0) {
+                        $Script:ProcessWatcherInstance.BoostCooldownSeconds = [Math]::Max(5, [int]$Script:BoostCooldown)
+                    }
+                    
+                    # FIX v40.2: Usun reload.signal po przetworzeniu
+                    Remove-Item $Script:ReloadSignalPath -Force -ErrorAction SilentlyContinue
+                    
+                    return $true
+                } catch {
+                    # Nie udalo sie odczytac JSON - zaladuj config jako fallback
+                    Load-ExternalConfig -Silent:$Silent | Out-Null
+                    Remove-Item $Script:ReloadSignalPath -Force -ErrorAction SilentlyContinue
+                    return $true
+                }
+            }
+        } catch {
+            # Blad odczytu pliku sygnalu - ignoruj
+        }
+    }
+    
+    # === 2. FALLBACK: Timestamp-based monitoring dla config.json ===
+    $now = [DateTime]::Now
+    if (($now - $Script:LastConfigCheck).TotalSeconds -ge $Script:ConfigCheckInterval) {
+        $Script:LastConfigCheck = $now
+        if (Test-Path $Script:ConfigJsonPath) {
+            try {
+                $currentModified = (Get-Item $Script:ConfigJsonPath).LastWriteTime
+                if ($currentModified -gt $Script:LastConfigModified) {
+                    if (-not $Silent) {
+                        Write-Host "`n  [AUTO-RELOAD] Config.json zmieniony - przeladowuje..." -ForegroundColor Cyan
+                    }
+                    Load-ExternalConfig -Silent:$Silent | Out-Null
+                    # FIX v40.1: Zastosuj ustawienia Privacy/Services/Performance po timestamp reload
+                    $Script:ConfiguratorSettingsApplied = $false  # Reset flagi
+                    Apply-ConfiguratorSettings -Force
+                    if ($Script:ProcessWatcherInstance -and $Script:BoostCooldown -gt 0) {
+                        $Script:ProcessWatcherInstance.BoostCooldownSeconds = [Math]::Max(5, [int]$Script:BoostCooldown)
+                    }
+                    $Script:LastPowerMode = ""
+                    return $true
+                }
+            } catch {
+                # Ignoruj bledy odczytu (plik moze byc w trakcie zapisu)
+            }
+        }
+    }
+    
+    return $false
+}
+
+# Domyslne wartosci dla parametrow (przed zaladowaniem config.json)
+$Script:ForceModeFromConfig = ""
+$Script:AppLaunchCPUDelta = 12
+$Script:AppLaunchCPUThreshold = 22
+$Script:DefaultTimerInterval = 1000
+$Script:MinTimerInterval = 400
+$Script:MaxTimerInterval = 2500
+$Script:GamingTimerInterval = 500
+$Script:ForceSilentCPU = 20
+$Script:ForceSilentCPUInactive = 25
+$Script:TurboThreshold = 72
+$Script:BalancedThreshold = 38
+$Script:BoostCooldown = 20  #  NEW: Domyslny cooldown miedzy Boostami (sekundy)
+# === I/O SENSITIVITY SETTINGS (z config.json) ===
+$Script:IOReadThreshold = 80      # MB/s - prog odczytu wyzwalajacy reakcje
+$Script:IOWriteThreshold = 50     # MB/s - prog zapisu wyzwalajacy reakcje  
+$Script:IOSensitivity = 4         # 1-10 skala czulosci (1=niska, 10=bardzo wysoka)
+$Script:IOCheckInterval = 1200    # ms - interwal sprawdzania aktywnosci I/O
+$Script:IOTurboThreshold = 150    # MB/s - prog I/O dla wymuszenia Turbo
+$Script:IOOverrideForceMode = $false  # Czy I/O moze nadpisac ForceMode
+$Script:LastIOCheck = [DateTime]::Now
+$Script:IOBoostActive = $false
+$Script:IOBoostStartTime = [DateTime]::MinValue
+$Script:LastIOThresholdEvent = [DateTime]::MinValue   # Sledzi ostatni wysoki ruch I/O
+$Script:IOExtremeGraceSeconds = 8                     # Sekundy ciszy wymagane przed wymuszeniem Extreme
+# === OPTIMIZATION SETTINGS (z config.json) ===
+$Script:PreloadEnabled = $true              # Preload enabled
+$Script:CacheSize = 50                      # App cache size
+$Script:ProphetCacheLimit = 50              # V38: Prophet max apps (same as CacheSize default)
+$Script:PreBoostDuration = 15000            # Pre-boost duration (ms)
+$Script:PredictiveBoostEnabled = $true      # Predictive boost
+$Script:SmartPreload = $true                # Smart preload
+$Script:MemoryCompression = $false          # Memory compression
+$Script:PowerBoost = $false                 # Power boost mode
+$Script:PredictiveIO = $true                # Predykcyjne I/O
+$Script:CPUAgressiveness = 50               # CPU aggressiveness (0-100)
+$Script:MemoryAgressiveness = 30            # Memory aggressiveness (0-100)
+$Script:IOPriority = 3                      # IO priority (1-5)
+$Script:BiasInfluence = 25                  # User bias influence (0-40)
+$Script:ConfidenceThreshold = 70            # AI confidence threshold (50-95)
+$Script:LearningMode = "AUTO"               # Learning mode: AUTO, MANUAL, HYBRID
+# ═══════════════════════════════════════════════════════════════════════════════
+# Te ustawienia są czytane z config.json (wysyłane przez CONFIGURATOR)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Network Settings (domyślnie WŁĄCZONE - ENGINE potrzebuje tego dla NetworkOptimizer)
+$Script:NetworkOptimizerEnabled = $true     # Główny przełącznik Network Optimizer
+$Script:NetworkDisableNagle = $true         # Wyłącz Nagle Algorithm (niższy ping)
+$Script:NetworkOptimizeTCP = $true          # Optymalizuj TCP/ACK
+$Script:NetworkOptimizeDNS = $true          # Ustaw Cloudflare DNS
+# ULTRA Network Settings (domyślnie WŁĄCZONE - maksymalna przepustowość)
+$Script:NetworkMaximizeTCPBuffers = $true   # Maksymalne bufory TCP/IP
+$Script:NetworkEnableWindowScaling = $true  # TCP Window Scaling dla gigabit
+$Script:NetworkEnableRSS = $true            # RSS (Receive Side Scaling) multi-core
+$Script:NetworkEnableLSO = $true            # LSO (Large Send Offload) dla dużych transferów
+$Script:NetworkDisableChimney = $true       # Wyłącz TCP Chimney (problematyczny)
+# Privacy Settings (domyślnie WYŁĄCZONE - tylko CONFIGURATOR włącza)
+$Script:PrivacyShieldEnabled = $false       # Główny przełącznik Privacy Shield
+$Script:PrivacyBlockTelemetry = $false      # Blokuj telemetrię Microsoft
+$Script:PrivacyDisableCortana = $false      # Wyłącz Cortanę
+$Script:PrivacyDisableLocation = $false     # Wyłącz lokalizację
+$Script:PrivacyDisableAds = $false          # Wyłącz reklamy
+$Script:PrivacyDisableTimeline = $false     # Wyłącz oś czasu
+# Performance Settings (domyślnie WYŁĄCZONE - tylko CONFIGURATOR włącza)
+$Script:PerfOptimizeMemory = $false         # Optymalizuj pamięć
+$Script:PerfOptimizeFileSystem = $false     # Optymalizuj system plików
+$Script:PerfOptimizeVisualEffects = $false  # Optymalizuj efekty (opcjonalne)
+$Script:PerfOptimizeStartup = $false        # Optymalizuj startup
+$Script:PerfOptimizeNetwork = $false        # Optymalizuj sieć
+# Services Settings (domyślnie WYŁĄCZONE - tylko CONFIGURATOR włącza)
+$Script:SvcDisableFax = $false              # Wyłącz usługę faksów
+$Script:SvcDisableRemoteAccess = $false     # Wyłącz zdalny dostęp
+$Script:SvcDisableTablet = $false           # Wyłącz usługi tabletu
+$Script:SvcDisableSearch = $false           # Wyłącz Windows Search (OSTROŻNIE!)
+# Flaga czy ustawienia zostały już zastosowane w tej sesji
+$Script:ConfiguratorSettingsApplied = $false
+# Domyslne wartosci
+$Global:AI_Active     = $true
+$Global:DebugMode     = $false
+$Script:SavedManualMode = "Balanced"
+# #
+# #
+$Global:EcoMode = $false                              # Tryb eco (agresywniejszy Silent)
+# Progi EcoMode (bardziej agresywne przelaczanie na Silent)
+$Script:EcoMode_SilentCPUThreshold = 25               # Silent gdy CPU < 25% (normalnie 15%)
+$Script:EcoMode_SilentRAMThreshold = 75               # Silent gdy RAM < 75% (normalnie 60%)
+$Script:EcoMode_BalancedCPUThreshold = 50             # Balanced gdy CPU < 50% (normalnie 35%)
+$Script:EcoMode_TurboDelay = 3                        # Sekundy opoznienia przed Turbo (normalnie 0)
+$Script:EcoMode_FastSilentReturn = $true              # Szybki powrot do Silent po spadku CPU
+# Progi normalne (dla porownania)
+$Script:Normal_SilentCPUThreshold = 15
+$Script:Normal_SilentRAMThreshold = 60
+$Script:Normal_BalancedCPUThreshold = 35
+# #
+# #
+$Script:SilentModeActive = $false
+$Script:SilentLockMode = $false
+$Script:LastBoostNotification = [DateTime]::MinValue
+$Script:BoostNotificationCooldown = 30
+$Script:PendingBoostApp = ""
+$Script:UserApprovedBoosts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$Script:UserForcedMode = ""
+$Script:UserForcedTime = [DateTime]::MinValue
+$Script:LastHighActivityTime = [DateTime]::Now
+$Script:AutoRestoreAIDelaySeconds = 45
+$Script:QuietCPUThreshold = 18
+$Script:StartTime = [DateTime]::Now
+# Wczytaj zapisane ustawienia jesli istnieja
+try {
+    if (Test-Path $Script:SettingsPath) {
+        $savedSettings = Get-Content $Script:SettingsPath -Raw | ConvertFrom-Json
+        if ($null -ne $savedSettings.AI_Active) { $Global:AI_Active = $savedSettings.AI_Active }
+        if ($null -ne $savedSettings.DebugMode) { $Global:DebugMode = $savedSettings.DebugMode }
+        if ($null -ne $savedSettings.EcoMode) { $Global:EcoMode = $savedSettings.EcoMode }
+        if ($savedSettings.ManualMode) { $Script:SavedManualMode = $savedSettings.ManualMode }
+        Write-Host "  [OK] Ustawienia wczytane z poprzedniej sesji" -ForegroundColor Green
+    }
+} catch { }
+# #
+# #
+function Get-SilentCPUThreshold {
+    if ($Global:EcoMode) { return $Script:EcoMode_SilentCPUThreshold }
+    return $Script:Normal_SilentCPUThreshold
+}
+function Get-SilentRAMThreshold {
+    if ($Global:EcoMode) { return $Script:EcoMode_SilentRAMThreshold }
+    return $Script:Normal_SilentRAMThreshold
+}
+function Get-BalancedCPUThreshold {
+    if ($Global:EcoMode) { return $Script:EcoMode_BalancedCPUThreshold }
+    return $Script:Normal_BalancedCPUThreshold
+}
+function Should-DelaySwitchToTurbo {
+    # W EcoMode opozniamy przelaczanie na Turbo o kilka sekund
+    # (zapobiega krotkim spike'om CPU powodujacym niepotrzebny Turbo)
+    if (-not $Global:EcoMode) { return $false }
+    if (-not $Script:LastTurboRequest) { 
+        $Script:LastTurboRequest = [DateTime]::Now
+        return $true 
+    }
+    $elapsed = ([DateTime]::Now - $Script:LastTurboRequest).TotalSeconds
+    if ($elapsed -ge $Script:EcoMode_TurboDelay) {
+        return $false  # OK, mozna przelaczyc
+    }
+    return $true  # Jeszcze czekaj
+}
+function Reset-TurboDelay {
+    $Script:LastTurboRequest = $null
+}
+# LISTA IGNOROWANYCH PROCESOW DLA AI
+# AI ignoruje te procesy systemowe, pomocnicze i malo wazne
+$Script:BlacklistSet = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@(
+        # #
+        # KRYTYCZNE PROCESY SYSTEMOWE WINDOWS
+        # #
+        "System", "Idle", "Registry", "smss", "csrss", "wininit", "services",
+        "lsass", "lsaiso", "winlogon", "fontdrvhost", "Memory Compression",
+        "spoolsv", "svchost", "WerFault", "WerFaultSecure", "wermgr",
+        "dwm", "conhost", "dllhost", "sihost", "taskhostw", "audiodg",
+        "WmiPrvSE", "WmiApSrv", "msdtc", "vds", "vmms", "vmwp",
+        # #
+        # PROCESY POWLOKI I EKSPLORATORA WINDOWS
+        # #
+        "explorer", "SearchApp", "SearchHost", "SearchIndexer", "SearchProtocolHost",
+        "SearchFilterHost", "RuntimeBroker", "Taskmgr", "ctfmon", "CTFMON",
+        "StartMenuExperienceHost", "ShellExperienceHost", "TextInputHost",
+        "ApplicationFrameHost", "SystemSettings", "LockApp", "Widgets",
+        "WidgetService", "smartscreen", "SecurityHealthSystray", "UserOOBEBroker",
+        "SettingSyncHost", "PhoneExperienceHost", "YourPhone", "YourPhoneServer",
+        # #
+        # WINDOWS DEFENDER / BEZPIECZENSTWO
+        # #
+        "MsMpEng", "NisSrv", "SecurityHealthService", "SgrmBroker",
+        "MpCmdRun", "MpDefenderCoreService", "MsSense", "SenseCncProxy",
+        "SenseIR", "SenseNdr", "wscsvc",
+        # #
+        # TERMINALE I POWERSHELL (nie chcemy boostowac samych siebie)
+        # #
+        "powershell", "pwsh", "powershell_ise", "WindowsTerminal", "cmd",
+        "OpenConsole", "wt", "mintty", "ConEmu", "ConEmu64", "ConEmuC",
+        "ConEmuC64", "Cmder", "Hyper", "Terminus", "Alacritty",
+        # #
+        # MICROSOFT EDGE I PROCESY POMOCNICZE
+        # #
+        "msedge", "msedgewebview2", "MicrosoftEdge", "MicrosoftEdgeUpdate",
+        "edge", "msedge_pwa_launcher", "MicrosoftEdgeCP", "browser_broker",
+        # #
+        # PROCESY POMOCNICZE PRZEGLADAREK I APLIKACJI
+        # #
+        "identity_helper", "elevation_service", "notification_helper",
+        "crashpad_handler", "nacl64", "pwahelper", "setup", "update",
+        "updater", "installer", "uninstaller", "helper", "broker",
+        "renderer", "gpu-process", "utility", "crashreporter",
+        "plugin-container", "ServiceWorker", "WebView", "CefSharp.BrowserSubprocess",
+        "QtWebEngineProcess", "nacl_helper", "zygote",
+        # #
+        # WINDOWS UWP / MODERN APP HELPERS
+        # #
+        "SearchUI", "CompPkgSrv", "backgroundTaskHost", "BackgroundTransferHost",
+        "AppHostRegistrationVerifier", "dasHost", "CompatTelRunner", "DeviceCensus",
+        "musNotification", "musNotificationUx", "MusNotifyIcon", "UsoClient",
+        # #
+        # XBOX / GAME BAR (tlo dla gier, nie same gry)
+        # #
+        "GameBar", "GameBarFTServer", "GameBarPresenceWriter", "GameInputSvc",
+        "XboxIdp", "XblAuthManager", "XboxGipSvc", "gamingservices", "gamingservicesnet",
+        "BcastDVRUserService", "GamingServices", "XboxNetApiSvc",
+        # #
+        # NVIDIA / AMD / INTEL PROCESY TLA (sterowniki, telemetria)
+        # #
+        "NVDisplay.Container", "nvcontainer", "NVIDIA Web Helper", "NvTelemetryContainer",
+        "NvBackend", "NvNode", "nvidia-smi", "nvsphelper64", "NvOAWrapperCache",
+        "RadeonSoftware", "AMDRSServ", "aaborc", "atieclxx", "atiesrxx",
+        "cncmd", "AMDRyzenMasterDriverV21", "AMDRyzenMasterService",
+        "igfxCUIService", "igfxEM", "igfxHK", "igfxTray", "IntelCpHDCPSvc",
+        "IntelCpHeciSvc", "esif_uf", "OfficeClickToRun",
+        # #
+        # AUDIO / KOMUNIKACJA (uslugi tla)
+        # #
+        "AudioSrv", "Audiosrv", "RtkAudUService64", "RtkUService64",
+        "RtkBtManServ", "cAVS Audio Service", "DolbyDAX2API", "DolbyDAXAPI",
+        "NahimicService", "NahimicSvc64", "nhAsusStrixSvc", "SteelSeriesGG",
+        "SteelSeriesEngine", "RazerCentralService", "Razer Synapse Service",
+        # #
+        # SIEC / LACZNOSC (uslugi tla)
+        # #
+        "NcsiClient", "netprofm", "WlanSvc", "Wlansvc", "WwanSvc", "vnetlib64",
+        "PnkBstrA", "PnkBstrB", "EasyAntiCheat", "BEService", "BattleEye",
+        "vmnetdhcp", "vmnat", "vmware-authd", "vpnkit",
+        # #
+        # WINDOWS UPDATE / TELEMETRIA
+        # #
+        "TiWorker", "TrustedInstaller", "wuauclt", "wuauserv", "WaaSMedicAgent",
+        "SIHClient", "DiagTrack", "diagsvc", "CompatTelRunner",
+        "DiagnosticsHub.StandardCollector.Service", "PerfWatson2", "vscmon",
+        # #
+        # NARZEDZIA SYSTEMOWE / MONITORING
+        # #
+        "perfmon", "resmon", "mmc", "eventvwr", "compmgmt", "devmgmt", "diskmgmt",
+        "dfrgui", "cleanmgr", "msconfig", "msinfo32", "dxdiag", "winver",
+        "SystemInformer", "ProcessHacker", "procexp", "procexp64",
+        "Procmon", "Procmon64", "autoruns", "autoruns64", "tcpview", "tcpview64",
+        # #
+        # USLUGI CHMUROWE (OneDrive, Dropbox, Google itp.)
+        # #
+        "OneDrive", "OneDriveStandaloneUpdater", "FileCoAuth", "FileSyncHelper",
+        "Dropbox", "DropboxUpdate", "GoogleDriveFS", "googledrivesync",
+        "iCloudServices", "iCloudDrive", "iCloudPhotos", "AppleMobileDeviceService",
+        # #
+        # INNE PROCESY TLA I SERWISY
+        # #
+        "msiexec", "TiWorker", "wusa", "SystemSettingsBroker",
+        "CredentialUIBroker", "WindowsInternal.ComposableShell.Experiences.TextInput.InputApp",
+        "WMIC", "wbem", "winmgmt", "scrcons", "unsecapp",
+        "sppsvc", "SppExtComObj", "SgrmBroker", "sgrmbroker",
+        "AggregatorHost", "MoUsoCoreWorker", "SpeechRuntime", "Cortana",
+        "PresentationFontCache", "fontcache", "lsm", "DcomLaunch",
+        "PlugPlay", "Dhcp", "Dnscache", "NlaSvc", "nsi", "Tcpip", "AFD",
+        "CryptSvc", "KeyIso", "SamSs", "VaultSvc", "gpsvc", "Schedule",
+        "SENS", "Themes", "UxSms", "WinHttpAutoProxySvc",
+        # #
+        # HYPER-V / WIRTUALIZACJA
+        # #
+        "vmcompute", "vmwp", "vmmem", "Vmmem", "vmconnect", "vmms",
+        "VBoxSVC", "VBoxSDS", "VirtualBox", "VirtualBoxVM",
+        # #
+        # POPULARNE APLIKACJE TLA (launchers, tray icons)
+        # #
+        "steamwebhelper", "Steam Client WebHelper", "GameOverlayUI",
+        "SteamService", "steam_monitor", "steamwebhelper",
+        "EpicGamesLauncher", "EpicWebHelper", "UnrealCEFSubProcess",
+        "Origin", "OriginWebHelperService", "OriginClientService",
+        "GalaxyClient Helper", "GOG Galaxy Notifications Renderer",
+        "UbisoftGameLauncher", "upc", "UplayWebCore",
+        "Ubisoft Game Launcher", "BattleNetHelper", "Battle.net Helper",
+        # #
+        # DISCORD / KOMUNIKATORY (procesy pomocnicze)
+        # #
+        "Discord PTB", "DiscordPTB", "Discord Canary", "DiscordCanary",
+        "Slack Helper", "slack helper", "Teams", "ms-teams", "msteams",
+        "Zoom", "CptHost", "ZoomOutlookIMPlugin", "ZoomWebviewHost",
+        # #
+        # INNE POMOCNICZE
+        # #
+        "ShareX", "Lightshot", "Greenshot", "ScreenClippingHost", "SnippingTool",
+        "SystemInformer", "HWiNFO64", "CPUZ", "GPU-Z", "HWMonitor", "CoreTemp",
+        "MSIAfterburner", "RTSS", "RivaTuner", "RivaTunerStatisticsServer",
+        "FanControl", "SpeedFan", "Open Hardware Monitor",
+        "Everything", "WizTree", "TreeSize", "bleachbit", "CCleaner", "CCleaner64"
+    ), [System.StringComparer]::OrdinalIgnoreCase
+)
+# === STANY MOCY DLA PROCESOROW ===
+$Script:RyzenStates = @{
+    Silent   = @{ Min=50;   Max=85  }   # AMD: Cichy tryb (responsywny, wentylator cicho)
+    Balanced = @{ Min=70;   Max=99  }   # AMD: Praca biurowa, kodowanie (stabilne Balanced)
+    Turbo    = @{ Min=85;   Max=100 }   # AMD: Gaming, kompilacja (agresywny Turbo)
+    Extreme  = @{ Min=100;  Max=100 }   # AMD: Benchmark, rendering (pelna moc)
+}
+$Script:IntelStates = @{
+    Silent   = @{ Min=50;   Max=85  }   # Intel: Cichy tryb (Speed Shift EPP + ograniczenie Max)
+    Balanced = @{ Min=85;   Max=99  }   # Intel: Praca biurowa, kodowanie (wysoka responsywnosc)
+    Turbo    = @{ Min=99;   Max=100 }   # Intel: Gaming, kompilacja (pelna moc)
+    Extreme  = @{ Min=100;  Max=100 }   # Intel: Benchmark, rendering (max staly)
+}
+# ================== AI ENGINES CONTROL (Ensemble/NeuralBrain) =====================
+# Sciezki do plikow danych silnikow
+$Script:EnsembleDataPath = Join-Path $Script:ConfigDir "EnsembleWeights.json"
+$Script:NeuralBrainDataPath = Join-Path $Script:ConfigDir "BrainState.json"
+$Script:TransferCachePath = Join-Path $Script:ConfigDir "TransferCache.json"
+$Script:AIEnginesConfigPath = Join-Path $Script:ConfigDir "AIEngines.json"
+# Tworzenie plikow danych silnikow przy pierwszym uruchomieniu
+if (-not (Test-Path $Script:EnsembleDataPath)) {
+    '{}' | Set-Content $Script:EnsembleDataPath -Encoding UTF8 -Force
+}
+if (-not (Test-Path $Script:NeuralBrainDataPath)) {
+    '{}' | Set-Content $Script:NeuralBrainDataPath -Encoding UTF8 -Force
+}
+if (-not (Test-Path $Script:TransferCachePath)) {
+    @{ 
+        Timestamp = (Get-Date).ToString("o")
+        ModePreferences = @{}
+        ModeEffectiveness = @{}
+        ContextPatterns = @()
+        AppPatterns = @()
+    } | ConvertTo-Json | Set-Content $Script:TransferCachePath -Encoding UTF8 -Force
+}
+# Helpery do sprawdzania stanu (dynamicznie na podstawie $Script:AIEngines)
+function Is-EnsembleEnabled { return $Script:AIEngines.Ensemble -eq $true }
+function Is-NeuralBrainEnabled { return $Script:AIEngines.NeuralBrain -eq $true }
+function Is-ProphetEnabled { return $Script:AIEngines.Prophet -eq $true }
+# v42.6: Dodano brakujące helpery - CONFIGURATOR może teraz kontrolować wszystkie silniki
+function Is-QLearningEnabled { return $Script:AIEngines.QLearning -eq $true }
+function Is-SelfTunerEnabled { return $Script:AIEngines.SelfTuner -eq $true }
+function Is-ChainEnabled { return $Script:AIEngines.ChainPredictor -eq $true }
+function Is-LoadPredictorEnabled { return $Script:AIEngines.LoadPredictor -eq $true }
+function Is-AnomalyEnabled { return $Script:AIEngines.AnomalyDetector -eq $true }
+function Is-BanditEnabled { return $Script:AIEngines.Bandit -eq $true }
+function Is-GeneticEnabled { return $Script:AIEngines.Genetic -eq $true }
+function Is-EnergyEnabled { return $Script:AIEngines.Energy -eq $true }
+# ================== BLOKOWANIE LOGIKI SILNIKOW =====================
+# Przyklad uzycia w logice silnikow:
+# if (Is-EnsembleEnabled) { ... } else { # nie uruchamiaj }
+# if (Is-NeuralBrainEnabled) { ... } else { # nie uruchamiaj }
+# Przyklad: blokada inicjalizacji i zapisu
+# ...
+# if (Is-EnsembleEnabled) {
+#     # uruchom logike Ensemble
+#     # zapisuj do $Script:EnsembleDataPath
+# } else {
+#     # NIE uruchamiaj, NIE nadpisuj pliku
+# }
+# if (Is-NeuralBrainEnabled) {
+#     # uruchom logike NeuralBrain
+#     # zapisuj do $Script:NeuralBrainDataPath
+# } else {
+#     # NIE uruchamiaj, NIE nadpisuj pliku
+# }
+# W dowolnym miejscu, gdzie jest logika tych silnikow, nalezy dodac powyzsze warunki.
+# Funkcja wyboru stanow w zaleznosci od CPU
+function Get-PowerStates {
+    if ($Script:CPUType -eq "Intel") {
+        return $Script:IntelStates
+    } else {
+        return $Script:RyzenStates
+    }
+}
+# BOOST TURBO Tracking
+$Script:BoostActive = $false
+$Script:BoostStartTime = 0
+$Script:BoostDuration = 10000
+$Script:LastCPU = 0
+$Script:LastProcessCount = 0
+$Script:AutoBoostEnabled = $true
+$Script:AutoBoostSampleMs = 350
+$Script:ProphetAutosaveSeconds = 20
+$Script:ForceBoostOnNewApps = $true
+$Script:StartupBoostEnabled = $true
+$Script:StartupBoostDurationSeconds = 3   # Legacy - now using Activity-Based
+$Script:ActivityBoostApps = @{}           # v40: Activity-Based Boost tracking
+$Script:ActiveStartupBoost = $null
+$Script:ProcessWatcherInstance = $null
+$Script:ActivityBasedBoostEnabled = $true  # Enable Activity-Based Boost
+$Script:ActivityIdleThreshold = 5          # CPU% below which app is idle
+$Script:ActivityMaxBoostTime = 30          # Max boost time in seconds (safety)
+# Zastepuje stary AppNameMap - dziala dla KAZDEJ aplikacji automatycznie
+# Cache dla nazw procesow (zeby nie odpytywac za kazdym razem)
+$Script:ProcessNameCache = @{}
+$Script:ProcessNameCacheExpiry = @{}
+$Script:CacheExpiryMinutes = 5
+function Get-ProcessDisplayName {
+    <#
+    .SYNOPSIS
+    Pobiera przyjazna nazwe procesu z metadanych Windows (FileDescription, ProductName, WindowTitle)
+    Automatycznie dziala dla kazdej aplikacji bez recznego mapowania.
+    #>
+    param(
+        [string]$ProcessName,
+        [System.Diagnostics.Process]$Process = $null
+    )
+    if ([string]::IsNullOrWhiteSpace($ProcessName)) { return "Desktop" }
+    # Sprawdz cache
+    $now = Get-Date
+    if ($Script:ProcessNameCache.ContainsKey($ProcessName)) {
+        $expiry = $Script:ProcessNameCacheExpiry[$ProcessName]
+        if ($now -lt $expiry) {
+            return $Script:ProcessNameCache[$ProcessName]
+        }
+    }
+    $displayName = $ProcessName
+    try {
+        # Pobierz proces jesli nie podano
+        if ($null -eq $Process) {
+            $Process = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        if ($Process) {
+            # Metoda 1: FileVersionInfo.FileDescription (najlepsza!)
+            try {
+                $fileInfo = $Process.MainModule.FileVersionInfo
+                if ($fileInfo) {
+                    # Priorytet: FileDescription > ProductName > InternalName
+                    if (![string]::IsNullOrWhiteSpace($fileInfo.FileDescription) -and $fileInfo.FileDescription.Length -gt 1) {
+                        $displayName = $fileInfo.FileDescription.Trim()
+                    }
+                    elseif (![string]::IsNullOrWhiteSpace($fileInfo.ProductName) -and $fileInfo.ProductName.Length -gt 1) {
+                        $displayName = $fileInfo.ProductName.Trim()
+                    }
+                }
+            } catch { }
+            # Metoda 2: MainWindowTitle (jesli FileDescription nie zadzialalo)
+            if ($displayName -eq $ProcessName -or $displayName.Length -lt 2) {
+                try {
+                    $Process.Refresh()
+                    $title = $Process.MainWindowTitle
+                    if (![string]::IsNullOrWhiteSpace($title) -and $title.Length -gt 1) {
+                        # Wyczysc tytul z suffiksow przegladarek/systemowych
+                        $title = $title -replace '\s*[----]\s*(Microsoft Edge|Google Chrome|Mozilla Firefox|Brave|Opera|Safari|Visual Studio Code|Notepad\+\+).*$', ''
+                        $title = $title -replace '\s*[----]\s*Personal.*$', ''
+                        $title = $title -replace '\s*[----]\s*(Work|Praca).*$', ''
+                        $title = $title.Trim()
+                        # Wez tylko pierwsza czesc tytulu (przed " - ")
+                        if ($title -match '^(.+?)\s*[----]') {
+                            $title = $matches[1].Trim()
+                        }
+                        if ($title.Length -gt 1 -and $title.Length -lt 60) {
+                            $displayName = $title
+                        }
+                    }
+                } catch { }
+            }
+        }
+    } catch { }
+    # Fallback: Capitalize ProcessName
+    if ($displayName -eq $ProcessName -or [string]::IsNullOrWhiteSpace($displayName)) {
+        if ($ProcessName.Length -gt 1) {
+            $displayName = $ProcessName.Substring(0,1).ToUpper() + $ProcessName.Substring(1)
+        } else {
+            $displayName = $ProcessName.ToUpper()
+        }
+    }
+    # Ogranicz dlugosc
+    if ($displayName.Length -gt 40) {
+        $displayName = $displayName.Substring(0, 37) + "..."
+    }
+    # Zapisz do cache
+    $Script:ProcessNameCache[$ProcessName] = $displayName
+    $Script:ProcessNameCacheExpiry[$ProcessName] = $now.AddMinutes($Script:CacheExpiryMinutes)
+    return $displayName
+}
+# Alias dla kompatybilnosci wstecznej
+function Get-FriendlyAppName {
+    param([string]$ProcessName)
+    return Get-ProcessDisplayName -ProcessName $ProcessName
+}
+# Funkcja do pobierania tytulu aktywnego okna przez Win32 API
+function Get-ForegroundWindowTitle {
+    try {
+        $hwnd = [Win32]::GetForegroundWindow()
+        if ($hwnd -eq [IntPtr]::Zero) { return "" }
+        $length = [Win32]::GetWindowTextLength($hwnd)
+        if ($length -le 0) { return "" }
+        $sb = New-Object System.Text.StringBuilder($length + 1)
+        [Win32]::GetWindowText($hwnd, $sb, $sb.Capacity) | Out-Null
+        $title = $sb.ToString()
+        # Wyczysc tytul z suffiksow przegladarek/systemowych
+        $title = $title -replace '\s*[----]\s*(Microsoft Edge|Google Chrome|Mozilla Firefox|Brave|Opera|Safari).*$', ''
+        $title = $title -replace '\s*[----]\s*Personal.*$', ''
+        $title = $title -replace '\s*[----]\s*(Work|Praca).*$', ''
+        return $title.Trim()
+    } catch { return "" }
+}
+    Ensure-DirectoryExists $Script:ConfigDir
+# LOGS
+$Script:ActivityLog = [System.Collections.Generic.List[string]]::new()
+$Script:DebugLog = [System.Collections.Generic.List[string]]::new()
+$Script:DecisionHistory = [System.Collections.Generic.List[hashtable]]::new()
+$Script:DecisionHistoryMaxSize = 30  # 30 sekund historii (zoptymalizowane dla RAM storage)
+$Script:RAMIntelligenceHistory = [System.Collections.Generic.List[hashtable]]::new()
+$Script:RAMIntelligenceMaxSize = 30  # 30 sekund historii (zoptymalizowane dla RAM storage)
+$Script:ProBalanceHistory = [System.Collections.Generic.List[hashtable]]::new()
+$Script:ProBalanceHistoryMaxSize = 60
+function Add-Log {
+    param(
+        [string]$Entry, 
+        [switch]$Debug
+    )
+    if ([string]::IsNullOrWhiteSpace($Entry)) { return }
+    $time = (Get-Date).ToString("HH:mm:ss")
+    $text = "[$time] $Entry"
+    if ($Debug) {
+        $Script:DebugLog.Insert(0, $text)
+        while ($Script:DebugLog.Count -gt 15) { $Script:DebugLog.RemoveAt(15) }
+    } else {
+        $Script:ActivityLog.Insert(0, $text)
+        while ($Script:ActivityLog.Count -gt 5) { $Script:ActivityLog.RemoveAt(5) }
+    }
+}
+# FAST METRICS - Automatyczna detekcja zrodel danych (LHM/OHM/System)
+# --- Globalna zmienna przechowujaca wykryte zrodla danych ---
+$Script:DataSourcesInfo = @{
+    DetectionDone = $false
+    ActiveSource = "Unknown"  # LHM, OHM, SystemOnly
+    # Dostepnosc zrodel
+    LHMAvailable = $false
+    OHMAvailable = $false
+    ACPIThermalAvailable = $false
+    PerfCountersAvailable = $false
+    DetectedSensors = @()
+    # Dostepne metryki per zrodlo
+    AvailableMetrics = @{
+        CPUTemp = $false
+        CPUTempSource = "N/A"
+        CPULoad = $false
+        CPULoadSource = "N/A"
+        CPUClock = $false
+        CPUClockSource = "N/A"
+        CPUPower = $false
+        CPUPowerSource = "N/A"
+        PerCoreTemp = $false
+        PerCoreTempSource = "N/A"
+        PerCoreLoad = $false
+        PerCoreLoadSource = "N/A"
+        GPUTemp = $false
+        GPUTempSource = "N/A"
+        GPULoad = $false
+        GPULoadSource = "N/A"
+        GPUPower = $false
+        GPUPowerSource = "N/A"
+        GPUVRAM = $false
+        GPUVRAMSource = "N/A"
+        VRMTemp = $false
+        VRMTempSource = "N/A"
+        RAMUsage = $false
+        RAMUsageSource = "N/A"
+        DiskIO = $false
+        DiskIOSource = "N/A"
+        # v43.14: Fan monitoring & control
+        FanRPM = $false
+        FanRPMSource = "N/A"
+        FanControl = $false
+        FanControlSource = "N/A"
+    }
+}
+# --- Funkcja wykrywania dostepnych zrodel danych ---
+function Detect-DataSources {
+    Write-Host "\nDetekcja zrodel danych systemowych..." -ForegroundColor Cyan
+    $info = $Script:DataSourcesInfo
+    $info.DetectedSensors = @()
+    # === TEST 1: LibreHardwareMonitor ===
+    Write-Host "Sprawdzanie LibreHardwareMonitor..." -ForegroundColor Yellow -NoNewline
+    try {
+        $lhmProcess = Get-Process -Name 'LibreHardwareMonitor' -ErrorAction SilentlyContinue
+        try { $lhmTest = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop | Select-Object -First 1 } catch { $lhmTest = $null }
+        if ($lhmTest) {
+            $info.LHMAvailable = $true
+            Write-Host "Dostepny (WMI)" -ForegroundColor Green
+        } elseif ($lhmProcess) {
+            $info.LHMAvailable = $true
+            Write-Host "Proces LibreHardwareMonitor uruchomiony (brak WMI)" -ForegroundColor Green
+        } else {
+            Write-Host "Niedostepny" -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "Niedostepny" -ForegroundColor Red
+    }
+    # === TEST 2: OpenHardwareMonitor ===
+    Write-Host "Sprawdzanie OpenHardwareMonitor..." -ForegroundColor Yellow -NoNewline
+    try {
+        $ohmProcess = Get-Process -Name 'OpenHardwareMonitor' -ErrorAction SilentlyContinue
+        try { $ohmTest = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop | Select-Object -First 1 } catch { $ohmTest = $null }
+        if ($ohmTest) {
+            $info.OHMAvailable = $true
+            Write-Host "Dostepny (WMI)" -ForegroundColor Green
+        } elseif ($ohmProcess) {
+            $info.OHMAvailable = $true
+            Write-Host "Proces OpenHardwareMonitor uruchomiony (brak WMI)" -ForegroundColor Green
+        } else {
+            Write-Host "Niedostepny" -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "Niedostepny" -ForegroundColor Red
+    }
+    # === TEST 3: ACPI Thermal Zone ===
+    Write-Host "Sprawdzanie ACPI ThermalZone..." -ForegroundColor Yellow -NoNewline
+    try {
+        $acpiTest = Get-CimInstance -Namespace "root\wmi" -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop | Select-Object -First 1
+        if ($acpiTest -and $acpiTest.CurrentTemperature -gt 0) {
+            $info.ACPIThermalAvailable = $true
+            $tempK = $acpiTest.CurrentTemperature / 10
+            $tempC = [Math]::Round($tempK - 273.15, 1)
+            Write-Host "Dostepny ($tempC°C)" -ForegroundColor Green
+        } else {
+            Write-Host "Brak danych" -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "Niedostepny" -ForegroundColor Red
+    }
+    # === TEST 4: Performance Counters ===
+    Write-Host "Sprawdzanie Performance Counters..." -ForegroundColor Yellow -NoNewline
+    try {
+        $perfTest = [System.Diagnostics.PerformanceCounter]::new("Processor", "% Processor Time", "_Total")
+        $null = $perfTest.NextValue()
+        Start-Sleep -Milliseconds 100
+        $val = $perfTest.NextValue()
+        $perfTest.Dispose()
+        if ($val -ge 0) {
+            $info.PerfCountersAvailable = $true
+            Write-Host "Dostepny" -ForegroundColor Green
+        } else {
+            Write-Host "Brak danych" -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "Niedostepny" -ForegroundColor Red
+    }
+    Write-Host ""
+    # === OKRESLENIE AKTYWNEGO ZRODLA ===
+    if ($info.LHMAvailable) {
+        $info.ActiveSource = "LHM"
+        if ($info.OHMAvailable) {
+            Write-Host "  - Uwaga: Oba (LHM + OHM) dostepne - wybrano LHM (nowszy, wiecej sensorow)" -ForegroundColor Cyan
+        }
+    } elseif ($info.OHMAvailable) {
+        $info.ActiveSource = "OHM"
+    } else {
+        $info.ActiveSource = "SystemOnly"
+    }
+    # === SKANOWANIE DOSTEPNYCH METRYK ===
+    Write-Host "   Skanowanie dostepnych metryk..." -ForegroundColor Cyan
+    Write-Host ""
+    Detect-AvailableMetrics | Out-Null
+    # === PODSUMOWANIE ===
+    Write-Host ""
+    Write-Host "Podsumowanie detekcji:" -ForegroundColor White
+    $sourceColor = switch($info.ActiveSource) {
+        "LHM" { "Green" }
+        "OHM" { "Yellow" }
+        "SystemOnly" { "Red" }
+        default { "Gray" }
+    }
+    $sourceDesc = switch($info.ActiveSource) {
+        "LHM" { "LibreHardwareMonitor (pelne dane)" }
+        "OHM" { "OpenHardwareMonitor (pelne dane)" }
+        "SystemOnly" { "Tylko system Windows (ograniczone)" }
+        default { "Nieznane" }
+    }
+    Write-Host ("Aktywne zrodlo: {0}" -f $sourceDesc) -ForegroundColor $sourceColor
+    # Tabela dostepnych metryk
+    $metrics = $info.AvailableMetrics
+    $metricsList = @(
+        @{ Name = "Temperatura CPU"; Key = "CPUTemp"; SourceKey = "CPUTempSource" },
+        @{ Name = "Obciazenie CPU"; Key = "CPULoad"; SourceKey = "CPULoadSource" },
+        @{ Name = "Zegar CPU"; Key = "CPUClock"; SourceKey = "CPUClockSource" },
+        @{ Name = "Moc CPU"; Key = "CPUPower"; SourceKey = "CPUPowerSource" },
+        @{ Name = "Temp. per-Core"; Key = "PerCoreTemp"; SourceKey = "PerCoreTempSource" },
+        @{ Name = "Load per-Core"; Key = "PerCoreLoad"; SourceKey = "PerCoreLoadSource" },
+        @{ Name = "Temperatura GPU"; Key = "GPUTemp"; SourceKey = "GPUTempSource" },
+        @{ Name = "Obciazenie GPU"; Key = "GPULoad"; SourceKey = "GPULoadSource" },
+        @{ Name = "Moc GPU"; Key = "GPUPower"; SourceKey = "GPUPowerSource" },
+        @{ Name = "VRAM GPU"; Key = "GPUVRAM"; SourceKey = "GPUVRAMSource" },
+        @{ Name = "Temperatura VRM"; Key = "VRMTemp"; SourceKey = "VRMTempSource" },
+        @{ Name = "Uzycie RAM"; Key = "RAMUsage"; SourceKey = "RAMUsageSource" },
+        @{ Name = "Disk I/O"; Key = "DiskIO"; SourceKey = "DiskIOSource" }
+    )
+    foreach ($m in $metricsList) {
+        $available = $metrics[$m.Key]
+        $source = $metrics[$m.SourceKey]
+        $status = if ($available) { "OK" } else { "BRAK" }
+        Write-Host ("{0}: {1} (zrodlo: {2})" -f $m.Name, $status, $source)
+    }
+    Write-Host ""
+    $info.DetectionDone = $true
+    Populate-DetectedSensors
+    return $info
+}
+function Populate-DetectedSensors {
+    $info = $Script:DataSourcesInfo
+    $info.DetectedSensors = @()
+    # Collect from LHM if available
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            foreach ($sensor in $sensors) {
+                # Filter out uninteresting sensors
+                if ($sensor.Value -eq 0 -and $sensor.SensorType -ne "Control") { continue }
+                # Add to detected sensors as PSCustomObject (better JSON serialization)
+                $info.DetectedSensors += [PSCustomObject]@{
+                    Type = $sensor.SensorType
+                    Name = $sensor.Name
+                    Path = $sensor.Identifier
+                    Source = 'LHM'
+                    Value = $sensor.Value
+                }
+            }
+            Write-Host "  [DetectedSensors] Collected $($info.DetectedSensors.Count) sensors from LHM" -ForegroundColor Cyan
+        } catch {
+            Write-Host "  [DetectedSensors] Failed to collect from LHM: $_" -ForegroundColor Yellow
+        }
+    }
+    # Collect from OHM if LHM not available
+    if (-not $info.LHMAvailable -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            foreach ($sensor in $sensors) {
+                # Filter out uninteresting sensors
+                if ($sensor.Value -eq 0 -and $sensor.SensorType -ne "Control") { continue }
+                # Add to detected sensors as PSCustomObject
+                $info.DetectedSensors += [PSCustomObject]@{
+                    Type = $sensor.SensorType
+                    Name = $sensor.Name
+                    Path = $sensor.Identifier
+                    Source = 'OHM'
+                    Value = $sensor.Value
+                }
+            }
+            Write-Host "  [DetectedSensors] Collected $($info.DetectedSensors.Count) sensors from OHM" -ForegroundColor Cyan
+        } catch {
+            Write-Host "  [DetectedSensors] Failed to collect from OHM: $_" -ForegroundColor Yellow
+        }
+    }
+    # Add ACPI if available
+    if ($info.ACPIThermalAvailable) {
+        $info.DetectedSensors += [PSCustomObject]@{
+            Type = 'Temperature'
+            Name = 'ACPI ThermalZone'
+            Path = 'root\wmi\MSAcpi_ThermalZoneTemperature'
+            Source = 'ACPI'
+            Value = 0
+        }
+    }
+}
+# --- Funkcja skanowania dostepnych metryk ---
+function Detect-AvailableMetrics {
+    $info = $Script:DataSourcesInfo
+    $metrics = $info.AvailableMetrics
+    # ========== CPU TEMPERATURE ==========
+    $providersOrder = @('LHM','OHM')
+    foreach ($p in $providersOrder) {
+        if ($p -eq 'OHM' -and $info.OHMAvailable -and -not $metrics.CPUTemp) {
+            try {
+                $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+                $cpuTemp = $sensors | Where-Object {
+                    $_.SensorType -eq 'Temperature' -and ($_.Identifier -match '/cpu' -or $_.Name -match 'CPU|Core|Package')
+                } | Select-Object -First 1
+                if ($cpuTemp -and $cpuTemp.Value -gt 0) {
+                    $metrics.CPUTemp = $true
+                    $metrics.CPUTempSource = 'OHM'
+                    $info.DetectedSensors += @{ Type='CPUTemp'; Name=$cpuTemp.Name; Path=$cpuTemp.Identifier; Source='OHM' }
+                    break
+                }
+            } catch { }
+        }
+        if ($p -eq 'LHM' -and $info.LHMAvailable -and -not $metrics.CPUTemp) {
+            try {
+                $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+                $cpuTemp = $sensors | Where-Object {
+                    $_.SensorType -eq 'Temperature' -and ($_.Identifier -match '/cpu' -or $_.Name -match 'CPU|Core|Package|Tctl|Tdie')
+                } | Select-Object -First 1
+                if ($cpuTemp -and $cpuTemp.Value -gt 0) {
+                    $metrics.CPUTemp = $true
+                    $metrics.CPUTempSource = 'LHM'
+                    $info.DetectedSensors += @{ Type='CPUTemp'; Name=$cpuTemp.Name; Path=$cpuTemp.Identifier; Source='LHM' }
+                    break
+                }
+            } catch { }
+        }
+    }
+    if (-not $metrics.CPUTemp -and $info.ACPIThermalAvailable) {
+        $metrics.CPUTemp = $true
+        $metrics.CPUTempSource = 'ACPI'
+        $info.DetectedSensors += @{ Type='CPUTemp'; Name='ACPI ThermalZone'; Path='root\wmi'; Source='ACPI' }
+    }
+    # ========== CPU LOAD ==========
+    $providersOrder = if ($info.ActiveSource -eq 'OHM') { @('OHM','LHM','PerfCounter') } else { @('LHM','OHM','PerfCounter') }
+    foreach ($p in $providersOrder) {
+        if ($p -eq 'LHM' -and $info.LHMAvailable -and -not $metrics.CPULoad) {
+            try {
+                $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+                $cpuLoad = $sensors | Where-Object { $_.SensorType -eq 'Load' -and $_.Name -eq 'CPU Total' } | Select-Object -First 1
+                if ($cpuLoad) { $metrics.CPULoad = $true; $metrics.CPULoadSource = 'LHM'; break }
+            } catch { }
+        }
+        if ($p -eq 'OHM' -and $info.OHMAvailable -and -not $metrics.CPULoad) {
+            try {
+                $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+                $cpuLoad = $sensors | Where-Object { $_.SensorType -eq 'Load' -and $_.Name -eq 'CPU Total' } | Select-Object -First 1
+                if ($cpuLoad) { $metrics.CPULoad = $true; $metrics.CPULoadSource = 'OHM'; break }
+            } catch { }
+        }
+        if ($p -eq 'PerfCounter' -and $info.PerfCountersAvailable -and -not $metrics.CPULoad) {
+            $metrics.CPULoad = $true
+            $metrics.CPULoadSource = 'PerfCounter'
+            break
+        }
+    }
+    # ========== CPU CLOCK ==========
+    $providersOrder = if ($info.ActiveSource -eq 'OHM') { @('OHM','LHM','WMI','Registry') } else { @('LHM','OHM','WMI','Registry') }
+    foreach ($p in $providersOrder) {
+        if ($p -eq 'LHM' -and $info.LHMAvailable -and -not $metrics.CPUClock) {
+            try {
+                $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+                $cpuClock = $sensors | Where-Object { $_.SensorType -eq 'Clock' -and $_.Identifier -match '/cpu' -and $_.Name -match 'Core' -and $_.Value -gt 100 } | Select-Object -First 1
+                if ($cpuClock) { $metrics.CPUClock = $true; $metrics.CPUClockSource = 'LHM'; break }
+            } catch { }
+        }
+        if ($p -eq 'OHM' -and $info.OHMAvailable -and -not $metrics.CPUClock) {
+            try {
+                $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+                $cpuClock = $sensors | Where-Object { $_.SensorType -eq 'Clock' -and $_.Identifier -match '/cpu' -and $_.Name -match 'Core' -and $_.Value -gt 100 } | Select-Object -First 1
+                if ($cpuClock) { $metrics.CPUClock = $true; $metrics.CPUClockSource = 'OHM'; break }
+            } catch { }
+        }
+        if ($p -eq 'WMI' -and -not $metrics.CPUClock) {
+            try {
+                $perfData = Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'" -ErrorAction Stop
+                if ($perfData -and $perfData.PercentProcessorPerformance -gt 0) { $metrics.CPUClock = $true; $metrics.CPUClockSource = 'WMI'; break }
+            } catch { }
+        }
+        if ($p -eq 'Registry' -and -not $metrics.CPUClock) {
+            try {
+                $regMHz = (Get-ItemProperty -Path "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0" -Name "~MHz" -ErrorAction Stop)."~MHz"
+                if ($regMHz -gt 100) { $metrics.CPUClock = $true; $metrics.CPUClockSource = 'Registry'; break }
+            } catch { }
+        }
+    }
+    # Fallback: WMI PercentProcessorPerformance + MaxClock
+    if (-not $metrics.CPUClock) {
+        try {
+            $perfData = Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'" -ErrorAction Stop
+            if ($perfData -and $perfData.PercentProcessorPerformance -gt 0) {
+                $metrics.CPUClock = $true
+                $metrics.CPUClockSource = "WMI"
+            }
+        } catch { }
+    }
+    # Fallback: Registry
+    if (-not $metrics.CPUClock) {
+        try {
+            $regMHz = (Get-ItemProperty -Path "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0" -Name "~MHz" -ErrorAction Stop)."~MHz"
+            if ($regMHz -gt 100) {
+                $metrics.CPUClock = $true
+                $metrics.CPUClockSource = "Registry"
+            }
+        } catch { }
+    }
+    # ========== CPU POWER ==========
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $cpuPower = $sensors | Where-Object { 
+                $_.SensorType -eq "Power" -and $_.Identifier -match "/cpu" -and $_.Name -match "Package|Core"
+            } | Select-Object -First 1
+            if ($cpuPower -and $cpuPower.Value -gt 0) {
+                $metrics.CPUPower = $true
+                $metrics.CPUPowerSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.CPUPower -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $cpuPower = $sensors | Where-Object { 
+                $_.SensorType -eq "Power" -and $_.Identifier -match "/cpu" -and $_.Name -match "Package|Core"
+            } | Select-Object -First 1
+            if ($cpuPower -and $cpuPower.Value -gt 0) {
+                $metrics.CPUPower = $true
+                $metrics.CPUPowerSource = "OHM"
+            }
+        } catch { }
+    }
+    # CPU Power nie ma fallbacku systemowego
+    # ========== PER-CORE TEMPS ==========
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $coreTemps = $sensors | Where-Object { 
+                $_.SensorType -eq "Temperature" -and $_.Identifier -match "/cpu" -and $_.Name -match "Core #\d+"
+            }
+            if ($coreTemps -and $coreTemps.Count -gt 0) {
+                $metrics.PerCoreTemp = $true
+                $metrics.PerCoreTempSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.PerCoreTemp -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $coreTemps = $sensors | Where-Object { 
+                $_.SensorType -eq "Temperature" -and $_.Identifier -match "/cpu" -and $_.Name -match "Core #\d+"
+            }
+            if ($coreTemps -and $coreTemps.Count -gt 0) {
+                $metrics.PerCoreTemp = $true
+                $metrics.PerCoreTempSource = "OHM"
+            }
+        } catch { }
+    }
+    # ========== PER-CORE LOAD ==========
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $coreLoads = $sensors | Where-Object { 
+                $_.SensorType -eq "Load" -and $_.Identifier -match "/cpu" -and $_.Name -match "CPU Core #\d+"
+            }
+            if ($coreLoads -and $coreLoads.Count -gt 0) {
+                $metrics.PerCoreLoad = $true
+                $metrics.PerCoreLoadSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.PerCoreLoad -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $coreLoads = $sensors | Where-Object { 
+                $_.SensorType -eq "Load" -and $_.Identifier -match "/cpu" -and $_.Name -match "CPU Core #\d+"
+            }
+            if ($coreLoads -and $coreLoads.Count -gt 0) {
+                $metrics.PerCoreLoad = $true
+                $metrics.PerCoreLoadSource = "OHM"
+            }
+        } catch { }
+    }
+    # ========== GPU TEMPERATURE ==========
+    # FIX v40.1: Zmieniono /gpu na gpu - /gpu nie matchuje /nvidiagpu
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $gpuTemp = $sensors | Where-Object { 
+                $_.SensorType -eq "Temperature" -and 
+                ($_.Identifier -match "gpu" -or ($_.Identifier -match "/amdcpu" -and $_.Name -match "GPU|Graphics"))
+            } | Select-Object -First 1
+            if ($gpuTemp -and $gpuTemp.Value -gt 0) {
+                $metrics.GPUTemp = $true
+                $metrics.GPUTempSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.GPUTemp -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $gpuTemp = $sensors | Where-Object { $_.SensorType -eq "Temperature" -and $_.Identifier -match "gpu" } | Select-Object -First 1
+            if ($gpuTemp -and $gpuTemp.Value -gt 0) {
+                $metrics.GPUTemp = $true
+                $metrics.GPUTempSource = "OHM"
+            }
+        } catch { }
+    }
+    # ========== GPU LOAD ==========
+    # FIX v40.1: Zmieniono /gpu na gpu - /gpu nie matchuje /nvidiagpu
+    # FIX v40.1b: Preferuj GPU Core nad GPU Frame Buffer
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $gpuLoad = $sensors | Where-Object { 
+                $_.SensorType -eq "Load" -and 
+                (($_.Identifier -match "gpu" -and $_.Name -match "Core|GPU") -or ($_.Identifier -match "/amdcpu" -and $_.Name -match "GPU"))
+            } | Sort-Object { if ($_.Name -eq "GPU Core") { 0 } else { 1 } } | Select-Object -First 1
+            if ($gpuLoad) {
+                $metrics.GPULoad = $true
+                $metrics.GPULoadSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.GPULoad -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $gpuLoad = $sensors | Where-Object { $_.SensorType -eq "Load" -and $_.Identifier -match "gpu" -and $_.Name -match "Core|GPU" } | Sort-Object { if ($_.Name -eq "GPU Core") { 0 } else { 1 } } | Select-Object -First 1
+            if ($gpuLoad) {
+                $metrics.GPULoad = $true
+                $metrics.GPULoadSource = "OHM"
+            }
+        } catch { }
+    }
+    # ========== GPU POWER ==========
+    # FIX v40.1: Zmieniono /gpu na gpu - /gpu nie matchuje /nvidiagpu
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $gpuPower = $sensors | Where-Object { $_.SensorType -eq "Power" -and $_.Identifier -match "gpu" } | Select-Object -First 1
+            if ($gpuPower -and $gpuPower.Value -gt 0) {
+                $metrics.GPUPower = $true
+                $metrics.GPUPowerSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.GPUPower -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $gpuPower = $sensors | Where-Object { $_.SensorType -eq "Power" -and $_.Identifier -match "gpu" } | Select-Object -First 1
+            if ($gpuPower -and $gpuPower.Value -gt 0) {
+                $metrics.GPUPower = $true
+                $metrics.GPUPowerSource = "OHM"
+            }
+        } catch { }
+    }
+    # ========== GPU VRAM ==========
+    # FIX v40.1: Zmieniono /gpu na gpu - /gpu nie matchuje /nvidiagpu
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $gpuVRAM = $sensors | Where-Object { $_.SensorType -eq "SmallData" -and $_.Identifier -match "gpu" -and $_.Name -match "Memory Used" } | Select-Object -First 1
+            if ($gpuVRAM) {
+                $metrics.GPUVRAM = $true
+                $metrics.GPUVRAMSource = "LHM"
+            }
+        } catch { }
+    }
+    # ========== VRM TEMPERATURE ==========
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $vrmTemp = $sensors | Where-Object { 
+                $_.SensorType -eq "Temperature" -and 
+                ($_.Name -match "VRM|Motherboard|System|Chipset|PCH" -or $_.Identifier -match "/lpc/")
+            } | Select-Object -First 1
+            if ($vrmTemp -and $vrmTemp.Value -gt 0) {
+                $metrics.VRMTemp = $true
+                $metrics.VRMTempSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.VRMTemp -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $vrmTemp = $sensors | Where-Object { 
+                $_.SensorType -eq "Temperature" -and 
+                ($_.Name -match "VRM|Motherboard|System|Chipset" -or $_.Identifier -match "/lpc/")
+            } | Select-Object -First 1
+            if ($vrmTemp -and $vrmTemp.Value -gt 0) {
+                $metrics.VRMTemp = $true
+                $metrics.VRMTempSource = "OHM"
+            }
+        } catch { }
+    }
+    # ========== RAM USAGE ==========
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $ramLoad = $sensors | Where-Object { $_.SensorType -eq "Load" -and $_.Name -match "Memory" } | Select-Object -First 1
+            if ($ramLoad) {
+                $metrics.RAMUsage = $true
+                $metrics.RAMUsageSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.RAMUsage) {
+        try {
+            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            if ($os -and $os.TotalVisibleMemorySize -gt 0) {
+                $metrics.RAMUsage = $true
+                $metrics.RAMUsageSource = "WMI"
+            }
+        } catch { }
+    }
+    # ========== DISK I/O ==========
+    if ($info.PerfCountersAvailable) {
+        try {
+            $diskCounter = [System.Diagnostics.PerformanceCounter]::new("PhysicalDisk", "Disk Bytes/sec", "_Total")
+            $null = $diskCounter.NextValue()
+            $diskCounter.Dispose()
+            $metrics.DiskIO = $true
+            $metrics.DiskIOSource = "PerfCounter"
+        } catch { }
+    }
+    if (-not $metrics.DiskIO) {
+        try {
+            $diskPerf = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction Stop
+            if ($diskPerf) {
+                $metrics.DiskIO = $true
+                $metrics.DiskIOSource = "WMI"
+            }
+        } catch { }
+    }
+    # ========== FAN MONITORING & CONTROL (v43.14) ==========
+    if ($info.LHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $fanSensor = $sensors | Where-Object { $_.SensorType -eq "Fan" } | Select-Object -First 1
+            if ($fanSensor -and $fanSensor.Value -gt 0) {
+                $metrics.FanRPM = $true
+                $metrics.FanRPMSource = "LHM"
+            }
+            $fanControl = $sensors | Where-Object { $_.SensorType -eq "Control" } | Select-Object -First 1
+            if ($fanControl) {
+                $metrics.FanControl = $true
+                $metrics.FanControlSource = "LHM"
+            }
+        } catch { }
+    }
+    if (-not $metrics.FanRPM -and $info.OHMAvailable) {
+        try {
+            $sensors = Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop
+            $fanSensor = $sensors | Where-Object { $_.SensorType -eq "Fan" } | Select-Object -First 1
+            if ($fanSensor -and $fanSensor.Value -gt 0) {
+                $metrics.FanRPM = $true
+                $metrics.FanRPMSource = "OHM"
+            }
+            $fanControl = $sensors | Where-Object { $_.SensorType -eq "Control" } | Select-Object -First 1
+            if ($fanControl) {
+                $metrics.FanControl = $true
+                $metrics.FanControlSource = "OHM"
+            }
+        } catch { }
+    }
+}
+# --- Cached Cim/WMI helpers to reduce syscall frequency ---
+function Get-LHMSensorsCached {
+    param([int]$ttl = 0)  # CPU load musi byc zawsze swiezy, nie cache'uj!
+    if (-not $Script:DataSourcesInfo.LHMAvailable) { return $null }
+    try { return Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Sensor -ErrorAction Stop } catch { return $null }
+}
+function Get-LHMHardwareCached {
+    param([int]$ttl = 30000)  #  v39.20: 30 sekund
+    if (-not $Script:DataSourcesInfo.LHMAvailable) { return $null }
+    if (-not $Script:LHMHardwareCacheTime) { $Script:LHMHardwareCacheTime = [DateTime]::MinValue }
+    try {
+        if ($Script:LHMHardwareCache -and (([DateTime]::Now - $Script:LHMHardwareCacheTime).TotalMilliseconds -lt $ttl)) { return $Script:LHMHardwareCache }
+    } catch { }
+    try { $s = Get-CimInstance -Namespace "root\LibreHardwareMonitor" -ClassName Hardware -ErrorAction SilentlyContinue; $Script:LHMHardwareCache = $s; $Script:LHMHardwareCacheTime = [DateTime]::Now; return $s } catch { return $Script:LHMHardwareCache }
+}
+function Get-OHMSensorsCached {
+    param([int]$ttl = 0)  # CPU load musi byc zawsze swiezy, nie cache'uj!
+    if (-not $Script:DataSourcesInfo.OHMAvailable) { return $null }
+    try { return Get-CimInstance -Namespace "root\OpenHardwareMonitor" -ClassName Sensor -ErrorAction Stop } catch { return $null }
+}
+function Get-ACPIThermalCached {
+    param([int]$ttl = 30000)  #  v39.20: 30 sekund
+    if (-not $Script:ACPIThermalCacheTime) { $Script:ACPIThermalCacheTime = [DateTime]::MinValue }
+    try {
+        if ($Script:ACPIThermalCache -and (([DateTime]::Now - $Script:ACPIThermalCacheTime).TotalMilliseconds -lt $ttl)) { return $Script:ACPIThermalCache }
+    } catch { }
+    try { $s = Get-CimInstance -Namespace "root\wmi" -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | Select-Object -First 1; $Script:ACPIThermalCache = $s; $Script:ACPIThermalCacheTime = [DateTime]::Now; return $s } catch { return $Script:ACPIThermalCache }
+}
+# Cached WMI helpers for OS / Disk / CPU
+function Get-OSCached {
+    param([int]$ttl = 30000)  #  v39.21 FIX: 30s (bylo 10s) - eliminacja busy cursor co 10s
+    if (-not $Script:OSCacheTime) { $Script:OSCacheTime = [DateTime]::MinValue }
+    try { if ($Script:OSCache -and (([DateTime]::Now - $Script:OSCacheTime).TotalMilliseconds -lt $ttl)) { return $Script:OSCache } } catch { }
+    try { $o = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue | Select-Object -First 1; $Script:OSCache = $o; $Script:OSCacheTime = [DateTime]::Now; return $o } catch { return $Script:OSCache }
+}
+function Get-DiskPerfCached {
+    param([int]$ttl = 30000)  #  v39.21 FIX: 30s (bylo 5s) - eliminacja busy cursor co 5s
+    if (-not $Script:DiskPerfCacheTime) { $Script:DiskPerfCacheTime = [DateTime]::MinValue }
+    try { if ($Script:DiskPerfCache -and (([DateTime]::Now - $Script:DiskPerfCacheTime).TotalMilliseconds -lt $ttl)) { return $Script:DiskPerfCache } } catch { }
+    try { $d = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction SilentlyContinue; $Script:DiskPerfCache = $d; $Script:DiskPerfCacheTime = [DateTime]::Now; return $d } catch { return $Script:DiskPerfCache }
+}
+function Get-CPUInfoCached {
+    param([int]$ttl = 30000)  #  v39.21 FIX: 30s (bylo 10s) - eliminacja busy cursor co 10s
+    if (-not $Script:CPUInfoCacheTime) { $Script:CPUInfoCacheTime = [DateTime]::MinValue }
+    try { if ($Script:CPUInfoCache -and (([DateTime]::Now - $Script:CPUInfoCacheTime).TotalMilliseconds -lt $ttl)) { return $Script:CPUInfoCache } } catch { }
+    try { $c = Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1; $Script:CPUInfoCache = $c; $Script:CPUInfoCacheTime = [DateTime]::Now; return $c } catch { return $Script:CPUInfoCache }
+}
+function Get-ProcessorPerfCached {
+    param([int]$ttl = 30000)
+    if (-not $Script:ProcessorPerfCacheTime) { $Script:ProcessorPerfCacheTime = [DateTime]::MinValue }
+    try { 
+        if ($Script:ProcessorPerfCache -and (([DateTime]::Now - $Script:ProcessorPerfCacheTime).TotalMilliseconds -lt $ttl)) { 
+            return $Script:ProcessorPerfCache 
+        } 
+    } catch { }
+    try { 
+        $p = Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+        $Script:ProcessorPerfCache = $p
+        $Script:ProcessorPerfCacheTime = [DateTime]::Now
+        return $p 
+    } catch { 
+        return $Script:ProcessorPerfCache 
+    }
+}
+# ═══════════════════════════════════════════════════════════════════════════════
+# HELPER: Get-DiskCounterCached (przeniesione z wnętrza klasy FastMetrics)
+# ═══════════════════════════════════════════════════════════════════════════════
+function Get-DiskCounterCached {
+    <#
+    .SYNOPSIS
+    v39.3: Cache disk counter (fallback) - używane przez FastMetrics
+    #>
+    param([int]$ttl = 5000)
+    if (-not $Script:DiskCounterCacheTime) { $Script:DiskCounterCacheTime = [DateTime]::MinValue }
+    try { 
+        if ($Script:DiskCounterCache -and (([DateTime]::Now - $Script:DiskCounterCacheTime).TotalMilliseconds -lt $ttl)) { 
+            return $Script:DiskCounterCache 
+        } 
+    } catch { }
+    try {
+        $c = Get-Counter '\PhysicalDisk(_Total)\Disk Bytes/sec' -ErrorAction SilentlyContinue
+        $Script:DiskCounterCache = $c
+        $Script:DiskCounterCacheTime = [DateTime]::Now
+        return $c
+    } catch {
+        return $Script:DiskCounterCache
+    }
+}
+class FastMetrics {
+    [System.Diagnostics.PerformanceCounter] $CpuCounter
+    [System.Diagnostics.PerformanceCounter] $DiskCounter
+    [double] $CachedTemp
+    [int] $TempTick
+    [int] $LastCPU
+    [double] $LastIO
+    [string] $TempSource
+    [bool] $LHMAvailable
+    [bool] $OHMAvailable
+    [string] $LHMSensorPath
+    [string] $ActiveDataSource  # LHM, OHM, SystemOnly
+    #  Extended monitoring
+    [hashtable] $GPU
+    [hashtable] $VRM
+    [hashtable] $PerCore
+    [double] $RAMUsage
+    [double] $CPUPower
+    [double] $CPUClock
+    [int] $ExtendedTick
+    FastMetrics() {
+        # Ustaw zrodla danych z globalnej detekcji
+        $this.LHMAvailable = $Script:DataSourcesInfo.LHMAvailable
+        $this.OHMAvailable = $Script:DataSourcesInfo.OHMAvailable
+        $this.ActiveDataSource = $Script:DataSourcesInfo.ActiveSource
+        try {
+            $this.CpuCounter = [System.Diagnostics.PerformanceCounter]::new("Processor", "% Processor Time", "_Total")
+            $this.DiskCounter = [System.Diagnostics.PerformanceCounter]::new("PhysicalDisk", "Disk Bytes/sec", "_Total")
+            $null = $this.CpuCounter.NextValue()
+            $null = $this.DiskCounter.NextValue()
+        } catch {
+            Write-Host "WARNING: Performance counters initialization failed: $_" -ForegroundColor Yellow
+        }
+        $this.CachedTemp = 0
+        $this.TempTick = 0
+        $this.LastCPU = 0
+        $this.LastIO = 0.0
+        $this.TempSource = "Unknown"
+        $this.LHMSensorPath = ""
+        #  Initialize extended
+        $this.GPU = @{ Temp = 0; Load = 0; Power = 0; VRAM = 0; Name = "N/A"; Available = $false }
+        $this.VRM = @{ Temp = 0; Available = $false }
+        $this.PerCore = @{ Temps = @(); Loads = @(); Count = 0 }
+        $this.RAMUsage = 0
+        $this.CPUPower = 0
+        $this.CPUClock = 0
+        $this.ExtendedTick = 0
+        $this.InitializeFromDetectedSources()
+    }
+    [void] InitializeFromDetectedSources() {
+        # Ustaw TempSource na podstawie detekcji
+        $metrics = $Script:DataSourcesInfo.AvailableMetrics
+        if ($metrics.CPUTemp) {
+            switch ($metrics.CPUTempSource) {
+                "LHM" { $this.TempSource = "LibreHardwareMonitor" }
+                "OHM" { $this.TempSource = "OpenHardwareMonitor" }
+                "ACPI" { $this.TempSource = "WMI-ACPI" }
+                default { $this.TempSource = "N/A" }
+            }
+        } else {
+            $this.TempSource = "N/A"
+        }
+        # Sprawdz czy GPU jest dostepne
+        if ($metrics.GPUTemp -or $metrics.GPULoad) {
+            $this.GPU.Available = $true
+        }
+        # Pobierz poczatkowa temperature
+        $this.UpdateTemperature()
+    }
+    [void] UpdateTemperature() {
+        $metrics = $Script:DataSourcesInfo.AvailableMetrics
+        switch ($metrics.CPUTempSource) {
+            "LHM" {
+                $newTemp = $this.GetTemperatureFromLHM()
+                if ($newTemp -gt 0) { $this.CachedTemp = $newTemp }
+            }
+            "OHM" {
+                $newTemp = $this.GetTemperatureFromOHM()
+                if ($newTemp -gt 0) { $this.CachedTemp = $newTemp }
+            }
+            "ACPI" {
+                $newTemp = $this.GetTemperatureFromACPI()
+                if ($newTemp -gt 0) { $this.CachedTemp = $newTemp }
+            }
+        }
+    }
+    [double] GetTemperatureFromLHM() {
+        try {
+            $sensors = Get-LHMSensorsCached
+            if ($sensors) {
+                if (![string]::IsNullOrWhiteSpace($this.LHMSensorPath)) {
+                    $sensor = $sensors | Where-Object { $_.Identifier -eq $this.LHMSensorPath } | Select-Object -First 1
+                    if ($sensor -and $sensor.Value -gt 0) {
+                        return [Math]::Round($sensor.Value, 1)
+                    }
+                }
+                $cpuTemps = $sensors | Where-Object { 
+                    $_.SensorType -eq "Temperature" -and 
+                    ($_.Identifier -match "/cpu" -or $_.Name -match "CPU|Core|Package|Tctl|Tdie")
+                }
+                $amdTemp = $cpuTemps | Where-Object { $_.Name -match "Tdie|Tctl|Core \(Tctl" } | Select-Object -First 1
+                if ($amdTemp -and $amdTemp.Value -gt 0) {
+                    $this.LHMSensorPath = $amdTemp.Identifier
+                    return [Math]::Round($amdTemp.Value, 1)
+                }
+                $packageTemp = $cpuTemps | Where-Object { $_.Name -match "Package" } | Select-Object -First 1
+                if ($packageTemp -and $packageTemp.Value -gt 0) {
+                    $this.LHMSensorPath = $packageTemp.Identifier
+                    return [Math]::Round($packageTemp.Value, 1)
+                }
+                $anyTemp = $cpuTemps | Where-Object { $_.Value -gt 0 } | Select-Object -First 1
+                if ($anyTemp) {
+                    $this.LHMSensorPath = $anyTemp.Identifier
+                    return [Math]::Round($anyTemp.Value, 1)
+                }
+            }
+        } catch { }
+        return $this.CachedTemp
+    }
+    [double] GetTemperatureFromOHM() {
+        try {
+            $sensors = Get-OHMSensorsCached
+            if ($sensors) {
+                $cpuTemp = $sensors | Where-Object { 
+                    $_.SensorType -eq "Temperature" -and 
+                    ($_.Identifier -match "/cpu" -or $_.Name -match "CPU|Core|Package")
+                } | Where-Object { $_.Value -gt 0 } | Select-Object -First 1
+                if ($cpuTemp) {
+                    return [Math]::Round($cpuTemp.Value, 1)
+                }
+            }
+        } catch { }
+        return $this.CachedTemp
+    }
+    [double] GetTemperatureFromACPI() {
+        try {
+            $thermalZone = Get-ACPIThermalCached
+            if ($thermalZone -and $thermalZone.CurrentTemperature) {
+                $tempKelvin = $thermalZone.CurrentTemperature / 10
+                $tempCelsius = [Math]::Round($tempKelvin - 273.15, 1)
+                if ($tempCelsius -gt 0 -and $tempCelsius -lt 120) {
+                    return $tempCelsius
+                }
+            }
+        } catch { }
+        return $this.CachedTemp
+    }
+    [hashtable] Get() {
+        $cpu = 0
+        $io = 0.0
+        $metrics = $Script:DataSourcesInfo.AvailableMetrics
+        # === CPU Load ===
+        $cpu = $null
+        $cpuSource = ""
+        # Najpierw LHM
+        if ($this.LHMAvailable) {
+            try {
+                $sensors = Get-LHMSensorsCached
+                $cpuLoad = $sensors | Where-Object { $_.SensorType -eq "Load" -and $_.Name -eq "CPU Total" } | Select-Object -First 1
+                if ($cpuLoad) {
+                    $cpu = [Math]::Round($cpuLoad.Value)
+                    $cpuSource = "LHM"
+                    $this.LastCPU = $cpu
+                }
+            } catch {}
+        }
+        # Potem OHM jesli nie ma z LHM
+        if (-not $cpu -and $this.OHMAvailable) {
+            try {
+                $sensors = Get-OHMSensorsCached
+                $cpuLoad = $sensors | Where-Object { $_.SensorType -eq "Load" -and $_.Name -eq "CPU Total" } | Select-Object -First 1
+                if ($cpuLoad) {
+                    $cpu = [Math]::Round($cpuLoad.Value)
+                    $cpuSource = "OHM"
+                    $this.LastCPU = $cpu
+                }
+            } catch {}
+        }
+        # Potem PerfCounter jesli nie ma z LHM/OHM
+        if (-not $cpu -and $this.CpuCounter) {
+            try {
+                $cpu = [Math]::Round($this.CpuCounter.NextValue())
+                $cpuSource = "PerfCounter"
+                $this.LastCPU = $cpu
+            } catch {}
+        }
+        # Jesli nadal brak, ustaw N/A
+        if (-not $cpu) {
+            $cpu = $null
+            $cpuSource = "N/A"
+        }
+        # === Disk I/O ===
+        if ($metrics.DiskIOSource -eq "PerfCounter" -and $this.DiskCounter) { 
+            try { 
+                $io = [Math]::Round($this.DiskCounter.NextValue() / 1MB, 1)
+                $this.LastIO = $io
+            } catch { 
+                $io = $this.LastIO 
+            }
+        } elseif ($metrics.DiskIOSource -eq "WMI") {
+            try {
+                $diskPerf = Get-DiskPerfCached
+                if ($diskPerf) { 
+                    $io = [Math]::Round($diskPerf.DiskBytesPersec / 1MB, 1)
+                    $this.LastIO = $io 
+                }
+            } catch { $io = $this.LastIO }
+        } else {
+            $io = $this.LastIO
+        }
+        # === Temperature (co 5 cykli) ===
+        $this.TempTick++
+        if ($this.TempTick -ge 5) {
+            $this.TempTick = 0
+            $this.UpdateTemperature()
+        }
+        return @{ 
+            CPU = if ($cpu -ne $null) { [Math]::Max(0, [Math]::Min(100, $cpu)) } else { $null }
+            CPUSource = $cpuSource
+            IO = [Math]::Max(0.0, $io)
+            Temp = $this.CachedTemp
+            TempSource = $this.TempSource
+            DataSource = $this.ActiveDataSource
+        }
+    }
+    [void] Cleanup() {
+        if ($this.CpuCounter) {
+            try { $this.CpuCounter.Dispose() } catch { }
+            $this.CpuCounter = $null
+        }
+        if ($this.DiskCounter) {
+            try { $this.DiskCounter.Dispose() } catch { }
+            $this.DiskCounter = $null
+        }
+    }
+    #  Extended metrics - wspiera LHM, OHM i System fallback
+    [void] UpdateExtendedMetrics() {
+        $this.ExtendedTick++
+        if ($this.ExtendedTick -lt 5) { return }  #  v39.18: Co 5 cykli (~4 sek, bylo 3) - mniej WMI calls
+        $this.ExtendedTick = 0
+        $metrics = $Script:DataSourcesInfo.AvailableMetrics
+        $sensors = $null
+        # Pobierz sensory z dostepnego zrodla
+        if ($this.LHMAvailable) {
+            $sensors = Get-LHMSensorsCached
+        } elseif ($this.OHMAvailable) {
+            $sensors = Get-OHMSensorsCached
+        }
+        # === GPU Monitoring ===
+        # FIX v40.1: Zmieniono /gpu na gpu - /gpu nie matchuje /nvidiagpu
+        # FIX v40.1c: Zawsze próbuj odczytać GPU Temp jeśli są sensory (nie polegaj na detekcji)
+        if ($sensors) {
+            try {
+                $gpuTemp = $sensors | Where-Object { 
+                    $_.SensorType -eq "Temperature" -and 
+                    ($_.Identifier -match "gpu" -or 
+                     ($_.Identifier -match "/amdcpu" -and $_.Name -match "GPU|Graphics"))
+                } | Select-Object -First 1
+                if ($gpuTemp) { 
+                    $this.GPU.Temp = [Math]::Round($gpuTemp.Value, 1)
+                    $this.GPU.Available = $true
+                }
+            } catch { }
+        }
+        # FIX v40.1: Zmieniono /gpu na gpu - /gpu nie matchuje /nvidiagpu
+        # FIX v40.1b: Preferuj "GPU Core" nad "GPU Frame Buffer" - sortuj by Name
+        # FIX v40.1c: Zawsze próbuj odczytać GPU Load jeśli są sensory (nie polegaj na detekcji)
+        # FIX v40.3: Bierz MAKSYMALNE obciążenie GPU (GPU Core często = 0, ale Frame Buffer ma wartość)
+        if ($sensors) {
+            try {
+                $gpuLoads = $sensors | Where-Object { 
+                    $_.SensorType -eq "Load" -and 
+                    (($_.Identifier -match "gpu" -and $_.Name -match "Core|GPU|Frame|Memory") -or
+                     ($_.Identifier -match "/amdcpu" -and $_.Name -match "GPU|Graphics"))
+                }
+                if ($gpuLoads) {
+                    # Weź maksymalne obciążenie z wszystkich sensorów GPU
+                    $maxLoad = ($gpuLoads | Measure-Object -Property Value -Maximum).Maximum
+                    if ($maxLoad -gt 0) {
+                        $this.GPU.Load = [Math]::Round($maxLoad, 0)
+                        $this.GPU.Available = $true
+                        # Zapisz też nazwę sensora z max load (dla debugowania)
+                        $maxSensor = $gpuLoads | Where-Object { $_.Value -eq $maxLoad } | Select-Object -First 1
+                        if ($maxSensor) { $this.GPU.Name = $maxSensor.Name }
+                    }
+                }
+            } catch { }
+        }
+        # FIX v40.1: Fallback - WMI GPU Engine monitoring (Windows 10/11)
+        # Działa gdy LibreHardwareMonitor nie dostarcza danych GPU
+        if ($this.GPU.Load -eq 0) {
+            try {
+                # Użyj Performance Counter API dla GPU Engine
+                $gpuCounters = Get-CimInstance -Namespace "root\CIMV2" -Query "SELECT Name, UtilizationPercentage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine WHERE EngineType='3D'" -ErrorAction SilentlyContinue
+                if ($gpuCounters) {
+                    # Suma utilization dla wszystkich silników 3D
+                    $totalUtil = ($gpuCounters | Measure-Object -Property UtilizationPercentage -Sum).Sum
+                    $engineCount = ($gpuCounters | Measure-Object).Count
+                    if ($engineCount -gt 0 -and $totalUtil -gt 0) {
+                        # Średnie użycie z wszystkich silników
+                        $avgUtil = [Math]::Min(100, [Math]::Round($totalUtil / $engineCount, 0))
+                        $this.GPU.Load = $avgUtil
+                        $this.GPU.Available = $true
+                    }
+                }
+            } catch { }
+        }
+        # FIX v40.1: Dodatkowy fallback - nvidia-smi dla NVIDIA GPU
+        if ($this.GPU.Load -eq 0 -and $Script:dGPUVendor -eq "NVIDIA") {
+            try {
+                $nvsmi = & nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>$null
+                if ($nvsmi -and $nvsmi -match '^\d+$') {
+                    $this.GPU.Load = [int]$nvsmi
+                    $this.GPU.Available = $true
+                }
+            } catch { }
+        }
+        # FIX v40.1: Zmieniono /gpu na gpu - /gpu nie matchuje /nvidiagpu
+        if ($metrics.GPUPower -and $sensors) {
+            try {
+                $gpuPower = $sensors | Where-Object { 
+                    $_.SensorType -eq "Power" -and 
+                    ($_.Identifier -match "gpu" -or 
+                     ($_.Identifier -match "/amdcpu" -and $_.Name -match "GPU|Graphics|SOC"))
+                } | Select-Object -First 1
+                if ($gpuPower) { $this.GPU.Power = [Math]::Round($gpuPower.Value, 1) }
+            } catch { }
+        }
+        # FIX v40.1: Zmieniono /gpu na gpu - /gpu nie matchuje /nvidiagpu
+        if ($metrics.GPUVRAM -and $sensors) {
+            try {
+                $gpuVRAM = $sensors | Where-Object { 
+                    $_.SensorType -eq "SmallData" -and 
+                    ($_.Identifier -match "gpu" -and $_.Name -match "Memory Used")
+                } | Select-Object -First 1
+                if ($gpuVRAM) { $this.GPU.VRAM = [Math]::Round($gpuVRAM.Value, 0) }
+            } catch { }
+        }
+        # GPU Name
+        if ($this.LHMAvailable) {
+            try {
+                $gpuHw = Get-LHMHardwareCached | Where-Object { $_.HardwareType -match "Gpu" } | Select-Object -First 1
+                if ($gpuHw) { 
+                    $this.GPU.Name = $gpuHw.Name 
+                } else {
+                    $cpuHw = Get-LHMHardwareCached | Where-Object { $_.HardwareType -match "Cpu" } | Select-Object -First 1
+                    if ($cpuHw -and $cpuHw.Name -match "AMD") {
+                        $this.GPU.Name = "AMD APU (integrated)"
+                    }
+                }
+            } catch { }
+        }
+        # === VRM / Motherboard Temp ===
+        if ($metrics.VRMTemp -and $sensors) {
+            try {
+                $vrmTemp = $sensors | Where-Object { 
+                    $_.SensorType -eq "Temperature" -and 
+                    ($_.Name -match "VRM|Motherboard|System|Chipset|PCH" -or $_.Identifier -match "/lpc/")
+                } | Sort-Object Value -Descending | Select-Object -First 1
+                if ($vrmTemp -and $vrmTemp.Value -gt 0) {
+                    $this.VRM.Temp = [Math]::Round($vrmTemp.Value, 1)
+                    $this.VRM.Available = $true
+                }
+            } catch { }
+        }
+        # === Per-Core Temps ===
+        if ($metrics.PerCoreTemp -and $sensors) {
+            try {
+                $coreTemps = $sensors | Where-Object { 
+                    $_.SensorType -eq "Temperature" -and 
+                    $_.Identifier -match "/cpu" -and 
+                    $_.Name -match "Core #\d+"
+                } | Sort-Object { [int]($_.Name -replace '\D','') }
+                if ($coreTemps) {
+                    $this.PerCore.Temps = @($coreTemps | ForEach-Object { [Math]::Round($_.Value, 1) })
+                    $this.PerCore.Count = $coreTemps.Count
+                }
+            } catch { }
+        }
+        # === Per-Core Loads ===
+        if ($metrics.PerCoreLoad -and $sensors) {
+            try {
+                $coreLoads = $sensors | Where-Object { 
+                    $_.SensorType -eq "Load" -and 
+                    $_.Identifier -match "/cpu" -and 
+                    $_.Name -match "CPU Core #\d+"
+                } | Sort-Object { [int]($_.Name -replace '\D','') }
+                if ($coreLoads) {
+                    $this.PerCore.Loads = @($coreLoads | ForEach-Object { [Math]::Round($_.Value, 0) })
+                }
+            } catch { }
+        }
+        # === CPU Power ===
+        if ($metrics.CPUPower -and $sensors) {
+            try {
+                $cpuPwrSensor = $sensors | Where-Object { 
+                    $_.SensorType -eq "Power" -and 
+                    $_.Identifier -match "/cpu" -and 
+                    $_.Name -match "Package|CPU Package|Core"
+                } | Select-Object -First 1
+                if ($cpuPwrSensor) { $this.CPUPower = [Math]::Round($cpuPwrSensor.Value, 1) }
+            } catch { }
+        }
+        # === CPU Clock ===
+        if ($metrics.CPUClock) {
+            try {
+                if ($metrics.CPUClockSource -eq "LHM" -and $sensors) {
+                    $cpuClocks = $sensors | Where-Object { 
+                        $_.SensorType -eq "Clock" -and $_.Identifier -match "/cpu" -and $_.Name -match "Core" -and $_.Value -gt 100
+                    }
+                    if ($cpuClocks -and $cpuClocks.Count -gt 0) {
+                        $avgClock = ($cpuClocks | Measure-Object -Property Value -Average).Average
+                        $this.CPUClock = [Math]::Round($avgClock, 0)
+                    }
+                } elseif ($metrics.CPUClockSource -eq "OHM" -and $sensors) {
+                    $cpuClocks = $sensors | Where-Object { 
+                        $_.SensorType -eq "Clock" -and $_.Identifier -match "/cpu" -and $_.Name -match "Core" -and $_.Value -gt 100
+                    }
+                    if ($cpuClocks -and $cpuClocks.Count -gt 0) {
+                        $avgClock = ($cpuClocks | Measure-Object -Property Value -Average).Average
+                        $this.CPUClock = [Math]::Round($avgClock, 0)
+                    }
+                } elseif ($metrics.CPUClockSource -eq "WMI") {
+                    $perfData = Get-ProcessorPerfCached  #  v39.3: Cached (bylo niebuforowane!)
+                    $cpuWmi = Get-CPUInfoCached
+                    if ($cpuWmi -and $perfData -and $perfData.PercentProcessorPerformance -gt 0) {
+                        $this.CPUClock = [Math]::Round($cpuWmi.MaxClockSpeed * $perfData.PercentProcessorPerformance / 100, 0)
+                    }
+                } elseif ($metrics.CPUClockSource -eq "Registry") {
+                    $regMHz = (Get-ItemProperty -Path "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0" -Name "~MHz" -ErrorAction SilentlyContinue)."~MHz"
+                    if ($regMHz -gt 100) { $this.CPUClock = [int]$regMHz }
+                }
+            } catch { }
+        }
+        # === RAM Usage ===
+        if ($metrics.RAMUsage) {
+            try {
+                if ($metrics.RAMUsageSource -eq "LHM" -and $sensors) {
+                    $ramLoad = $sensors | Where-Object { $_.SensorType -eq "Load" -and $_.Name -match "Memory" } | Select-Object -First 1
+                    if ($ramLoad) { $this.RAMUsage = [Math]::Round($ramLoad.Value, 0) }
+                } else {
+                    # WMI fallback
+                    $os = Get-OSCached
+                    if ($os -and $os.TotalVisibleMemorySize -gt 0) {
+                        $this.RAMUsage = [Math]::Round((1 - ($os.FreePhysicalMemory / $os.TotalVisibleMemorySize)) * 100, 0)
+                    }
+                }
+            } catch { }
+        }
+    }
+    [hashtable] GetExtended() {
+        $basic = $this.Get()
+        $this.UpdateExtendedMetrics()
+        return @{
+            # Basic
+            CPU = $basic.CPU
+            IO = $basic.IO
+            Temp = $basic.Temp
+            TempSource = $basic.TempSource
+            DataSource = $this.ActiveDataSource
+            # Extended
+            GPU = $this.GPU.Clone()
+            VRM = $this.VRM.Clone()
+            PerCore = @{
+                Temps = $this.PerCore.Temps
+                Loads = $this.PerCore.Loads
+                Count = $this.PerCore.Count
+            }
+            RAMUsage = $this.RAMUsage
+            CPUPower = $this.CPUPower
+            CPUClock = $this.CPUClock
+            # Info o dostepnosci metryk
+            AvailableMetrics = $Script:DataSourcesInfo.AvailableMetrics
+        }
+    }
+    # Metoda do wyswietlenia statusu zrodel danych
+    [string] GetDataSourceStatus() {
+        $metrics = $Script:DataSourcesInfo.AvailableMetrics
+        $available = @()
+        $unavailable = @()
+        if ($metrics.CPUTemp) { $available += "CPU Temp ($($metrics.CPUTempSource))" } else { $unavailable += "CPU Temp" }
+        if ($metrics.CPULoad) { $available += "CPU Load ($($metrics.CPULoadSource))" } else { $unavailable += "CPU Load" }
+        if ($metrics.CPUClock) { $available += "CPU Clock ($($metrics.CPUClockSource))" } else { $unavailable += "CPU Clock" }
+        if ($metrics.CPUPower) { $available += "CPU Power ($($metrics.CPUPowerSource))" } else { $unavailable += "CPU Power" }
+        if ($metrics.GPUTemp) { $available += "GPU Temp ($($metrics.GPUTempSource))" } else { $unavailable += "GPU Temp" }
+        if ($metrics.RAMUsage) { $available += "RAM ($($metrics.RAMUsageSource))" } else { $unavailable += "RAM" }
+        if ($metrics.DiskIO) { $available += "Disk I/O ($($metrics.DiskIOSource))" } else { $unavailable += "Disk I/O" }
+        if ($metrics.FanRPM) { $available += "Fan RPM ($($metrics.FanRPMSource))" } else { $unavailable += "Fan RPM" }
+        if ($metrics.FanControl) { $available += "Fan Control ($($metrics.FanControlSource))" }
+        $status = "Zrodlo: $($this.ActiveDataSource)`n"
+        $status += "Dostepne: $($available -join ', ')`n"
+        if ($unavailable.Count -gt 0) {
+            $status += "Niedostepne: $($unavailable -join ', ')"
+        }
+        return $status
+    }
+}
+# --- Funkcja pomocnicza do wyswietlenia podsumowania zrodel ---
+function Show-DataSourcesSummary {
+    if (-not $Script:DataSourcesInfo.DetectionDone) {
+        Write-Host "  [WARN] Detekcja zrodel nie zostala przeprowadzona" -ForegroundColor Yellow
+        return
+    }
+    $info = $Script:DataSourcesInfo
+    $metrics = $info.AvailableMetrics
+    Write-Host ""
+    Write-Host "  +-------------------------------------------------+" -ForegroundColor Cyan
+    Write-Host "  |         STATUS ZRODEL DANYCH                    |" -ForegroundColor Cyan
+    Write-Host "  +-------------------------------------------------+" -ForegroundColor Cyan
+    $srcIcon = switch($info.ActiveSource) {
+        "LHM" { "" }
+        "OHM" { "" }
+        "SystemOnly" { "" }
+        default { "?" }
+    }
+    Write-Host "  | Aktywne: $srcIcon $($info.ActiveSource)" -ForegroundColor White
+    Write-Host "  +-------------------------------------------------+" -ForegroundColor Cyan
+    $items = @(
+        @{ N="CPU Temp"; V=$metrics.CPUTemp; S=$metrics.CPUTempSource },
+        @{ N="CPU Load"; V=$metrics.CPULoad; S=$metrics.CPULoadSource },
+        @{ N="CPU Clock"; V=$metrics.CPUClock; S=$metrics.CPUClockSource },
+        @{ N="CPU Power"; V=$metrics.CPUPower; S=$metrics.CPUPowerSource },
+        @{ N="GPU Temp"; V=$metrics.GPUTemp; S=$metrics.GPUTempSource },
+        @{ N="GPU Load"; V=$metrics.GPULoad; S=$metrics.GPULoadSource },
+        @{ N="RAM"; V=$metrics.RAMUsage; S=$metrics.RAMUsageSource },
+        @{ N="Disk I/O"; V=$metrics.DiskIO; S=$metrics.DiskIOSource }
+    )
+    foreach ($item in $items) {
+        $icon = if ($item.V) { "?" } else { "?" }
+        $color = if ($item.V) { "Green" } else { "DarkGray" }
+        Write-Host ("  | {0,-12} [{1}] {2,-12}" -f $item.N, $icon, $item.S) -ForegroundColor $color
+    }
+    Write-Host "  +-------------------------------------------------+" -ForegroundColor Cyan
+    Write-Host ""
+}
+# FORECASTER - Dynamiczna predykcja trendu CPU
+class Forecaster {
+    [double[]] $Buffer
+    [int] $Index
+    [int] $Count
+    [int] $Size
+    Forecaster() { 
+        $this.Size = 15  # Większy bufor dla stabilniejszej predykcji (8-step ahead wymaga więcej danych)
+        $this.Buffer = [double[]]::new($this.Size)
+        $this.Index = 0
+        $this.Count = 0 
+    }
+    [void] Add([double]$value) { 
+        if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) { return }
+        $this.Buffer[$this.Index] = $value
+        $this.Index = ($this.Index + 1) % $this.Size
+        if ($this.Count -lt $this.Size) { $this.Count++ }
+    }
+    [double] Trend() {
+        if ($this.Count -lt 3) { return 0.0 }
+        # POPRAWKA: Odczytuj dane w prawidłowej kolejności czasowej z circular buffer
+        $sumX = 0.0; $sumY = 0.0; $sumXY = 0.0; $sumX2 = 0.0
+        for ($i = 0; $i -lt $this.Count; $i++) { 
+            # Prawidłowy indeks: najstarsza wartość jest na (Index - Count + Size) % Size
+            $bufferIdx = ($this.Index - $this.Count + $i + $this.Size) % $this.Size
+            $y = $this.Buffer[$bufferIdx]
+            $sumX += $i; $sumY += $y; $sumXY += ($i * $y); $sumX2 += ($i * $i) 
+        }
+        $denominator = ($this.Count * $sumX2) - ($sumX * $sumX)
+        if ([Math]::Abs($denominator) -lt 0.0001) { return 0.0 }
+        $trend = (($this.Count * $sumXY) - ($sumX * $sumY)) / $denominator
+        if ([double]::IsNaN($trend) -or [double]::IsInfinity($trend)) { return 0.0 }
+        return [double]$trend
+    }
+    # Nowa metoda: Przewidz CPU za N iteracji
+    [double] Predict([int]$stepsAhead) {
+        if ($this.Count -lt 2) { return 0.0 }
+        $trend = $this.Trend()
+        # Ostatnia wartość
+        $lastIdx = ($this.Index - 1 + $this.Size) % $this.Size
+        $lastValue = $this.Buffer[$lastIdx]
+        $predicted = $lastValue + ($trend * $stepsAhead)
+        return [Math]::Max(0, [Math]::Min(100, $predicted))
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GPU-BOUND DETECTOR - Wykrywanie scenariuszy GPU-bound (Low CPU + High GPU)
+# ═══════════════════════════════════════════════════════════════════════════════
+class GPUBoundDetector {
+    [int] $DetectionCount = 0
+    [int] $RequiredSamples = 3  # Ile próbek potrzeba do pewności
+    [double] $LastCPU = 0.0
+    [double] $LastGPU = 0.0
+    [bool] $IsConfident = $false
+    
+    # v42.5: Timer-based hysteresis dla EXIT
+    [datetime] $ExitConditionStartTime = [datetime]::MinValue
+    [int] $ExitDelaySeconds = 3  # CPU>50% przez 3+ sekund → exit
+    [bool] $ExitConditionMet = $false
+    
+    # v43.12: Cooldown po EXIT - zapobiega natychmiastowemu re-entry (ping-pong)
+    [datetime] $LastExitTime = [datetime]::MinValue
+    [int] $ReEntryCooldownSeconds = 15  # Nie wracaj do GPU-BOUND przez 15s po exit
+    # v43.14: Internal mode hold - zapobiega Silent↔Balanced ping-pong WEWNĄTRZ GPU-BOUND
+    [string] $LastSuggestedMode = ""
+    [datetime] $LastSuggestChangeTime = [datetime]::MinValue
+    [int] $InternalHoldSeconds = 10  # Trzymaj sugerowany tryb min 10s
+    
+    # v43.12: Phase awareness - stabilniejszy w Gameplay
+    [string] $CurrentPhase = "Idle"
+    
+    GPUBoundDetector() {
+        $this.DetectionCount = 0
+        $this.IsConfident = $false
+        $this.ExitConditionStartTime = [datetime]::MinValue
+        $this.ExitConditionMet = $false
+        $this.LastExitTime = [datetime]::MinValue
+        $this.LastSuggestedMode = ""
+        $this.LastSuggestChangeTime = [datetime]::MinValue
+    }
+    
+    # Główna metoda detekcji
+    [hashtable] Detect([double]$cpu, [double]$gpuLoad, [bool]$hasGPU, [string]$gpuType) {
+        $result = @{
+            IsGPUBound = $false
+            Confidence = 0
+            Reason = ""
+            SuggestedMode = ""
+            CPUReduction = 0  # O ile obniżyć CPU TDP (W)
+        }
+        
+        # Jeśli brak GPU lub GPU data - nie wykrywaj
+        if (-not $hasGPU -or $gpuLoad -eq 0) {
+            $result.Reason = "No GPU data"
+            return $result
+        }
+        
+        # Zapisz ostatnie wartości
+        $this.LastCPU = $cpu
+        $this.LastGPU = $gpuLoad
+        
+        # v42.5: PROGI z HYSTERESIS
+        # ENTRY: CPU < 50% AND GPU > 75% (łatwiejszy wejście)
+        # EXIT: CPU > 60% AND GPU < 65% (oba muszą być spełnione - zapobiega fałszywym exitom)
+        # v43.14 FIX: OR→AND - CPU spike SAM nie powinien powodować EXIT (GPU nadal pracuje!)
+        $entryCondition = ($cpu -lt 50 -and $gpuLoad -gt 75)
+        $exitCondition = ($cpu -gt 60 -and $gpuLoad -lt 65)
+        
+        # v43.12: Cooldown po EXIT - nie wracaj natychmiast
+        $cooldownActive = $false
+        if ($this.LastExitTime -ne [datetime]::MinValue) {
+            $sinceExit = ((Get-Date) - $this.LastExitTime).TotalSeconds
+            if ($sinceExit -lt $this.ReEntryCooldownSeconds) {
+                $cooldownActive = $true
+            }
+        }
+        
+        # v43.14 FIX: Phase-aware exit delay - DUŻO dłuższy w Gameplay
+        $effectiveExitDelay = $this.ExitDelaySeconds
+        if ($this.CurrentPhase -eq "Gameplay") {
+            $effectiveExitDelay = 15  # v43.14: 15s w Gameplay (GPU-bound gry mają CPU spikes)
+        } elseif ($this.CurrentPhase -eq "Loading") {
+            $effectiveExitDelay = 8  # Loading potrzebuje więcej CPU chwilowo
+        }
+        
+        # LOGIKA ENTRY/EXIT z timer-based hysteresis
+        if (-not $this.IsConfident) {
+            # Nie jesteśmy confident - sprawdź ENTRY
+            if ($entryCondition -and -not $cooldownActive) {
+                $this.DetectionCount++
+                if ($this.DetectionCount -ge $this.RequiredSamples) {
+                    $this.IsConfident = $true
+                    if ($Script:DebugLogEnabled) {
+                        Write-DebugLog "GPU-BOUND ENTRY: CPU=$([int]$cpu)%, GPU=$([int]$gpuLoad)% (confident after $($this.RequiredSamples) samples)" "GPU-BOUND"
+                    }
+                }
+            } else {
+                # Reset entry counter
+                if ($this.DetectionCount -gt 0) { $this.DetectionCount-- }
+            }
+        } else {
+            # Jesteśmy confident - sprawdź EXIT z DELAY
+            if ($exitCondition) {
+                # Exit condition spełniony - start/check timer
+                if ($this.ExitConditionStartTime -eq [datetime]::MinValue) {
+                    $this.ExitConditionStartTime = Get-Date
+                } else {
+                    # Check timer
+                    $elapsed = ((Get-Date) - $this.ExitConditionStartTime).TotalSeconds
+                    if ($elapsed -ge $effectiveExitDelay) {
+                        # Exit confirmed
+                        $this.IsConfident = $false
+                        $this.DetectionCount = 0
+                        $this.ExitConditionStartTime = [datetime]::MinValue
+                        $this.LastExitTime = Get-Date  # v43.12: Start cooldown
+                        if ($Script:DebugLogEnabled) {
+                            Write-DebugLog "GPU-BOUND EXIT: CPU=$([int]$cpu)%, GPU=$([int]$gpuLoad)% (held ${elapsed}s, cooldown=$($this.ReEntryCooldownSeconds)s)" "GPU-BOUND"
+                        }
+                        $result.Reason = "GPU-BOUND exited"
+                        return $result
+                    }
+                }
+            } else {
+                # Exit condition nie spełniony - reset timer
+                $this.ExitConditionStartTime = [datetime]::MinValue
+            }
+        }
+        
+        # Jeśli confident - zwróć rekomendacje
+        if ($this.IsConfident) {
+            $result.IsGPUBound = $true
+            $result.Confidence = 100  # Zawsze 100 gdy confident
+            
+            # v43.13: PHASE-AWARE GPU-BOUND MODE
+            # W Gameplay: Balanced (stabilność, CPU może potrzebować mocy na fizykę/AI)
+            # W Cutscene/Menu/Idle: Silent (GPU renderuje, CPU nie potrzebny)
+            if ($this.CurrentPhase -eq "Gameplay") {
+                # Gameplay: ZAWSZE Balanced - nie skacz do Silent bo CPU oscyluje
+                $result.SuggestedMode = "Balanced"
+                $result.CPUReduction = 5
+                $result.Reason = "GPU-BOUND: CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% → Balanced (Gameplay stable)"
+            }
+            elseif ($this.CurrentPhase -eq "Cutscene" -or $this.CurrentPhase -eq "Menu" -or $this.CurrentPhase -eq "Idle") {
+                # Cutscene/Menu/Idle: Silent (cisza, GPU sam sobie radzi)
+                $result.SuggestedMode = "Silent"
+                $result.CPUReduction = 15
+                $result.Reason = "GPU-BOUND: CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% → Silent ($($this.CurrentPhase))"
+            }
+            else {
+                # v43.14 FIX: Loading/Active/unknown → BALANCED zawsze!
+                # Silent w GPU-BOUND powoduje TDP throttle → CPU spike → oscylacja
+                # Balanced daje stabilny CPU headroom bez Turbo mocy
+                if ($cpu -lt 25) {
+                    $result.SuggestedMode = "Balanced"
+                    $result.CPUReduction = 10
+                    $result.Reason = "GPU-BOUND: CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% → Balanced (GPU dominant, stable)"
+                }
+                else {
+                    $result.SuggestedMode = "Balanced"
+                    $result.CPUReduction = 5
+                    $result.Reason = "GPU-BOUND: CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% → Balanced"
+                }
+            }
+            
+            # SPECJALNE PRZYPADKI dla różnych typów GPU
+            # APU (iGPU) - dzieli power budget z CPU, więc bardziej agresywnie obniżamy CPU
+            if ($gpuType -eq "iGPU" -or $gpuType -eq "APU") {
+                if ($cpu -lt 30 -and $this.CurrentPhase -ne "Gameplay") {
+                    $result.SuggestedMode = "Silent"
+                    $result.CPUReduction = 18  # Więcej dla APU (shared power)
+                    $result.Reason = "GPU-BOUND (APU): CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% → Silent (shared power budget)"
+                }
+            }
+            
+            # v43.14: INTERNAL HOLD - zapobiega ping-pong wewnątrz GPU-BOUND
+            # Jeśli tryb się zmienił, ale stary trzymamy <10s → zostań przy starym
+            if ($this.LastSuggestedMode -ne "" -and $result.SuggestedMode -ne $this.LastSuggestedMode) {
+                $holdElapsed = ((Get-Date) - $this.LastSuggestChangeTime).TotalSeconds
+                if ($holdElapsed -lt $this.InternalHoldSeconds) {
+                    # Za wcześnie na zmianę - trzymaj poprzedni
+                    $result.SuggestedMode = $this.LastSuggestedMode
+                    $result.Reason += " [HOLD $([int]$holdElapsed)/$($this.InternalHoldSeconds)s]"
+                } else {
+                    # OK, czas minął - zmień i resetuj timer
+                    $this.LastSuggestedMode = $result.SuggestedMode
+                    $this.LastSuggestChangeTime = Get-Date
+                }
+            } else {
+                # Pierwszy raz lub ten sam tryb - ustaw/odśwież
+                if ($this.LastSuggestedMode -eq "") {
+                    $this.LastSuggestChangeTime = Get-Date
+                }
+                $this.LastSuggestedMode = $result.SuggestedMode
+            }
+            
+        } else {
+            $result.Reason = if ($entryCondition) { 
+                "GPU-bound detected, waiting for confidence ($($this.DetectionCount)/$($this.RequiredSamples))" 
+            } else { 
+                "Not GPU-bound (CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)%)" 
+            }
+        }
+        
+
+        
+        return $result
+    }
+    
+    # Reset detektora
+    [void] Reset() {
+        $this.DetectionCount = 0
+        $this.IsConfident = $false
+        $this.ExitConditionStartTime = [datetime]::MinValue
+        $this.LastExitTime = [datetime]::MinValue
+    }
+    
+    # Zwróć status
+    [string] GetStatus() {
+        if ($this.IsConfident) {
+            return "GPU-BOUND (confident)"
+        } elseif ($this.DetectionCount -gt 0) {
+            return "GPU-BOUND (learning $($this.DetectionCount)/$($this.RequiredSamples))"
+        } else {
+            return "Balanced"
+        }
+    }
+}
+
+# PROPHET MEMORY
+class ProphetMemory {
+    [hashtable] $Apps
+    [string] $LastActiveApp
+    [int] $TotalSessions
+    [int[]] $HourlyActivity
+    [int] $MinSamplesForConfidence = 30  # Minimalna liczba próbek do pewnej kategoryzacji
+    ProphetMemory() {
+        $this.Apps = @{}
+        $this.LastActiveApp = ""
+        $this.TotalSessions = 0
+        $this.HourlyActivity = [int[]]::new(24)
+    }
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # NOWA METODA: Ciągłe uczenie podczas pracy aplikacji
+    # ═══════════════════════════════════════════════════════════════════════════════
+    [void] UpdateRunning([string]$name, [double]$currentCPU, [double]$currentIO, [string]$displayName) {
+        if ([string]::IsNullOrWhiteSpace($name)) { return }
+        
+        # Utwórz wpis jeśli nie istnieje
+        if (-not $this.Apps.ContainsKey($name)) {
+            $this.Apps[$name] = @{
+                Name = $displayName
+                ProcessName = $name
+                Launches = 0
+                AvgCPU = $currentCPU
+                AvgIO = $currentIO
+                MaxCPU = $currentCPU
+                MaxIO = $currentIO
+                Category = "LEARNING"  # Nowy status - jeszcze się uczymy
+                LastSeen = ""
+                HourHits = [int[]]::new(24)
+                PrevApps = @{}
+                IsHeavy = $false
+                Samples = 0  # NOWE: Licznik próbek
+                SessionRuntime = 0.0  # NOWE: Całkowity czas działania w sekundach
+                # v43.14: Per-app learned mode tracking
+                ModeHistory = @{ Silent = 0; Balanced = 0; Turbo = 0 }
+                ModeRewards = @{ Silent = 0.0; Balanced = 0.0; Turbo = 0.0 }
+                PreferredMode = ""
+                AvgGPU = 0.0
+                IsGPUBound = $false
+                PhasePreferred = @{}
+            }
+        }
+        
+        $app = $this.Apps[$name]
+        $app.Name = if (![string]::IsNullOrWhiteSpace($displayName)) { $displayName } else { $name }
+        $app.LastSeen = (Get-Date).ToString("yyyy-MM-dd HH:mm")
+        
+        # Inicjalizuj Samples jeśli nie istnieje (backward compatibility)
+        if (-not $app.ContainsKey('Samples')) { $app.Samples = 0 }
+        if (-not $app.ContainsKey('SessionRuntime')) { $app.SessionRuntime = 0.0 }
+        
+        $app.Samples++
+        $app.SessionRuntime += 2.0  # ~2 sekundy na iterację
+        
+        # Szybsze uczenie na początku (50/50), później stabilizacja (90/10)
+        $learningRate = if ($app.Samples -lt 20) { 0.5 } else { 0.1 }
+        
+        # Aktualizuj średnie z adaptive learning rate
+        $app.AvgCPU = [Math]::Round(($app.AvgCPU * (1.0 - $learningRate)) + ($currentCPU * $learningRate), 2)
+        $app.AvgIO = [Math]::Round(($app.AvgIO * (1.0 - $learningRate)) + ($currentIO * $learningRate), 2)
+        
+        # Aktualizuj maksima
+        if ($currentCPU -gt $app.MaxCPU) { $app.MaxCPU = [Math]::Round($currentCPU, 2) }
+        elseif ($app.Samples -gt 50) {
+            # MaxCPU decay: powoli maleje jeśli nie potwierdzane (0.5% na próbkę)
+            # Zapobiega: jeden spike = HEAVY na zawsze
+            $app.MaxCPU = [Math]::Round($app.MaxCPU * 0.995, 2)
+        }
+        if ($currentIO -gt $app.MaxIO) { $app.MaxIO = [Math]::Round($currentIO, 2) }
+        elseif ($app.Samples -gt 50) {
+            $app.MaxIO = [Math]::Round($app.MaxIO * 0.995, 2)
+        }
+        
+        # RE-KATEGORYZUJ na podstawie RZECZYWISTEGO użycia
+        # Kategoryzacja bazowana na AvgCPU (stabilne) + MaxCPU (potwierdzenie)
+        # FIX: MaxCPU sam NIE wystarczy do HEAVY - musi być wspierany przez AvgCPU
+        $avgScore = $app.AvgCPU + ($app.AvgIO * 2)
+        
+        $oldCategory = $app.Category
+        
+        # Dopiero po MinSamplesForConfidence finalizujemy kategorię
+        if ($app.Samples -ge $this.MinSamplesForConfidence) {
+            # HEAVY: AvgCPU > 45% LUB (AvgCPU > 25% I MaxCPU > 65%)
+            if ($avgScore -gt 70 -or ($app.AvgCPU -gt 25 -and $app.MaxCPU -gt 65)) { 
+                $app.Category = "HEAVY"
+                $app.IsHeavy = $true
+            } elseif ($avgScore -gt 35 -or ($app.AvgCPU -gt 15 -and $app.MaxCPU -gt 45)) { 
+                $app.Category = "MEDIUM"
+                $app.IsHeavy = $false
+            } else { 
+                $app.Category = "LIGHT"
+                $app.IsHeavy = $false
+            }
+        } else {
+            # Podczas uczenia - tymczasowa kategoryzacja z ostrzeżeniem
+            if ($avgScore -gt 70 -or ($app.AvgCPU -gt 25 -and $app.MaxCPU -gt 65)) { 
+                $app.Category = "LEARNING_HEAVY"
+            } elseif ($avgScore -gt 35 -or ($app.AvgCPU -gt 15 -and $app.MaxCPU -gt 45)) { 
+                $app.Category = "LEARNING_MEDIUM"
+            } else { 
+                $app.Category = "LEARNING_LIGHT"
+            }
+        }
+        
+        # Log znaczących zmian kategorii (tylko po finalizacji)
+        if ($oldCategory -ne $app.Category -and -not ($app.Category -match "LEARNING")) {
+            # Znacząca zmiana - loguj to
+            if ($oldCategory -match "LEARNING" -or $oldCategory -eq "NEW") {
+                # Pierwsza finalizacja kategorii - loguj tylko w Debug
+            } else {
+                # Re-kategoryzacja - aplikacja się zmieniła!
+                # Loguj zawsze, to ważna informacja
+            }
+        }
+        
+        $this.LastActiveApp = $name
+    }
+    # v43.14: Uczenie trybu - zapamiętaj jaki tryb był użyty i z jakim skutkiem
+    [void] LearnMode([string]$name, [string]$mode, [double]$reward, [string]$phase, [double]$gpu) {
+        if ([string]::IsNullOrWhiteSpace($name) -or -not $this.Apps.ContainsKey($name)) { return }
+        if ($mode -ne "Silent" -and $mode -ne "Balanced" -and $mode -ne "Turbo") { return }
+        $app = $this.Apps[$name]
+        
+        # Init fields if missing (backward compatibility)
+        if (-not $app.ContainsKey('ModeHistory')) { $app.ModeHistory = @{ Silent = 0; Balanced = 0; Turbo = 0 } }
+        if (-not $app.ContainsKey('ModeRewards')) { $app.ModeRewards = @{ Silent = 0.0; Balanced = 0.0; Turbo = 0.0 } }
+        if (-not $app.ContainsKey('PhasePreferred')) { $app.PhasePreferred = @{} }
+        if (-not $app.ContainsKey('AvgGPU')) { $app.AvgGPU = 0.0 }
+        if (-not $app.ContainsKey('IsGPUBound')) { $app.IsGPUBound = $false }
+        if (-not $app.ContainsKey('PreferredMode')) { $app.PreferredMode = "" }
+        
+        # Licz użycia trybu
+        $app.ModeHistory[$mode]++
+        
+        # Exponential moving average reward per mode (nowsze doświadczenia ważniejsze)
+        $lr = 0.15
+        $app.ModeRewards[$mode] = $app.ModeRewards[$mode] * (1.0 - $lr) + $reward * $lr
+        
+        # GPU tracking
+        if ($gpu -gt 0) {
+            $app.AvgGPU = $app.AvgGPU * 0.9 + $gpu * 0.1
+            $app.IsGPUBound = ($app.AvgGPU -gt 60 -and $app.AvgCPU -lt 50)
+        }
+        
+        # Ustal PreferredMode = tryb z najwyższym avg reward (min 10 próbek)
+        $bestMode = "Balanced"; $bestReward = -999.0
+        foreach ($m in @("Silent", "Balanced", "Turbo")) {
+            if ($app.ModeHistory[$m] -ge 10 -and $app.ModeRewards[$m] -gt $bestReward) {
+                $bestReward = $app.ModeRewards[$m]
+                $bestMode = $m
+            }
+        }
+        if ($app.ModeHistory["Silent"] + $app.ModeHistory["Balanced"] + $app.ModeHistory["Turbo"] -ge 30) {
+            $app.PreferredMode = $bestMode
+        }
+        
+        # Per-phase learning: track rewards PER MODE per phase, wybierz najlepszy
+        if ($phase -and $phase -ne "Idle") {
+            if (-not $app.PhasePreferred.ContainsKey($phase)) {
+                $app.PhasePreferred[$phase] = @{
+                    Modes = @{ Silent = @{ Count = 0; Reward = 0.0 }; Balanced = @{ Count = 0; Reward = 0.0 }; Turbo = @{ Count = 0; Reward = 0.0 } }
+                    BestMode = $mode
+                    TotalCount = 0
+                }
+            }
+            $pp = $app.PhasePreferred[$phase]
+            if (-not $pp.ContainsKey('Modes')) {
+                $pp.Modes = @{ Silent = @{ Count = 0; Reward = 0.0 }; Balanced = @{ Count = 0; Reward = 0.0 }; Turbo = @{ Count = 0; Reward = 0.0 } }
+                $pp.TotalCount = 0
+            }
+            $pp.TotalCount++
+            $modeData = $pp.Modes[$mode]
+            $modeData.Count++
+            $modeData.Reward = $modeData.Reward * (1.0 - $lr) + $reward * $lr
+            
+            # Wybierz BestMode = tryb z najwyższym avg reward (min 5 próbek per mode)
+            if ($pp.TotalCount -ge 15) {
+                $bestPM = "Balanced"; $bestPR = -999.0
+                foreach ($m in @("Silent", "Balanced", "Turbo")) {
+                    $md = $pp.Modes[$m]
+                    if ($md.Count -ge 5 -and $md.Reward -gt $bestPR) {
+                        $bestPR = $md.Reward
+                        $bestPM = $m
+                    }
+                }
+                $pp.BestMode = $bestPM
+            }
+        }
+    }
+    # v43.14: Pobierz nauczony tryb per-app per-phase
+    [string] GetLearnedMode([string]$name, [string]$phase) {
+        if ([string]::IsNullOrWhiteSpace($name) -or -not $this.Apps.ContainsKey($name)) { return "" }
+        $app = $this.Apps[$name]
+        if (-not $app.ContainsKey('PhasePreferred')) { return "" }
+        if (-not $app.ContainsKey('PreferredMode')) { return "" }
+        # Najpierw per-phase (bardziej specyficzne)
+        if ($phase -and $app.PhasePreferred.ContainsKey($phase)) {
+            $pp = $app.PhasePreferred[$phase]
+            # Nowa struktura z BestMode
+            if ($pp.ContainsKey('BestMode') -and $pp.ContainsKey('TotalCount') -and $pp.TotalCount -ge 15) {
+                return $pp.BestMode
+            }
+        }
+        # Fallback: ogólny PreferredMode (z ModeRewards)
+        if ($app.PreferredMode) { return $app.PreferredMode }
+        return ""
+    }
+    [void] RecordLaunch([string]$name, [double]$peakCPU, [double]$peakIO, [string]$displayName) {
+        if ([string]::IsNullOrWhiteSpace($name)) { return }
+        $hour = (Get-Date).Hour
+        if (-not $this.Apps.ContainsKey($name)) {
+            $this.Apps[$name] = @{
+                Name = $displayName
+                ProcessName = $name
+                Launches = 0
+                AvgCPU = 0.0
+                AvgIO = 0.0
+                MaxCPU = 0.0
+                MaxIO = 0.0
+                Category = "NEW"
+                LastSeen = ""
+                HourHits = [int[]]::new(24)
+                PrevApps = @{}
+                IsHeavy = $false
+                Samples = 0
+                SessionRuntime = 0.0
+                # v43.14: Per-app learned mode tracking
+                ModeHistory = @{ Silent = 0; Balanced = 0; Turbo = 0 }
+                ModeRewards = @{ Silent = 0.0; Balanced = 0.0; Turbo = 0.0 }
+                PreferredMode = ""
+                AvgGPU = 0.0
+                IsGPUBound = $false
+                PhasePreferred = @{}
+            }
+        }
+        $app = $this.Apps[$name]
+        $app.Launches++
+        $app.Name = if (![string]::IsNullOrWhiteSpace($displayName)) { $displayName } else { $name }
+        $app.LastSeen = (Get-Date).ToString("yyyy-MM-dd HH:mm")
+        
+        # Inicjalizuj Samples jeśli nie istnieje
+        if (-not $app.ContainsKey('Samples')) { $app.Samples = 0 }
+        if (-not $app.ContainsKey('SessionRuntime')) { $app.SessionRuntime = 0.0 }
+        
+        if ($app.Launches -eq 1) {
+            $app.AvgCPU = $peakCPU
+            $app.AvgIO = $peakIO
+        } else {
+            # Zmniejszona dominacja starych wartości (z 0.7 na 0.6)
+            $app.AvgCPU = [Math]::Round(($app.AvgCPU * 0.6) + ($peakCPU * 0.4), 2)
+            $app.AvgIO = [Math]::Round(($app.AvgIO * 0.6) + ($peakIO * 0.4), 2)
+        }
+        if ($peakCPU -gt $app.MaxCPU) { $app.MaxCPU = [Math]::Round($peakCPU, 2) }
+        if ($peakIO -gt $app.MaxIO) { $app.MaxIO = [Math]::Round($peakIO, 2) }
+        $app.HourHits[$hour]++
+        $this.HourlyActivity[$hour]++
+        if (![string]::IsNullOrWhiteSpace($this.LastActiveApp) -and $this.LastActiveApp -ne $name) {
+            if (-not $app.PrevApps.ContainsKey($this.LastActiveApp)) {
+                $app.PrevApps[$this.LastActiveApp] = 0
+            }
+            $app.PrevApps[$this.LastActiveApp]++
+        }
+        
+        # UWAGA: RecordLaunch to tylko początkowe dane z BOOST
+        # Nie finalizujemy kategorii tutaj - UpdateRunning to zrobi
+        $score = $peakCPU + ($peakIO * 2)
+        if ($score -gt 70 -or $peakCPU -gt 60) { 
+            $app.Category = "LEARNING_HEAVY"
+        } elseif ($score -gt 35) { 
+            $app.Category = "LEARNING_MEDIUM" 
+        } else { 
+            $app.Category = "LEARNING_LIGHT" 
+        }
+        
+        $this.LastActiveApp = $name
+        $this.TotalSessions++
+    }
+    [double] GetWeight([string]$name) {
+        if ([string]::IsNullOrWhiteSpace($name)) { return 0.3 }
+        if (-not $this.Apps.ContainsKey($name)) { return 0.3 }
+        $app = $this.Apps[$name]
+        
+        # Usuń prefix LEARNING_ dla kategoryzacji
+        $cleanCategory = $app.Category -replace "^LEARNING_", ""
+        
+        switch ($cleanCategory) {
+            "HEAVY" { return 1.0 }
+            "MEDIUM" { return 0.6 }
+            default { return 0.3 }
+        }
+        return 0.3
+    }
+    [bool] IsKnownHeavy([string]$name) {
+        if ([string]::IsNullOrWhiteSpace($name)) { return $false }
+        if ($this.Apps.ContainsKey($name)) {
+            $isHeavy = $this.Apps[$name].IsHeavy
+            if ($null -eq $isHeavy) { return $false }
+            return [bool]$isHeavy
+        }
+        return $false
+    }
+    # NOWA METODA: Czy kategoryzacja jest pewna (wystarczająco próbek)
+    [bool] IsCategoryConfident([string]$name) {
+        if ([string]::IsNullOrWhiteSpace($name)) { return $false }
+        if (-not $this.Apps.ContainsKey($name)) { return $false }
+        $app = $this.Apps[$name]
+        
+        # Backward compatibility
+        if (-not $app.ContainsKey('Samples')) { return $true }  # Stare aplikacje = confident
+        
+        return $app.Samples -ge $this.MinSamplesForConfidence
+    }
+    [int] GetAppCount() { return $this.Apps.Count }
+    [void] SaveState([string]$dir) {
+        try {
+            $path = Join-Path $dir "ProphetMemory.json"
+            $data = @{
+                Apps = $this.Apps
+                TotalSessions = $this.TotalSessions
+                HourlyActivity = $this.HourlyActivity
+                LastActiveApp = $this.LastActiveApp
+                MinSamplesForConfidence = $this.MinSamplesForConfidence
+            }
+            [System.IO.File]::WriteAllText($path, ($data | ConvertTo-Json -Depth 8 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "ProphetMemory.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.Apps) {
+                    $data.Apps.PSObject.Properties | ForEach-Object {
+                        $appName = $_.Name  # v39 FIX: Zachowaj nazwe PRZED wewnetrzna petla
+                        $appData = $_.Value
+                        $this.Apps[$appName] = @{
+                            Name = $appData.Name
+                            ProcessName = $appData.ProcessName
+                            Launches = if ($appData.Launches) { [int]$appData.Launches } else { 0 }
+                            AvgCPU = if ($appData.AvgCPU) { [double]$appData.AvgCPU } else { 0 }
+                            AvgIO = if ($appData.AvgIO) { [double]$appData.AvgIO } else { 0 }
+                            MaxCPU = if ($appData.MaxCPU) { [double]$appData.MaxCPU } else { 0 }
+                            MaxIO = if ($appData.MaxIO) { [double]$appData.MaxIO } else { 0 }
+                            Category = if ($appData.Category) { $appData.Category } else { "NEW" }
+                            LastSeen = if ($appData.LastSeen) { $appData.LastSeen } else { "" }
+                            HourHits = if ($appData.HourHits) { [int[]]$appData.HourHits } else { [int[]]::new(24) }
+                            PrevApps = @{}
+                            IsHeavy = if ($null -ne $appData.IsHeavy) { [bool]$appData.IsHeavy } else { $false }
+                            Samples = if ($appData.Samples) { [int]$appData.Samples } else { 0 }
+                            SessionRuntime = if ($appData.SessionRuntime) { [double]$appData.SessionRuntime } else { 0.0 }
+                            # v43.14: Per-app learned mode fields
+                            ModeHistory = @{ Silent = 0; Balanced = 0; Turbo = 0 }
+                            ModeRewards = @{ Silent = 0.0; Balanced = 0.0; Turbo = 0.0 }
+                            PreferredMode = if ($appData.PreferredMode) { $appData.PreferredMode } else { "" }
+                            AvgGPU = if ($appData.AvgGPU) { [double]$appData.AvgGPU } else { 0.0 }
+                            IsGPUBound = if ($null -ne $appData.IsGPUBound) { [bool]$appData.IsGPUBound } else { $false }
+                            PhasePreferred = @{}
+                        }
+                        # v43.14: Restore ModeHistory
+                        if ($appData.ModeHistory) {
+                            foreach ($m in @("Silent", "Balanced", "Turbo")) {
+                                if ($appData.ModeHistory.$m) { $this.Apps[$appName].ModeHistory[$m] = [int]$appData.ModeHistory.$m }
+                            }
+                        }
+                        # v43.14: Restore ModeRewards
+                        if ($appData.ModeRewards) {
+                            foreach ($m in @("Silent", "Balanced", "Turbo")) {
+                                if ($appData.ModeRewards.$m) { $this.Apps[$appName].ModeRewards[$m] = [double]$appData.ModeRewards.$m }
+                            }
+                        }
+                        # v43.14: Restore PhasePreferred
+                        if ($appData.PhasePreferred) {
+                            $appData.PhasePreferred.PSObject.Properties | ForEach-Object {
+                                $phaseName = $_.Name
+                                $phaseData = $_.Value
+                                $modes = @{ Silent = @{ Count = 0; Reward = 0.0 }; Balanced = @{ Count = 0; Reward = 0.0 }; Turbo = @{ Count = 0; Reward = 0.0 } }
+                                if ($phaseData.Modes) {
+                                    foreach ($m in @("Silent", "Balanced", "Turbo")) {
+                                        if ($phaseData.Modes.$m) {
+                                            $modes[$m].Count = if ($phaseData.Modes.$m.Count) { [int]$phaseData.Modes.$m.Count } else { 0 }
+                                            $modes[$m].Reward = if ($phaseData.Modes.$m.Reward) { [double]$phaseData.Modes.$m.Reward } else { 0.0 }
+                                        }
+                                    }
+                                }
+                                $this.Apps[$appName].PhasePreferred[$phaseName] = @{
+                                    Modes = $modes
+                                    BestMode = if ($phaseData.BestMode) { $phaseData.BestMode } else { "Balanced" }
+                                    TotalCount = if ($phaseData.TotalCount) { [int]$phaseData.TotalCount } else { 0 }
+                                }
+                            }
+                        }
+                        # Restore PrevApps
+                        if ($appData.PrevApps) {
+                            $appData.PrevApps.PSObject.Properties | ForEach-Object {
+                                $prevName = $_.Name  # v39 FIX: Osobna zmienna dla wewnetrznej petli
+                                $this.Apps[$appName].PrevApps[$prevName] = [int]$_.Value
+                            }
+                        }
+                    }
+                }
+                if ($data.TotalSessions) { $this.TotalSessions = [int]$data.TotalSessions }
+                if ($data.HourlyActivity) { $this.HourlyActivity = [int[]]$data.HourlyActivity }
+                if ($data.LastActiveApp) { $this.LastActiveApp = $data.LastActiveApp }
+                if ($data.MinSamplesForConfidence) { $this.MinSamplesForConfidence = [int]$data.MinSamplesForConfidence }
+            }
+        } catch { }
+    }
+}
+# NEURAL BRAIN
+class NeuralBrain {
+    [hashtable] $Weights
+    [double] $AggressionBias
+    [double] $ReactivityBias
+    [string] $LastLearned
+    [string] $LastLearnTime
+    [string] $Analyzing
+    [int] $TotalDecisions
+    [double] $RAMWeight              # V35: Waga dla wysokiego RAM
+    [double] $LastRAM                # V35: Ostatni poziom RAM
+    NeuralBrain() {
+        $this.Weights = @{}
+        $this.AggressionBias = 0.0
+        $this.ReactivityBias = 0.5
+        $this.LastLearned = ""
+        $this.LastLearnTime = ""
+        $this.Analyzing = ""
+        $this.TotalDecisions = 0
+        $this.RAMWeight = 0.3        # V35: Startowa waga RAM (0-1)
+        $this.LastRAM = 0
+    }
+    [string] Train([string]$processName, [string]$displayName, [double]$cpu, [double]$io, [ProphetMemory]$prophet) {
+        if (-not (Is-NeuralBrainEnabled)) { return "DISABLED" }
+        if ([string]::IsNullOrWhiteSpace($processName)) { return "INVALID" }
+        # Poprzednio powodowalo podwojne liczenie uruchomien aplikacji
+        $score = $cpu + ($io * 2)
+        $weight = 0.3
+        if ($score -gt 50 -or $cpu -gt 40) { $weight = 1.0 }
+        elseif ($score -gt 20) { $weight = 0.6 }
+        $isNew = -not $this.Weights.ContainsKey($processName)
+        $this.Weights[$processName] = $weight
+        $this.LastLearned = if (![string]::IsNullOrWhiteSpace($displayName)) { $displayName } else { $processName }
+        $this.LastLearnTime = (Get-Date).ToString("HH:mm:ss")
+        $this.Analyzing = ""
+        $category = "NEW"
+        if ($prophet.Apps.ContainsKey($processName)) { $category = $prophet.Apps[$processName].Category }
+        $status = if ($isNew) { 'NEW' } else { 'UPD' }
+        return "$status [$category] CPU:$([Math]::Round($cpu))% IO:$([Math]::Round($io))"
+    }
+    [void] LearnRAM([double]$ram, [bool]$ramSpike, [string]$actionTaken, [bool]$wasSuccessful) {
+        if (-not (Is-NeuralBrainEnabled)) { return }
+        # Jesli byl spike RAM i Turbo byl skuteczny - zwieksz wage RAM
+        if ($ramSpike -and $actionTaken -eq "Turbo" -and $wasSuccessful) {
+            $this.RAMWeight = [Math]::Min(1.0, $this.RAMWeight + 0.05)
+        }
+        # Jesli byl spike RAM i Silent/Balanced byl nieefektywny - zwieksz wage RAM
+        elseif ($ramSpike -and $actionTaken -ne "Turbo" -and -not $wasSuccessful) {
+            $this.RAMWeight = [Math]::Min(1.0, $this.RAMWeight + 0.08)
+        }
+        # Jesli niski RAM i Silent dziala dobrze - zmniejsz wage RAM
+        elseif ($ram -lt 50 -and $actionTaken -eq "Silent" -and $wasSuccessful) {
+            $this.RAMWeight = [Math]::Max(0.1, $this.RAMWeight - 0.02)
+        }
+        $this.LastRAM = $ram
+    }
+    [void] Evolve([string]$action) {
+        if (-not (Is-NeuralBrainEnabled)) { return }
+        switch ($action) {
+            "Turbo"    { 
+                $this.AggressionBias = [Math]::Min(0.5, $this.AggressionBias + 0.08)
+                $this.ReactivityBias = [Math]::Min(0.5, $this.ReactivityBias + 0.05)
+            }
+            "Silent"   { 
+                $this.AggressionBias = [Math]::Max(-0.5, $this.AggressionBias - 0.08)
+                $this.ReactivityBias = [Math]::Max(-0.5, $this.ReactivityBias - 0.05)
+            }
+            "Balanced" { 
+                $this.AggressionBias *= 0.9
+                $this.ReactivityBias *= 0.95
+            }
+        }
+    }
+    [hashtable] Decide([double]$cpu, [double]$io, [double]$trend, [ProphetMemory]$prophet, [double]$ram, [bool]$ramSpike) {
+        if (-not (Is-NeuralBrainEnabled)) { return @{ Score = 0; Mode = "Silent"; Reason = "DISABLED"; Trend = 0 } }
+        $this.TotalDecisions++
+        $this.LastRAM = $ram
+        # Bazowe cisnienie - CPU + I/O
+        $ioMultiplier = 0.5 + ($this.ReactivityBias * 0.2)
+        $pressure = $cpu * 0.7 + [Math]::Min(40, $io * $ioMultiplier)
+        if ($ramSpike) {
+            $pressure += 30 * $this.RAMWeight  # Duzy bonus przy spike
+        } elseif ($ram -gt 80) {
+            $pressure += 20 * $this.RAMWeight  # Bonus przy wysokim RAM
+        } elseif ($ram -gt 70) {
+            $pressure += 10 * $this.RAMWeight  # Maly bonus
+        }
+        # Trend
+        if ($trend -gt 10 -and $cpu -gt 30) { $pressure += 5 }
+        elseif ($trend -lt -10 -and $cpu -lt $Script:ForceSilentCPU) { $pressure -= 5 }
+        # Known apps - APP NEEDS drive pressure, not current CPU
+        if (![string]::IsNullOrWhiteSpace($prophet.LastActiveApp) -and $this.Weights.ContainsKey($prophet.LastActiveApp)) {
+            $weight = $this.Weights[$prophet.LastActiveApp]
+            # FIX: Sprawdź też kategorię z Prophet (może być bardziej aktualna)
+            if ($prophet.Apps.ContainsKey($prophet.LastActiveApp)) {
+                $appInfo = $prophet.Apps[$prophet.LastActiveApp]
+                $cleanCategory = $appInfo.Category -replace "^LEARNING_", ""
+                
+                # Używaj Prophet category jeśli jest confident, inaczej używaj weight z Brain
+                if ($prophet.IsCategoryConfident($prophet.LastActiveApp)) {
+                    # Prophet confident - używaj jego kategoryzacji
+                    switch ($cleanCategory) {
+                        "HEAVY" { $pressure += 15 }
+                        "MEDIUM" { $pressure += 5 }
+                        "LIGHT" { $pressure -= 10 }
+                    }
+                } else {
+                    # Prophet się jeszcze uczy - używaj Brain weight
+                    if ($weight -ge 0.8) { $pressure += 15 }
+                    elseif ($weight -ge 0.5) { $pressure += 5 }
+                    elseif ($weight -lt 0.3) { $pressure -= 10 }
+                }
+            } else {
+                # Brak w Prophet - używaj tylko Brain weight
+                if ($weight -ge 0.8) { $pressure += 15 }
+                elseif ($weight -ge 0.5) { $pressure += 5 }
+                elseif ($weight -lt 0.3) { $pressure -= 10 }
+            }
+        }
+        # AggressionBias
+        $pressure += ($this.AggressionBias * 5)
+        $pressure = [Math]::Max(0, [Math]::Min(100, $pressure))
+        
+        # ZMIANA: Nie wymuszamy trybu, tylko zwracamy Score i sugestię
+        # Pozwalamy systemowi decyzyjnemu wykorzystać ten Score
+        $suggestion = "Balanced"
+        $reason = "Neural: pressure=$([int]$pressure)"
+        
+        if ($ramSpike) {
+            $pressure += 15  # Extra boost dla RAM spike
+            $suggestion = "Turbo"
+            $reason = "Neural: RAM Spike detected"
+        } elseif ($pressure -gt 75) {
+            $suggestion = "Turbo"
+            $reason = "Neural: High pressure ($([int]$pressure))"
+        } elseif ($pressure -lt 30) {
+            $suggestion = "Silent"
+            $reason = "Neural: Low pressure ($([int]$pressure))"
+        } else {
+            $suggestion = "Balanced"
+            $reason = "Neural: Medium pressure ($([int]$pressure))"
+        }
+        
+        return @{ 
+            Score = [Math]::Round($pressure, 1)
+            Suggestion = $suggestion  # Sugestia, nie wymuszenie
+            Reason = $reason
+            Trend = [Math]::Round($trend, 2)
+        }
+    }
+    # Kompatybilnosc wsteczna - stara sygnatura bez RAM
+    [hashtable] Decide([double]$cpu, [double]$io, [double]$trend, [ProphetMemory]$prophet) {
+        return $this.Decide($cpu, $io, $trend, $prophet, $this.LastRAM, $false)
+    }
+    [int] GetCount() {
+        # Powod: Dane moga istniec nawet gdy silnik jest wylaczony
+        return $this.Weights.Count
+    }
+    [bool] IsActive() {
+        return (Is-NeuralBrainEnabled)
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            # Powod: Dane moga istniec z wczesniej (silnik byl wlaczony, potem wylaczony)
+            $path = Join-Path $dir "BrainState.json"
+            $data = @{
+                Weights = $this.Weights
+                AggressionBias = $this.AggressionBias
+                ReactivityBias = $this.ReactivityBias
+                TotalDecisions = $this.TotalDecisions
+                RAMWeight = $this.RAMWeight
+                LastLearned = $this.LastLearned
+            }
+            [System.IO.File]::WriteAllText($path, ($data | ConvertTo-Json -Depth 4 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "BrainState.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.Weights) {
+                    $data.Weights.PSObject.Properties | ForEach-Object { 
+                        $this.Weights[$_.Name] = [double]$_.Value 
+                    }
+                }
+                if ($null -ne $data.AggressionBias) { $this.AggressionBias = [double]$data.AggressionBias }
+                if ($null -ne $data.ReactivityBias) { $this.ReactivityBias = [double]$data.ReactivityBias }
+                if ($data.TotalDecisions) { $this.TotalDecisions = [int]$data.TotalDecisions }
+                if ($null -ne $data.RAMWeight) { $this.RAMWeight = [double]$data.RAMWeight }
+                if ($data.LastLearned) { $this.LastLearned = $data.LastLearned }
+            }
+        } catch { }
+    }
+}
+# PROCESS WATCHER - Instant Boost
+class ProcessWatcher {
+    [System.Collections.Generic.HashSet[int]] $KnownProcessIds
+    [int] $SessionId
+    [bool] $IsBoosting
+    [datetime] $BoostEndTime          #  FIXED: DateTime zamiast countdown
+    [string] $BoostProcessName
+    [string] $BoostDisplayName
+    [double] $PeakCPU
+    [double] $PeakIO
+    [object] $BoostProcess
+    [System.Collections.Generic.Dictionary[string, datetime]] $RecentBoosts
+    [int] $BoostCooldownSeconds = 15  #  FIXED: Zmniejszony cooldown z 30s do 15s (konfigurowalny)
+    ProcessWatcher([int]$cooldownSeconds = 15) {
+        $this.KnownProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+        $this.SessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        $this.RecentBoosts = [System.Collections.Generic.Dictionary[string, datetime]]::new()
+        $this.IsBoosting = $false
+        $this.BoostEndTime = [datetime]::MinValue
+        $this.BoostProcessName = ""
+        $this.BoostDisplayName = ""
+        $this.PeakCPU = 0.0
+        $this.PeakIO = 0.0
+        $this.BoostProcess = $null
+        if ($cooldownSeconds -gt 0) { $this.BoostCooldownSeconds = $cooldownSeconds }
+        $this.Refresh()
+    }
+    [void] Refresh() {
+        $this.KnownProcessIds.Clear()
+        foreach ($process in [System.Diagnostics.Process]::GetProcesses()) {
+            try { [void]$this.KnownProcessIds.Add($process.Id) } catch { }
+        }
+        $now = Get-Date
+        $toRemove = @()
+        foreach ($entry in $this.RecentBoosts.GetEnumerator()) {
+            if (($now - $entry.Value).TotalSeconds -gt $this.BoostCooldownSeconds) {
+                $toRemove += $entry.Key
+            }
+        }
+        foreach ($key in $toRemove) { $this.RecentBoosts.Remove($key) }
+    }
+    [bool] IsOnCooldown([string]$processName) {
+        if ($this.RecentBoosts.ContainsKey($processName)) {
+            $timeSinceBoost = (Get-Date) - $this.RecentBoosts[$processName]
+            if ($timeSinceBoost.TotalSeconds -lt $this.BoostCooldownSeconds) { return $true }
+        }
+        return $false
+    }
+    [bool] ScanAndBoost([System.Collections.Generic.HashSet[string]]$blacklist, [ProphetMemory]$prophet, [double]$cpuSpike = 0, [double]$systemCpu = 0) {
+        $foundNew = $false
+        try {
+            $processes = [System.Diagnostics.Process]::GetProcesses()
+            foreach ($process in $processes) {
+                try {
+                    if ($this.KnownProcessIds.Contains($process.Id)) { continue }
+                    $processName = $process.ProcessName
+                    # Dodaj do known NATYCHMIAST - zapobiega wielokrotnemu przetwarzaniu
+                    [void]$this.KnownProcessIds.Add($process.Id)
+                    if ($Global:DebugMode) { Add-Log "NEW PID $($process.Id): $processName" -Debug }
+                    # #
+                    # FILTROWANIE PROCESOW SYSTEMOWYCH I MALO WAZNYCH
+                    # #
+                    # 1. Filtruj procesy z innej sesji (systemowe)
+                    if ($process.SessionId -ne $this.SessionId -and $process.SessionId -ne 0) { continue }
+                    # 2. Sprawdz blackliste
+                    if ($blacklist.Contains($processName)) { continue }
+                    # 3. Sprawdz cooldown
+                    if ($this.IsOnCooldown($processName)) { continue }
+                    # 4. NOWE: Ignoruj procesy z typowymi nazwami systemowymi/pomocniczymi
+                    $systemPatterns = @(
+                        "^svc",          # svchost, svcs, etc.
+                        "host$",         # RuntimeBroker host, etc.
+                        "broker$",       # Various brokers
+                        "service$",      # Various services
+                        "^wer",          # Windows Error Reporting
+                        "^dism",         # Deployment Image Servicing
+                        "^msi",          # MSI Installer
+                        "^wmi",          # WMI services
+                        "^com",          # COM services
+                        "update",        # Updaters
+                        "telemetry",     # Telemetria
+                        "^diag",         # Diagnostics
+                        "helper$",       # Helper processes
+                        "^crash",        # Crash handlers
+                        "handler$",      # Various handlers
+                        "worker$",       # Worker processes
+                        "agent$",        # Agent processes
+                        "tray$",         # Tray icons
+                        "^nvidia",       # NVIDIA background
+                        "^amd",          # AMD background
+                        "^intel",        # Intel background
+                        "^igfx",         # Intel Graphics
+                        "^rtk",          # Realtek
+                        "container$"     # Container processes
+                    )
+                    $isSystemPattern = $false
+                    foreach ($pattern in $systemPatterns) {
+                        if ($processName -match $pattern) { $isSystemPattern = $true; break }
+                    }
+                    if ($isSystemPattern) { continue }
+                    # 5. NOWE: Ignoruj procesy z lokalizacji systemowych
+                    try {
+                        $processPath = $process.MainModule.FileName
+                        if ($processPath) {
+                            $systemPaths = @(
+                                "\\Windows\\System32",
+                                "\\Windows\\SysWOW64",
+                                "\\Windows\\WinSxS",
+                                "\\Windows\\servicing",
+                                "\\Windows\\Microsoft.NET",
+                                "\\Windows\\assembly"
+                            )
+                            $isSystemPath = $false
+                            foreach ($sysPath in $systemPaths) {
+                                if ($processPath -like "*$sysPath*") { $isSystemPath = $true; break }
+                            }
+                            if ($isSystemPath) { continue }
+                        }
+                    } catch { }
+                    # #
+                    # WYKRYWANIE PRAWDZIWYCH APLIKACJI
+                    # #
+                    # Sprawdz czy to prawdziwa aplikacja
+                    $isLikelyApp = $false
+                    $windowTitle = ""
+                    # 1. Znana jako HEAVY w Prophet
+                    if ($prophet.IsKnownHeavy($processName)) { 
+                        $isLikelyApp = $true 
+                    }
+                    # 2. Ma okno
+                    if (-not $isLikelyApp) {
+                        try {
+                            $process.Refresh()
+                            if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
+                                $isLikelyApp = $true
+                                $windowTitle = $process.MainWindowTitle
+                            }
+                        } catch { }
+                    }
+                    # 3. Sciezka w Program Files / AppData / Games
+                    if (-not $isLikelyApp) {
+                        try {
+                            $path = $process.MainModule.FileName
+                            if ($path -and ($path -match "Program Files" -or $path -match "Users\\[^\\]+\\AppData" -or 
+                                $path -match "Games" -or $path -match "Steam")) {
+                                $isLikelyApp = $true
+                            }
+                        } catch { }
+                    }
+                    if (-not $isLikelyApp) { continue }
+                    # Jesli juz boostujemy inny proces - nie startuj nowego
+                    if ($this.IsBoosting) { continue }
+                    
+                    # v43.10 FIX: Sprawdź HardLock PRZED włączeniem BOOST
+                    # Jeśli aplikacja ma HardLock w AppCategories.json, NIE BOOSTUJ - użytkownik wymusza tryb
+                    $hasHardLock = $false
+                    
+                    if ($Script:AppCategoryPreferences -and $Script:AppCategoryPreferences.Count -gt 0) {
+                        $appLower = $processName.ToLower() -replace '\.exe$', ''
+                        
+                        foreach ($key in $Script:AppCategoryPreferences.Keys) {
+                            $keyLower = $key.ToLower() -replace '\.exe$', ''
+                            
+                            # v43.10b: Rozszerzone dopasowanie - też Google Chrome -> chrome
+                            $matches = ($keyLower -eq $appLower) -or 
+                                      ($appLower -like "*$keyLower*") -or 
+                                      ($keyLower -like "*$appLower*") -or
+                                      ($keyLower -eq "google chrome" -and $appLower -eq "chrome") -or
+                                      ($keyLower -eq "chrome" -and $appLower -eq "chrome")
+                            
+                            if ($matches) {
+                                $pref = $Script:AppCategoryPreferences[$key]
+                                if ($pref.HardLock) {
+                                    $hasHardLock = $true
+                                    # Rate-limit: loguj BOOST BLOCKED max raz na 60s per app
+                                    $bbKey = "BB_$processName"
+                                    $bbNow = [DateTime]::UtcNow
+                                    if (-not $Script:LastBoostBlockLog) { $Script:LastBoostBlockLog = @{} }
+                                    if (-not $Script:LastBoostBlockLog.ContainsKey($bbKey) -or ($bbNow - $Script:LastBoostBlockLog[$bbKey]).TotalSeconds -gt 60) {
+                                        $Script:LastBoostBlockLog[$bbKey] = $bbNow
+                                        Write-DebugLog "BOOST BLOCKED: $processName (HardLock)" "BOOST" "DEBUG"
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    
+                    # Pomiń BOOST jeśli aplikacja ma HardLock - NIE ustawiaj $foundNew!
+                    if ($hasHardLock) { continue }
+                    
+                    # ZAWSZE BOOST dla nowych aplikacji (prosta logika)
+                    $shouldBoost = $true
+                    # Ustaw Boost
+                    $this.IsBoosting = $true
+                    $this.BoostEndTime = (Get-Date).AddMilliseconds($Script:BoostDuration)
+                    $this.BoostProcessName = $processName
+                    $this.BoostProcess = $process
+                    $this.PeakCPU = 0.0
+                    $this.PeakIO = 0.0
+                    $this.RecentBoosts[$processName] = Get-Date
+                    # Pobierz DisplayName
+                    $this.BoostDisplayName = Get-ProcessDisplayName -ProcessName $processName -Process $process
+                    # Dla PWA/helper - pobierz prawdziwa nazwe z tytulu okna
+                    $pwaProcesses = @("pwahelper", "msedgewebview2", "applicationframehost", "wwahostgta", "electron", "cefsharp")
+                    if ($pwaProcesses -contains $processName.ToLower() -or $processName -match "helper|host|webview") {
+                        if (![string]::IsNullOrWhiteSpace($windowTitle) -and $windowTitle.Length -gt 1) {
+                            $cleanTitle = $windowTitle -replace '\s*[----]\s*(Microsoft Edge|Google Chrome|Mozilla Firefox|Brave|Opera).*$', ''
+                            $cleanTitle = $cleanTitle.Trim()
+                            if ($cleanTitle -match "^(.+?)\s*[----]") { $cleanTitle = $matches[1].Trim() }
+                            if ($cleanTitle.Length -gt 1 -and $cleanTitle.Length -lt 50) {
+                                $this.BoostDisplayName = $cleanTitle
+                            }
+                        }
+                    }
+                    if ($this.BoostDisplayName.Length -gt 40) {
+                        $this.BoostDisplayName = $this.BoostDisplayName.Substring(0, 37) + "..."
+                    }
+                    try { $process.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::AboveNormal } catch { }
+                    $foundNew = $true
+                    break
+                } catch { continue }
+            }
+        } catch { }
+        return [bool]$foundNew
+    }
+    [void] UpdateBoost([double]$cpu, [double]$io) {
+        if (-not $this.IsBoosting) { return }
+        if ($cpu -gt $this.PeakCPU) { $this.PeakCPU = $cpu }
+        if ($io -gt $this.PeakIO) { $this.PeakIO = $io }
+        # Sprobuj zaktualizowac DisplayName jesli nadal = ProcessName
+        if ($this.BoostProcess -and $this.BoostDisplayName -eq $this.BoostProcessName) {
+            try {
+                if (-not $this.BoostProcess.HasExited) {
+                    #  FIXED: Uzyj nowej funkcji Get-ProcessDisplayName
+                    $this.BoostDisplayName = Get-ProcessDisplayName -ProcessName $this.BoostProcessName -Process $this.BoostProcess
+                }
+            } catch { }
+        }
+        #  FIXED: Sprawdz czas zamiast countdown - precyzyjne 15 sekund (lub z config)
+        if ((Get-Date) -ge $this.BoostEndTime) { 
+            $this.IsBoosting = $false 
+        }
+    }
+    [int] GetBoostRemainingSeconds() {
+        #  NEW: Metoda do wyswietlania pozostalego czasu Boost
+        if (-not $this.IsBoosting) { return 0 }
+        $remaining = ($this.BoostEndTime - (Get-Date)).TotalSeconds
+        return [Math]::Max(0, [int]$remaining)
+    }
+    # #
+    # #
+    [void] CancelBoost() {
+        $this.IsBoosting = $false
+        $this.BoostEndTime = [datetime]::MinValue
+        $this.BoostProcessName = ""
+        $this.BoostDisplayName = ""
+        $this.PeakCPU = 0.0
+        $this.PeakIO = 0.0
+        $this.BoostProcess = $null
+    }
+    [hashtable] FinishBoost() {
+        if ([string]::IsNullOrWhiteSpace($this.BoostProcessName)) { return $null }
+        if ($this.PeakCPU -eq 0 -and $this.PeakIO -eq 0) {
+            $this.PeakCPU = 1
+        }
+        # Ostatnia proba pobrania DisplayName jesli nadal = ProcessName
+        if ($this.BoostDisplayName -eq $this.BoostProcessName) {
+            $this.BoostDisplayName = Get-ProcessDisplayName -ProcessName $this.BoostProcessName
+        }
+        if ($this.BoostDisplayName.Length -gt 40) {
+            $this.BoostDisplayName = $this.BoostDisplayName.Substring(0, 37) + "..."
+        }
+        $result = @{
+            ProcessName = $this.BoostProcessName
+            DisplayName = $this.BoostDisplayName
+            PeakCPU = $this.PeakCPU
+            PeakIO = $this.PeakIO
+        }
+        $this.IsBoosting = $false
+        $this.BoostEndTime = [datetime]::MinValue
+        $this.PeakCPU = 0.0
+        $this.PeakIO = 0.0
+        $this.BoostProcessName = ""
+        $this.BoostDisplayName = ""
+        $this.BoostProcess = $null
+        return $result
+    }
+    [void] Cleanup() {
+        $this.KnownProcessIds.Clear()
+        $this.RecentBoosts.Clear()
+        if ($this.BoostProcess) {
+            try { $this.BoostProcess.Dispose() } catch { }
+            $this.BoostProcess = $null
+        }
+        $this.IsBoosting = $false
+        $this.BoostEndTime = [datetime]::MinValue
+        $this.BoostProcessName = ""
+        $this.BoostDisplayName = ""
+    }
+}
+# ANOMALY DETECTOR - FIXED z limitem historii
+class AnomalyDetector {
+    [hashtable] $AppProfiles
+    [double[]] $CPUHistory
+    [double[]] $IOHistory
+    [int] $HistoryIndex
+    [int] $HistoryCount
+    [double] $CPUBaseline
+    [double] $CPUStdDev
+    [double] $IOBaseline
+    [double] $IOStdDev
+    [string] $LastCheckTime
+    [string] $LastAnomaly
+    [double] $AnomalyThreshold = 2.5
+    [int] $MaxProfiles = 100
+    AnomalyDetector() {
+        $this.AppProfiles = @{}
+        $this.CPUHistory = [double[]]::new(60)
+        $this.IOHistory = [double[]]::new(60)
+        $this.HistoryIndex = 0
+        $this.HistoryCount = 0
+        $this.CPUBaseline = 15.0
+        $this.CPUStdDev = 10.0
+        $this.IOBaseline = 5.0
+        $this.IOStdDev = 5.0
+        $this.LastCheckTime = ""
+        $this.LastAnomaly = ""
+    }
+    [void] RecordSample([double]$cpu, [double]$io) {
+        $this.CPUHistory[$this.HistoryIndex] = $cpu
+        $this.IOHistory[$this.HistoryIndex] = $io
+        $this.HistoryIndex = ($this.HistoryIndex + 1) % 60
+        if ($this.HistoryCount -lt 60) { $this.HistoryCount++ }
+        if ($this.HistoryIndex -eq 0 -and $this.HistoryCount -eq 60) {
+            $this.UpdateBaselines()
+        }
+    }
+    [void] UpdateBaselines() {
+        if ($this.HistoryCount -lt 10) { return }
+        $cpuSum = 0.0; $ioSum = 0.0
+        for ($i = 0; $i -lt $this.HistoryCount; $i++) {
+            $cpuSum += $this.CPUHistory[$i]
+            $ioSum += $this.IOHistory[$i]
+        }
+        $this.CPUBaseline = $cpuSum / $this.HistoryCount
+        $this.IOBaseline = $ioSum / $this.HistoryCount
+        $cpuVariance = 0.0; $ioVariance = 0.0
+        for ($i = 0; $i -lt $this.HistoryCount; $i++) {
+            $cpuVariance += [Math]::Pow($this.CPUHistory[$i] - $this.CPUBaseline, 2)
+            $ioVariance += [Math]::Pow($this.IOHistory[$i] - $this.IOBaseline, 2)
+        }
+        $this.CPUStdDev = [Math]::Max(5.0, [Math]::Sqrt($cpuVariance / $this.HistoryCount))
+        $this.IOStdDev = [Math]::Max(2.0, [Math]::Sqrt($ioVariance / $this.HistoryCount))
+    }
+    [void] UpdateBaseline([string]$processName, [double]$cpu, [double]$io) {
+        if ([string]::IsNullOrWhiteSpace($processName)) { return }
+        if ($this.AppProfiles.Count -ge $this.MaxProfiles -and -not $this.AppProfiles.ContainsKey($processName)) {
+            $oldest = $this.AppProfiles.GetEnumerator() | Sort-Object { $_.Value.Samples } | Select-Object -First 1
+            if ($oldest) {
+                $this.AppProfiles.Remove($oldest.Key)
+            }
+        }
+        if (-not $this.AppProfiles.ContainsKey($processName)) {
+            $this.AppProfiles[$processName] = @{
+                Name = $processName
+                Samples = 1
+                AvgCPU = $cpu
+                AvgIO = $io
+                MaxCPU = $cpu
+                MaxIO = $io
+                StdCPU = 10.0
+                StdIO = 5.0
+                CPUHistory = [System.Collections.Generic.List[double]]::new()
+                IOHistory = [System.Collections.Generic.List[double]]::new()
+            }
+        }
+        $myProfile = $this.AppProfiles[$processName]
+        $myProfile.Samples++
+        $myProfile.CPUHistory.Add($cpu)
+        $myProfile.IOHistory.Add($io)
+        while ($myProfile.CPUHistory.Count -gt 20) { $myProfile.CPUHistory.RemoveAt(0) }
+        while ($myProfile.IOHistory.Count -gt 20) { $myProfile.IOHistory.RemoveAt(0) }
+        $alpha = 0.3
+        $myProfile.AvgCPU = ($myProfile.AvgCPU * (1 - $alpha)) + ($cpu * $alpha)
+        $myProfile.AvgIO = ($myProfile.AvgIO * (1 - $alpha)) + ($io * $alpha)
+        if ($cpu -gt $myProfile.MaxCPU) { $myProfile.MaxCPU = $cpu }
+        if ($io -gt $myProfile.MaxIO) { $myProfile.MaxIO = $io }
+        if ($myProfile.CPUHistory.Count -ge 5) {
+            $cpuMean = ($myProfile.CPUHistory | Measure-Object -Average).Average
+            $cpuVariance = 0.0
+            foreach ($v in $myProfile.CPUHistory) {
+                $cpuVariance += [Math]::Pow($v - $cpuMean, 2)
+            }
+            $myProfile.StdCPU = [Math]::Max(5.0, [Math]::Sqrt($cpuVariance / $myProfile.CPUHistory.Count))
+            $ioMean = ($myProfile.IOHistory | Measure-Object -Average).Average
+            $ioVariance = 0.0
+            foreach ($v in $myProfile.IOHistory) {
+                $ioVariance += [Math]::Pow($v - $ioMean, 2)
+            }
+            $myProfile.StdIO = [Math]::Max(2.0, [Math]::Sqrt($ioVariance / $myProfile.IOHistory.Count))
+        }
+    }
+    [hashtable] CheckForAnomalies([double]$cpu, [double]$io) {
+        $this.LastCheckTime = (Get-Date).ToString("HH:mm:ss")
+        $this.RecordSample($cpu, $io)
+        $result = @{
+            IsAnomaly = $false
+            Type = ""
+            Details = ""
+            Severity = 0
+        }
+        if ($this.HistoryCount -lt 20) { return $result }
+        $cpuZScore = 0
+        if ($this.CPUStdDev -gt 0) {
+            $cpuZScore = ($cpu - $this.CPUBaseline) / $this.CPUStdDev
+        }
+        $ioZScore = 0
+        if ($this.IOStdDev -gt 0) {
+            $ioZScore = ($io - $this.IOBaseline) / $this.IOStdDev
+        }
+        if ($cpuZScore -gt $this.AnomalyThreshold -and $cpu -gt 50) {
+            $result.IsAnomaly = $true
+            $result.Type = "CPU_SPIKE"
+            $result.Details = "CPU $([Math]::Round($cpu))% (Z=$([Math]::Round($cpuZScore, 1)))"
+            $result.Severity = [Math]::Min(10, [int]$cpuZScore)
+        }
+        if ($ioZScore -gt $this.AnomalyThreshold -and $io -gt 100) {
+            $result.IsAnomaly = $true
+            $result.Type = "IO_STORM"
+            $result.Details = "I/O $([Math]::Round($io)) MB/s (Z=$([Math]::Round($ioZScore, 1)))"
+            $result.Severity = [Math]::Min(10, [int]$ioZScore)
+        }
+        if ($cpu -gt 80 -and $io -lt 5) {
+            $highCPUCount = 0
+            for ($i = 0; $i -lt [Math]::Min(30, $this.HistoryCount); $i++) {
+                $idx = ($this.HistoryIndex - 1 - $i + 60) % 60
+                if ($this.CPUHistory[$idx] -gt 70) { $highCPUCount++ }
+            }
+            if ($highCPUCount -gt 20) {
+                $result.IsAnomaly = $true
+                $result.Type = "CRYPTO_MINER"
+                $result.Details = "Sustained high CPU ($highCPUCount/30 samples > 70%)"
+                $result.Severity = 9
+            }
+        }
+        if ($result.IsAnomaly) {
+            $this.LastAnomaly = $result.Type
+        }
+        return $result
+    }
+    [hashtable] FindCulpritProcess() {
+        try {
+            $processes = Get-Process -ErrorAction SilentlyContinue | 
+                         Where-Object { $_.CPU -gt 0 } | 
+                         Sort-Object CPU -Descending | 
+                         Select-Object -First 5
+            foreach ($proc in $processes) {
+                $procCPU = 0
+                try {
+                    $procCPU = [Math]::Round($proc.CPU, 1)
+                } catch { }
+                if ($procCPU -gt 50) {
+                    $result = @{
+                        ProcessName = $proc.ProcessName
+                        PID = $proc.Id
+                        CPU = $procCPU
+                        Memory = [Math]::Round($proc.WorkingSet64 / 1MB, 1)
+                    }
+                    $proc.Dispose()
+                    return $result
+                }
+                $proc.Dispose()
+            }
+        } catch { }
+        return $null
+    }
+    [hashtable] GetStatus() {
+        return @{
+            ProfileCount = $this.AppProfiles.Count
+            LastCheck = $this.LastCheckTime
+            LastAnomaly = $this.LastAnomaly
+            CPUBaseline = [Math]::Round($this.CPUBaseline, 1)
+            CPUStdDev = [Math]::Round($this.CPUStdDev, 1)
+            HistorySamples = $this.HistoryCount
+        }
+    }
+    [int] GetProfileCount() { return $this.AppProfiles.Count }
+    [void] SaveProfiles([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "AnomalyProfiles.json"
+            $data = @{
+                AppProfiles = @{}
+                CPUBaseline = $this.CPUBaseline
+                CPUStdDev = $this.CPUStdDev
+                IOBaseline = $this.IOBaseline
+                IOStdDev = $this.IOStdDev
+            }
+            foreach ($key in $this.AppProfiles.Keys) {
+                $profile = $this.AppProfiles[$key]
+                $data.AppProfiles[$key] = @{
+                    Name = $profile.Name
+                    Samples = $profile.Samples
+                    AvgCPU = $profile.AvgCPU
+                    AvgIO = $profile.AvgIO
+                    MaxCPU = $profile.MaxCPU
+                    MaxIO = $profile.MaxIO
+                    StdCPU = $profile.StdCPU
+                    StdIO = $profile.StdIO
+                }
+            }
+            $json = $data | ConvertTo-Json -Depth 4 -Compress
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadProfiles([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "AnomalyProfiles.json"
+            if (Test-Path $path) {
+                $json = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+                $data = $json | ConvertFrom-Json
+                if ($null -ne $data.CPUBaseline) { $this.CPUBaseline = [double]$data.CPUBaseline }
+                if ($null -ne $data.CPUStdDev) { $this.CPUStdDev = [double]$data.CPUStdDev }
+                if ($null -ne $data.IOBaseline) { $this.IOBaseline = [double]$data.IOBaseline }
+                if ($null -ne $data.IOStdDev) { $this.IOStdDev = [double]$data.IOStdDev }
+                if ($data.AppProfiles) {
+                    $data.AppProfiles.PSObject.Properties | ForEach-Object {
+                        $profile = $_.Value
+                        $this.AppProfiles[$_.Name] = @{
+                            Name = $profile.Name
+                            Samples = [int]$profile.Samples
+                            AvgCPU = [double]$profile.AvgCPU
+                            AvgIO = [double]$profile.AvgIO
+                            MaxCPU = [double]$profile.MaxCPU
+                            MaxIO = [double]$profile.MaxIO
+                            StdCPU = [double]$profile.StdCPU
+                            StdIO = [double]$profile.StdIO
+                            CPUHistory = [System.Collections.Generic.List[double]]::new()
+                            IOHistory = [System.Collections.Generic.List[double]]::new()
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+}
+# SELF-TUNING AI ENGINE
+class SelfTuner {
+    [hashtable] $HourlyProfiles
+    [double] $TurboThreshold
+    [double] $BalancedThreshold
+    [System.Collections.Generic.List[hashtable]] $DecisionHistory
+    [int] $MaxHistory = 100
+    [double] $LearningRate = 0.1
+    [int] $GoodDecisions = 0
+    [int] $BadDecisions = 0
+    [int] $TotalEvaluations = 0
+    [double] $LastReward = 0.0  # V37.8.5: Ostatni reward (do wyswietlania w Configurator)
+    SelfTuner() {
+        $this.HourlyProfiles = @{}
+        $this.TurboThreshold = 75.0
+        $this.BalancedThreshold = 30.0
+        $this.DecisionHistory = [System.Collections.Generic.List[hashtable]]::new()
+        for ($h = 0; $h -lt 24; $h++) {
+            $this.HourlyProfiles[$h] = @{
+                TurboThreshold = 75.0
+                BalancedThreshold = 30.0
+                AggressionBias = 0.0
+                Samples = 0
+                AvgTemp = 50.0
+                AvgCPU = 20.0
+            }
+        }
+    }
+    [void] RecordDecision([string]$mode, [double]$cpu, [double]$temp, [double]$pressure, [double]$io) {
+        $decision = @{
+            Time = Get-Date
+            Hour = (Get-Date).Hour
+            Mode = $mode
+            CPU = $cpu
+            Temp = $temp
+            Pressure = $pressure
+            IO = $io
+            Evaluated = $false
+            Score = 0.0
+            CPUAfter = 0.0
+            TempAfter = 0.0
+        }
+        $this.DecisionHistory.Add($decision)
+        while ($this.DecisionHistory.Count -gt $this.MaxHistory) {
+            $this.DecisionHistory.RemoveAt(0)
+        }
+    }
+    [void] EvaluateDecisions([double]$currentCPU, [double]$currentTemp) {
+        $now = Get-Date
+        for ($i = 0; $i -lt $this.DecisionHistory.Count; $i++) {
+            $decision = $this.DecisionHistory[$i]
+            if ($decision.Evaluated) { continue }
+            $age = ($now - $decision.Time).TotalSeconds
+            if ($age -lt 10 -or $age -gt 60) { continue }
+            $decision.CPUAfter = $currentCPU
+            $decision.TempAfter = $currentTemp
+            $decision.Evaluated = $true
+            $score = $this.CalculateScore($decision)
+            $decision.Score = $score
+            $this.TotalEvaluations++
+            if ($score -gt 0.6) {
+                $this.GoodDecisions++
+                $this.LastReward = $score  # v39: Zapisz reward
+            } elseif ($score -lt 0.4) {
+                $this.BadDecisions++
+                $this.LastReward = -($score)  # v39: Negatywny reward
+                $this.AdjustThresholds($decision, $score)
+            } else {
+                $this.LastReward = 0.0
+            }
+        }
+    }
+    [double] CalculateScore([hashtable]$decision) {
+        $score = 0.5
+        $tempDelta = $decision.TempAfter - $decision.Temp
+        $cpuDelta = $decision.CPUAfter - $decision.CPU
+        #  SYNC: uses variables z config.json
+        switch ($decision.Mode) {
+            "Turbo" {
+                if ($decision.CPU -gt $Script:BalancedThreshold) { $score += 0.25 }
+                elseif ($decision.CPU -lt $Script:ForceSilentCPU) { $score -= 0.25 }
+                if ($decision.TempAfter -lt 80) { $score += 0.15 }
+                elseif ($decision.TempAfter -gt 90) { $score -= 0.3 }
+                if ($tempDelta -gt 15) { $score -= 0.2 }
+            }
+            "Silent" {
+                if ($decision.CPU -lt $Script:ForceSilentCPU) { $score += 0.25 }
+                elseif ($decision.CPU -gt $Script:BalancedThreshold) { $score -= 0.2 }
+                if ($decision.TempAfter -lt 65) { $score += 0.2 }
+                if ($cpuDelta -gt 20) { $score -= 0.15 }
+            }
+            "Balanced" {
+                $score += 0.1
+                if ($decision.TempAfter -lt 75) { $score += 0.1 }
+            }
+        }
+        return [Math]::Max(0.0, [Math]::Min(1.0, $score))
+    }
+    [void] AdjustThresholds([hashtable]$decision, [double]$score) {
+        $hour = $decision.Hour
+        $profile = $this.HourlyProfiles[$hour]
+        $adjustment = $this.LearningRate * (0.5 - $score)
+        switch ($decision.Mode) {
+            "Turbo" {
+                if ($score -lt 0.4) {
+                    $profile.TurboThreshold = [Math]::Min(80, $profile.TurboThreshold + $adjustment * 8)
+                }
+            }
+            "Silent" {
+                if ($score -lt 0.4 -and $decision.CPU -gt 25) {
+                    $profile.BalancedThreshold = [Math]::Max(15, $profile.BalancedThreshold - $adjustment * 5)
+                }
+            }
+        }
+        $profile.Samples++
+        $alpha = 0.2
+        $profile.AvgTemp = ($profile.AvgTemp * (1 - $alpha)) + ($decision.Temp * $alpha)
+        $profile.AvgCPU = ($profile.AvgCPU * (1 - $alpha)) + ($decision.CPU * $alpha)
+    }
+    [hashtable] GetCurrentProfile() {
+        $hour = (Get-Date).Hour
+        return $this.HourlyProfiles[$hour]
+    }
+    [double] GetTurboThreshold() {
+        $profile = $this.GetCurrentProfile()
+        if ($profile.Samples -gt 5) {
+            return [Math]::Round($profile.TurboThreshold, 1)
+        }
+        return $this.TurboThreshold
+    }
+    [double] GetBalancedThreshold() {
+        $profile = $this.GetCurrentProfile()
+        if ($profile.Samples -gt 5) {
+            return [Math]::Round($profile.BalancedThreshold, 1)
+        }
+        return $this.BalancedThreshold
+    }
+    [double] GetRecommendedBias() {
+        $profile = $this.GetCurrentProfile()
+        if ($profile.Samples -lt 10) { return 0.0 }
+        #  SYNC: uses variables z config.json
+        if ($profile.AvgCPU -gt $Script:BalancedThreshold) { return 0.15 }
+        if ($profile.AvgCPU -lt $Script:ForceSilentCPU -and $profile.AvgTemp -lt 60) { return -0.1 }
+        return 0.0
+    }
+    [double] GetEfficiency() {
+        $total = $this.GoodDecisions + $this.BadDecisions
+        if ($total -eq 0) { return 0.5 }
+        return [Math]::Round($this.GoodDecisions / $total, 2)
+    }
+    [string] GetStatus() {
+        $eff = [Math]::Round($this.GetEfficiency() * 100)
+        $turbo = [Math]::Round($this.GetTurboThreshold())
+        $balanced = [Math]::Round($this.GetBalancedThreshold())
+        return "Eff:$eff% T>$turbo B>$balanced"
+    }
+    [void] SaveState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "SelfTuner.json"
+            $profilesData = @{}
+            for ($h = 0; $h -lt 24; $h++) {
+                $profilesData["$h"] = $this.HourlyProfiles[$h]
+            }
+            $data = @{
+                HourlyProfiles = $profilesData
+                TurboThreshold = $this.TurboThreshold
+                BalancedThreshold = $this.BalancedThreshold
+                GoodDecisions = $this.GoodDecisions
+                BadDecisions = $this.BadDecisions
+                TotalEvaluations = $this.TotalEvaluations
+            }
+            $json = $data | ConvertTo-Json -Depth 4 -Compress
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "SelfTuner.json"
+            if (Test-Path $path) {
+                $json = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+                $data = $json | ConvertFrom-Json
+                if ($data.HourlyProfiles) {
+                    $data.HourlyProfiles.PSObject.Properties | ForEach-Object {
+                        $h = [int]$_.Name
+                        $this.HourlyProfiles[$h] = @{
+                            TurboThreshold = [double]$_.Value.TurboThreshold
+                            BalancedThreshold = [double]$_.Value.BalancedThreshold
+                            AggressionBias = [double]$_.Value.AggressionBias
+                            Samples = [int]$_.Value.Samples
+                            AvgTemp = [double]$_.Value.AvgTemp
+                            AvgCPU = [double]$_.Value.AvgCPU
+                        }
+                    }
+                }
+                if ($null -ne $data.GoodDecisions) { $this.GoodDecisions = [int]$data.GoodDecisions }
+                if ($null -ne $data.BadDecisions) { $this.BadDecisions = [int]$data.BadDecisions }
+                if ($null -ne $data.TotalEvaluations) { $this.TotalEvaluations = [int]$data.TotalEvaluations }
+            }
+        } catch { }
+    }
+}
+# PROCESS CHAIN PREDICTION
+class ChainPredictor {
+    [hashtable] $TransitionGraph
+    [string] $LastApp
+    [datetime] $LastAppTime
+    [System.Collections.Generic.List[string]] $RecentChain
+    [int] $MaxChainLength = 10
+    [int] $MinConfidence = 2
+    [string] $CurrentPrediction
+    [double] $PredictionConfidence
+    [bool] $PreBoostActive
+    [string] $PreBoostTarget
+    [int] $CorrectPredictions = 0
+    [int] $TotalPredictions = 0
+    ChainPredictor() {
+        $this.TransitionGraph = @{}
+        $this.LastApp = ""
+        $this.LastAppTime = Get-Date
+        $this.RecentChain = [System.Collections.Generic.List[string]]::new()
+        $this.CurrentPrediction = ""
+        $this.PredictionConfidence = 0.0
+        $this.PreBoostActive = $false
+        $this.PreBoostTarget = ""
+    }
+    [void] RecordAppLaunch([string]$appName) {
+        if ([string]::IsNullOrWhiteSpace($appName)) { return }
+        $now = Get-Date
+        if ($this.PreBoostActive) {
+            $this.TotalPredictions++
+            if ($this.PreBoostTarget -eq $appName) {
+                $this.CorrectPredictions++
+            }
+            $this.PreBoostActive = $false
+            $this.PreBoostTarget = ""
+        }
+        if (![string]::IsNullOrWhiteSpace($this.LastApp) -and $this.LastApp -ne $appName) {
+            $timeDiff = ($now - $this.LastAppTime).TotalSeconds
+            if ($timeDiff -lt 600 -and $timeDiff -gt 0.5) {
+                if (-not $this.TransitionGraph.ContainsKey($this.LastApp)) {
+                    $this.TransitionGraph[$this.LastApp] = @{}
+                }
+                if (-not $this.TransitionGraph[$this.LastApp].ContainsKey($appName)) {
+                    $this.TransitionGraph[$this.LastApp][$appName] = @{
+                        Count = 0
+                        AvgTime = $timeDiff
+                        TotalTime = 0.0
+                    }
+                }
+                $transition = $this.TransitionGraph[$this.LastApp][$appName]
+                $transition.Count++
+                $transition.TotalTime += $timeDiff
+                $transition.AvgTime = $transition.TotalTime / $transition.Count
+            }
+        }
+        $this.RecentChain.Add($appName)
+        while ($this.RecentChain.Count -gt $this.MaxChainLength) {
+            $this.RecentChain.RemoveAt(0)
+        }
+        $this.LastApp = $appName
+        $this.LastAppTime = $now
+        $this.UpdatePrediction()
+    }
+    [void] UpdatePrediction() {
+        $this.CurrentPrediction = ""
+        $this.PredictionConfidence = 0.0
+        if ([string]::IsNullOrWhiteSpace($this.LastApp)) { return }
+        if (-not $this.TransitionGraph.ContainsKey($this.LastApp)) { return }
+        $transitions = $this.TransitionGraph[$this.LastApp]
+        $totalTransitions = 0
+        $bestApp = ""
+        $bestCount = 0
+        foreach ($app in $transitions.Keys) {
+            $count = $transitions[$app].Count
+            $totalTransitions += $count
+            if ($count -gt $bestCount) {
+                $bestCount = $count
+                $bestApp = $app
+            }
+        }
+        if ($bestCount -ge $this.MinConfidence -and $totalTransitions -gt 0) {
+            $this.CurrentPrediction = $bestApp
+            $this.PredictionConfidence = [Math]::Round($bestCount / $totalTransitions, 2)
+        }
+    }
+    [double] GetExpectedTime() {
+        if ([string]::IsNullOrWhiteSpace($this.LastApp)) { return 0 }
+        if ([string]::IsNullOrWhiteSpace($this.CurrentPrediction)) { return 0 }
+        if (-not $this.TransitionGraph.ContainsKey($this.LastApp)) { return 0 }
+        if (-not $this.TransitionGraph[$this.LastApp].ContainsKey($this.CurrentPrediction)) { return 0 }
+        return $this.TransitionGraph[$this.LastApp][$this.CurrentPrediction].AvgTime
+    }
+    [bool] ShouldPreBoost() {
+        if ([string]::IsNullOrWhiteSpace($this.CurrentPrediction)) { return $false }
+        [double]$minConf = 0.4
+        if ($Script:ConfidenceThreshold -and $Script:ConfidenceThreshold -gt 0) { 
+            $minConf = $Script:ConfidenceThreshold / 100.0 
+        }
+        if ($this.PredictionConfidence -lt $minConf) { return $false }
+        if ($this.PreBoostActive) { return $false }
+        $expectedTime = $this.GetExpectedTime()
+        $timeSinceLast = ((Get-Date) - $this.LastAppTime).TotalSeconds
+        if ($expectedTime -gt 3 -and $timeSinceLast -gt ($expectedTime * 0.4) -and $timeSinceLast -lt ($expectedTime * 0.85)) {
+            $this.PreBoostActive = $true
+            $this.PreBoostTarget = $this.CurrentPrediction
+            return $true
+        }
+        return $false
+    }
+    [string] GetPredictionStatus() {
+        if ([string]::IsNullOrWhiteSpace($this.CurrentPrediction)) {
+            return "No prediction"
+        }
+        $conf = [Math]::Round($this.PredictionConfidence * 100)
+        $expected = [Math]::Round($this.GetExpectedTime())
+        $predName = $this.CurrentPrediction
+        if ($predName.Length -gt 15) {
+            $predName = $predName.Substring(0, 12) + "..."
+        }
+        return "$predName ($conf%, ~${expected}s)"
+    }
+    [double] GetAccuracy() {
+        if ($this.TotalPredictions -eq 0) { return 0 }
+        return [Math]::Round($this.CorrectPredictions / $this.TotalPredictions, 2)
+    }
+    [int] GetChainCount() {
+        $count = 0
+        foreach ($app in $this.TransitionGraph.Keys) {
+            $count += $this.TransitionGraph[$app].Count
+        }
+        return $count
+    }
+    [string] GetRecentChainDisplay() {
+        if ($this.RecentChain.Count -eq 0) { return "" }
+        $display = @()
+        $lastItems = $this.RecentChain | Select-Object -Last 3
+        foreach ($item in $lastItems) {
+            $name = $item
+            if ($name.Length -gt 10) { $name = $name.Substring(0, 7) + "..." }
+            $display += $name
+        }
+        return ($display -join " -> ")
+    }
+    [void] SaveState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "ChainPredictor.json"
+            $graphData = @{}
+            foreach ($fromApp in $this.TransitionGraph.Keys) {
+                $graphData[$fromApp] = @{}
+                foreach ($toApp in $this.TransitionGraph[$fromApp].Keys) {
+                    $graphData[$fromApp][$toApp] = $this.TransitionGraph[$fromApp][$toApp]
+                }
+            }
+            $data = @{
+                TransitionGraph = $graphData
+                LastApp = $this.LastApp
+                CorrectPredictions = $this.CorrectPredictions
+                TotalPredictions = $this.TotalPredictions
+            }
+            $json = $data | ConvertTo-Json -Depth 5 -Compress
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "ChainPredictor.json"
+            if (Test-Path $path) {
+                $json = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+                $data = $json | ConvertFrom-Json
+                if ($data.TransitionGraph) {
+                    $data.TransitionGraph.PSObject.Properties | ForEach-Object {
+                        $fromApp = $_.Name
+                        $this.TransitionGraph[$fromApp] = @{}
+                        $_.Value.PSObject.Properties | ForEach-Object {
+                            $toApp = $_.Name
+                            $this.TransitionGraph[$fromApp][$toApp] = @{
+                                Count = [int]$_.Value.Count
+                                AvgTime = [double]$_.Value.AvgTime
+                                TotalTime = [double]$_.Value.TotalTime
+                            }
+                        }
+                    }
+                }
+                if ($data.LastApp) { $this.LastApp = $data.LastApp }
+                if ($null -ne $data.CorrectPredictions) { $this.CorrectPredictions = [int]$data.CorrectPredictions }
+                if ($null -ne $data.TotalPredictions) { $this.TotalPredictions = [int]$data.TotalPredictions }
+            }
+        } catch { }
+    }
+}
+# CONTEXT DETECTOR - Wykrywanie kontekstu pracy (Gaming/Coding/Multimedia/Idle)
+class ContextDetector {
+    [string] $CurrentContext
+    [hashtable] $ContextPatterns
+    [hashtable] $ActiveApps
+    [datetime] $LastContextChange
+    [int] $ContextStability
+    ContextDetector() {
+        $this.CurrentContext = "Idle"
+        $this.LastContextChange = Get-Date
+        $this.ContextStability = 0
+        $this.ActiveApps = @{}
+        # Definicje kontekstow - aplikacje charakterystyczne
+        $this.ContextPatterns = @{
+            Gaming = @{
+                Apps = @("steam", "epicgameslauncher", "origin", "uplay", "battlenet", "gog", 
+                         "csgo", "dota2", "valorant", "fortnite", "minecraft", "roblox",
+                         "witcher", "cyberpunk", "gta", "apex", "overwatch", "leagueoflegends",
+                         "shipping", "win64", "game", "dx11", "dx12", "vulkan", "unity",
+                         "tormented", "baldur", "elden", "hogwarts", "starfield", "diablo",
+                         "callisto", "resident", "evil", "souls", "palworld", "helldivers")
+                CpuMin = 20
+                Priority = 1
+                Mode = "Turbo"  # Gaming needs performance
+            }
+            Audio = @{
+                Apps = @("cubase", "cubase13", "cubase12", "cubase11", "cubase10",
+                         "studioone", "studio one", "presonus",
+                         "reaper", "reaper64",
+                         "ableton", "ableton live", "live",
+                         "flstudio", "fl64", "fl",
+                         "bitwig", "bitwig studio",
+                         "protools", "pro tools", "avid",
+                         "logic", "logicpro", "garageband",
+                         "ardour", "audacity", "audition", "adobe audition",
+                         "reason", "lmms", "cakewalk", "sonar", "bandlab",
+                         "nuendo", "wavelab", "soundforge",
+                         # Native Instruments
+                         "kontakt", "komplete", "reaktor", "massive", "fm8", "absynth",
+                         "battery", "maschine", "guitar rig",
+                         # Xfer / Popularne synthy
+                         "serum", "serumfx", "lfotool", "cthulhu",
+                         "omnisphere", "nexus", "sylenth", "spire", "diva", "hive",
+                         "vst", "vsthost", "vstbridge", "jbridge",
+                         "asio4all", "focusrite", "scarlett",
+                         # ARTURIA V COLLECTION 11 - WSZYSTKIE 45
+                         # Analog Lab
+                         "analog lab", "analoglab", "analog lab pro",
+                         # Pigments
+                         "pigments", "pigments 4", "pigments 5",
+                         # Pure LoFi
+                         "pure lofi", "purelofi",
+                         # ----- SYNTHY ANALOGOWE -----
+                         # Mini V (Minimoog)
+                         "mini v", "miniv", "mini v4", "minimoog",
+                         # MiniBrute V
+                         "minibrute", "minibrute v", "minibrutev",
+                         # MiniFreak V
+                         "minifreak", "minifreak v", "minifreakv",
+                         # Jun-6 V (Juno-6/60)
+                         "jun-6", "jun6", "jun-6 v", "jun6v", "juno",
+                         # Jup-8 V (Jupiter-8)
+                         "jup-8", "jup8", "jup-8 v", "jup8v", "jupiter",
+                         # CS-80 V (Yamaha CS-80)
+                         "cs-80", "cs80", "cs-80 v", "cs80v",
+                         # Prophet-5 V
+                         "prophet-5", "prophet5", "prophet-5 v", "prophet5v", "prophet v", "prophetv",
+                         # Prophet-VS V
+                         "prophet-vs", "prophetvs", "prophet-vs v", "prophetvsv",
+                         # OB-Xa V (Oberheim)
+                         "ob-xa", "obxa", "ob-xa v", "obxav", "oberheim",
+                         # Matrix-12 V
+                         "matrix-12", "matrix12", "matrix-12 v", "matrix12v",
+                         # SEM V (Oberheim SEM)
+                         "sem", "sem v", "semv",
+                         # ARP 2600 V
+                         "arp 2600", "arp2600", "arp 2600 v", "arp2600v",
+                         # Modular V (Moog Modular)
+                         "modular v", "modularv",
+                         # Buchla Easel V
+                         "buchla", "buchla easel", "buchla easel v",
+                         # Synthi V (EMS Synthi)
+                         "synthi", "synthi v", "synthiv", "ems",
+                         # Vocoder V
+                         "vocoder", "vocoder v", "vocoderv",
+                         # Acid V (TB-303)
+                         "acid v", "acidv", "acid",
+                         # Synthx V (Elka Synthex)
+                         "synthx", "synthx v", "synthxv", "elka", "synthex",
+                         # ----- SYNTHY CYFROWE -----
+                         # DX7 V (Yamaha DX7)
+                         "dx7", "dx7 v", "dx7v",
+                         # CZ V (Casio CZ)
+                         "cz v", "czv", "casio cz",
+                         # SQ80 V (Ensoniq SQ-80)
+                         "sq80", "sq-80", "sq80 v", "sq80v", "ensoniq",
+                         # Synclavier V
+                         "synclavier", "synclavier v", "synclavierv",
+                         # ----- SAMPLERY -----
+                         # CMI V (Fairlight CMI)
+                         "cmi", "cmi v", "cmiv", "fairlight",
+                         # Emulator II V
+                         "emulator", "emulator ii", "emulator ii v", "e-mu",
+                         # Mellotron V
+                         "mellotron", "mellotron v", "mellotronv",
+                         # ----- PIANINA / ORGANY / KEYS -----
+                         # Piano V
+                         "piano v", "pianov",
+                         # Stage-73 V (Rhodes)
+                         "stage-73", "stage73", "stage-73 v", "stage73v", "rhodes",
+                         # Wurli V (Wurlitzer)
+                         "wurli", "wurli v", "wurliv", "wurlitzer",
+                         # B-3 V (Hammond B3)
+                         "b-3", "b3", "b-3 v", "b3v", "hammond",
+                         # Vox Continental V
+                         "vox continental", "vox", "vox continental v",
+                         # Farfisa V
+                         "farfisa", "farfisa v", "farfisav",
+                         # Solina V (ARP Solina)
+                         "solina", "solina v", "solinav",
+                         # Clavinet V
+                         "clavinet", "clavinet v", "clavinetv",
+                         # ----- AUGMENTED SERIES -----
+                         "augmented strings", "augmented voices",
+                         "augmented brass", "augmented woodwinds",
+                         "augmented grand piano", "augmented piano",
+                         "augmented mallets", "augmented yangtze",
+                         # ----- EFEKTY ARTURIA -----
+                         "efx motions", "efx fragments", "efx refract",
+                         "rev plate-140", "rev spring-636", "rev intensity",
+                         "delay tape-201", "delay memory-brigade", "delay eternity",
+                         "comp vca-65", "comp fet-76", "comp diode-609",
+                         "pre trida", "pre v76", "pre 1973",
+                         "filter mini", "filter sem", "filter m12",
+                         "bus force", "tape mello-fi",
+                         # INNE POPULARNE VST
+                         "fabfilter", "fab filter", "pro-q", "pro-c", "pro-l", "pro-r", "pro-mb",
+                         "izotope", "ozone", "neutron", "rx", "nectar", "vocalsynth",
+                         "waves", "waveshell",
+                         "soundtoys", "decapitator", "echoboy", "crystallizer",
+                         "u-he", "zebra", "repro", "diva", "hive", "bazille", "ace",
+                         "xfer", "lfotool", "cthulhu",
+                         "spectrasonics", "keyscape", "trilian",
+                         "toontrack", "superior drummer", "ezdrummer", "ezbass", "ezkeys",
+                         "addictive drums", "addictive keys", "xln audio",
+                         "amplitube", "bias", "helix native",
+                         "melodyne", "autotune", "antares",
+                         "eventide", "blackhole", "h3000", "ultratap",
+                         "valhalla", "valhalla vintage", "valhalla room", "valhalla delay",
+                         "slate digital", "virtual mix rack", "fg-x",
+                         "plugin alliance", "brainworx",
+                         "softube", "console 1", "harmonics",
+                         "neural dsp", "archetype", "quad cortex")
+                CpuMin = 5
+                Priority = 1
+                Mode = "Balanced"  # Audio = Balanced, fast response but stable
+            }
+            Rendering = @{
+                Apps = @("blender", "premiere", "aftereffects", "davinci", "vegas", 
+                         "handbrake", "ffmpeg", "obs", "streamlabs", "kdenlive")
+                CpuMin = 60
+                Priority = 2
+                Mode = "Turbo"  # Rendering needs max performance
+            }
+            Coding = @{
+                Apps = @("code", "visualstudio", "devenv", "idea", "pycharm", "webstorm",
+                         "eclipse", "netbeans", "android studio", "xcode", "rider",
+                         "powershell", "windowsterminal", "cmd", "git", "node")
+                CpuMin = 10
+                Priority = 3
+                Mode = "Balanced"
+            }
+            Multimedia = @{
+                Apps = @("spotify", "vlc", "netflix", "youtube", "prime video", "disney",
+                         "plex", "kodi", "musicbee", "foobar2000", "winamp", "itunes")
+                CpuMin = 5
+                Priority = 4
+                Mode = "Silent"
+            }
+            Browsing = @{
+                Apps = @("chrome", "firefox", "opera", "brave", "vivaldi", 
+                         "iexplore", "chromium", "tor")
+                CpuMin = 5
+                Priority = 5
+                Mode = "Balanced"
+            }
+            Office = @{
+                Apps = @("winword", "excel", "powerpnt", "outlook", "teams", "slack",
+                         "zoom", "discord", "skype", "onenote", "notion", "obsidian")
+                CpuMin = 5
+                Priority = 6
+                Mode = "Balanced"
+            }
+        }
+    }
+    [void] UpdateActiveApps([string]$foregroundApp, [double]$cpu) {
+        $now = Get-Date
+        $app = $foregroundApp.ToLower()
+        if (-not $this.ActiveApps.ContainsKey($app)) {
+            $this.ActiveApps[$app] = @{
+                LastSeen = $now
+                TotalTime = 0
+                AvgCPU = $cpu
+                Samples = 1
+            }
+        } else {
+            $entry = $this.ActiveApps[$app]
+            $entry.LastSeen = $now
+            $entry.Samples++
+            $entry.AvgCPU = ($entry.AvgCPU * ($entry.Samples - 1) + $cpu) / $entry.Samples
+        }
+        # Usun nieaktywne aplikacje (> 5 minut)
+        $keysToRemove = @()
+        foreach ($key in $this.ActiveApps.Keys) {
+            if (($now - $this.ActiveApps[$key].LastSeen).TotalMinutes -gt 5) {
+                $keysToRemove += $key
+            }
+        }
+        foreach ($key in $keysToRemove) {
+            $this.ActiveApps.Remove($key)
+        }
+    }
+    [string] DetectContext([double]$cpu) {
+        $detectedContext = "Idle"
+        $highestPriority = 999
+        foreach ($contextName in $this.ContextPatterns.Keys) {
+            $pattern = $this.ContextPatterns[$contextName]
+            foreach ($patternApp in $pattern.Apps) {
+                foreach ($activeApp in $this.ActiveApps.Keys) {
+                    if ($activeApp -like "*$patternApp*") {
+                        if ($cpu -ge $pattern.CpuMin -and $pattern.Priority -lt $highestPriority) {
+                            $detectedContext = $contextName
+                            $highestPriority = $pattern.Priority
+                        }
+                    }
+                }
+            }
+        }
+        # Aktualizuj stabilnosc kontekstu
+        if ($detectedContext -eq $this.CurrentContext) {
+            $this.ContextStability = [Math]::Min(100, $this.ContextStability + 5)
+        } else {
+            $this.ContextStability = [Math]::Max(0, $this.ContextStability - 10)
+            # Zmien kontekst tylko gdy stabilnosc spadnie do 0
+            if ($this.ContextStability -eq 0) {
+                $this.CurrentContext = $detectedContext
+                $this.LastContextChange = Get-Date
+                $this.ContextStability = 20
+            }
+        }
+        return $this.CurrentContext
+    }
+    [string] GetRecommendedMode() {
+        if ($this.ContextPatterns.ContainsKey($this.CurrentContext)) {
+            return $this.ContextPatterns[$this.CurrentContext].Mode
+        }
+        return "Balanced"
+    }
+    [string] GetStatus() {
+        $stability = $this.ContextStability
+        return "$($this.CurrentContext) ($stability%)"
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $data = @{
+                ContextPatterns = $this.ContextPatterns
+            }
+            $path = Join-Path $dir "ContextPatterns.json"
+            $data | ConvertTo-Json -Depth 5 | Set-Content $path -Encoding UTF8
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "ContextPatterns.json"
+            if (Test-Path $path) {
+                $data = Get-Content $path -Raw | ConvertFrom-Json
+                if ($data.ContextPatterns) {
+                    foreach ($prop in $data.ContextPatterns.PSObject.Properties) {
+                        if ($this.ContextPatterns.ContainsKey($prop.Name)) {
+                            $this.ContextPatterns[$prop.Name].Mode = $prop.Value.Mode
+                            $this.ContextPatterns[$prop.Name].Priority = $prop.Value.Priority
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+}
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE DETECTOR - Wykrywanie fazy działania aplikacji (Loading/Menu/Gameplay/Cutscene/Idle)
+# ETAP 1: Tylko detekcja + logowanie, BEZ wpływu na decyzje
+# ═══════════════════════════════════════════════════════════════════════════════
+class PhaseDetector {
+    [string]$CurrentPhase
+    [string]$PreviousPhase
+    [string]$CurrentApp
+    [DateTime]$PhaseStart
+    [int]$WindowSize
+    [System.Collections.Generic.List[hashtable]]$MetricsWindow
+    [hashtable]$AppPhaseHistory  # per-app: ile czasu w każdej fazie
+    [int]$PhaseChanges
+    [DateTime]$LastLogTime
+    # v43.14: Pause Detection
+    [double]$AppPeakGPU          # Peak GPU load gdy app była aktywna
+    [double]$AppPeakCPU          # Peak CPU load
+    [int]$LowActivityCount       # Ile próbek z niskim CPU+GPU (pauza?)
+    [int]$PauseThresholdSamples  # Po ilu próbkach uznajemy pauzę
+
+    PhaseDetector() {
+        $this.CurrentPhase = "Idle"
+        $this.PreviousPhase = "Idle"
+        $this.CurrentApp = ""
+        $this.PhaseStart = [DateTime]::UtcNow
+        $this.WindowSize = 12  # ~24 sekund przy 2s/iter
+        $this.MetricsWindow = [System.Collections.Generic.List[hashtable]]::new()
+        $this.AppPhaseHistory = @{}
+        $this.PhaseChanges = 0
+        $this.LastLogTime = [DateTime]::MinValue
+        $this.AppPeakGPU = 0
+        $this.AppPeakCPU = 0
+        $this.LowActivityCount = 0
+        $this.PauseThresholdSamples = 5  # 5 próbek (~10s) niskiego load = pauza
+    }
+
+    [void] Update([string]$app, [double]$cpu, [double]$gpu, [double]$io, [double]$temp) {
+        # Zmiana aplikacji → reset okna
+        if ($app -ne $this.CurrentApp -and $app -ne "Desktop" -and $app -ne "") {
+            $this.RecordPhaseTime()
+            $this.MetricsWindow.Clear()
+            $this.CurrentApp = $app
+            $this.CurrentPhase = "Loading"  # Nowa app = zakładaj loading
+            $this.PhaseStart = [DateTime]::UtcNow
+            $this.AppPeakGPU = 0; $this.AppPeakCPU = 0; $this.LowActivityCount = 0
+        }
+
+        # Dodaj sample do okna
+        $sample = @{
+            CPU = $cpu
+            GPU = $gpu
+            IO = $io
+            Temp = $temp
+            Time = [DateTime]::UtcNow
+        }
+        $this.MetricsWindow.Add($sample)
+        if ($this.MetricsWindow.Count -gt $this.WindowSize) {
+            $this.MetricsWindow.RemoveAt(0)
+        }
+
+        # Potrzeba min 4 sampli do detekcji
+        if ($this.MetricsWindow.Count -lt 4) { return }
+
+        # Oblicz statystyki okna
+        $avgCPU = ($this.MetricsWindow | ForEach-Object { $_.CPU } | Measure-Object -Average).Average
+        $avgGPU = ($this.MetricsWindow | ForEach-Object { $_.GPU } | Measure-Object -Average).Average
+        $avgIO = ($this.MetricsWindow | ForEach-Object { $_.IO } | Measure-Object -Average).Average
+        $maxCPU = ($this.MetricsWindow | ForEach-Object { $_.CPU } | Measure-Object -Maximum).Maximum
+        $maxGPU = ($this.MetricsWindow | ForEach-Object { $_.GPU } | Measure-Object -Maximum).Maximum
+        
+        # Zmienność CPU (odchylenie standardowe)
+        $cpuValues = @($this.MetricsWindow | ForEach-Object { $_.CPU })
+        $cpuVariance = 0
+        if ($cpuValues.Count -gt 1) {
+            $cpuMean = $avgCPU
+            $cpuVariance = [Math]::Sqrt(($cpuValues | ForEach-Object { ($_ - $cpuMean) * ($_ - $cpuMean) } | Measure-Object -Average).Average)
+        }
+
+        # v43.14: PAUSE DETECTION - śledzenie peak load i nagłego spadku
+        # Aktualizuj peak (zapamiętaj najwyższy load tej app)
+        if ($cpu -gt $this.AppPeakCPU) { $this.AppPeakCPU = $cpu }
+        if ($gpu -gt $this.AppPeakGPU) { $this.AppPeakGPU = $gpu }
+        
+        # Reset peak przy zmianie app (w bloku wyżej, ale tu safety)
+        if ($app -ne $this.CurrentApp) { 
+            $this.AppPeakGPU = 0; $this.AppPeakCPU = 0; $this.LowActivityCount = 0 
+        }
+        
+        # Sprawdź czy app jest spauzowana:
+        # Peak GPU był >50% ALE teraz GPU<15% i CPU<15% = pauza
+        $isPaused = $false
+        if ($this.AppPeakGPU -gt 50 -and $avgGPU -lt 15 -and $avgCPU -lt 15) {
+            $this.LowActivityCount++
+            if ($this.LowActivityCount -ge $this.PauseThresholdSamples) {
+                $isPaused = $true
+            }
+        } elseif ($this.AppPeakCPU -gt 60 -and $avgCPU -lt 10 -and $avgGPU -lt 10) {
+            # CPU-heavy app (np. kompilacja) spauzowana
+            $this.LowActivityCount++
+            if ($this.LowActivityCount -ge $this.PauseThresholdSamples) {
+                $isPaused = $true
+            }
+        } else {
+            $this.LowActivityCount = [Math]::Max(0, $this.LowActivityCount - 1)  # Powolny decay
+        }
+
+        # Wykryj fazę
+        $detectedPhase = if ($isPaused) { "Paused" } else { $this.ClassifyPhase($avgCPU, $avgGPU, $avgIO, $maxCPU, $maxGPU, $cpuVariance) }
+
+        # Zmień fazę tylko gdy stabilna (3+ sampli potwierdza)
+        if ($detectedPhase -ne $this.CurrentPhase) {
+            $this.PreviousPhase = $this.CurrentPhase
+            $this.RecordPhaseTime()
+            $this.CurrentPhase = $detectedPhase
+            $this.PhaseStart = [DateTime]::UtcNow
+            $this.PhaseChanges++
+        }
+    }
+
+    [string] ClassifyPhase([double]$avgCPU, [double]$avgGPU, [double]$avgIO, [double]$maxCPU, [double]$maxGPU, [double]$cpuVar) {
+        # LOADING: Wysoki I/O (dysk pracuje = wczytywanie)
+        if ($avgIO -gt 50) {
+            return "Loading"
+        }
+        # LOADING: Wysoki CPU + niski GPU = ładowanie assetów/shaderów
+        # ALE tylko gdy GPU < 50%! Jeśli GPU jest wysoki → to Gameplay ze spike'ami CPU
+        if ($avgCPU -gt 60 -and $avgGPU -lt 30) {
+            return "Loading"
+        }
+        # CPU spike + niski GPU = start/kompilacja shaderów
+        # Kluczowe: maxGPU < 50% odróżnia loading od gameplay z CPU spike'ami
+        if ($maxCPU -gt 85 -and $avgGPU -lt 35 -and $maxGPU -lt 50) {
+            return "Loading"
+        }
+
+        # IDLE: Niskie wszystko
+        if ($avgCPU -lt 10 -and $avgGPU -lt 10) {
+            return "Idle"
+        }
+
+        # MENU: Niski CPU, umiarkowany GPU (renderuje menu/UI), niska zmienność
+        if ($avgCPU -lt 25 -and $avgGPU -gt 15 -and $avgGPU -lt 55 -and $cpuVar -lt 12) {
+            return "Menu"
+        }
+
+        # CUTSCENE: GPU renderuje ale CPU stabilny i niski = pre-rendered/scripted scene
+        # MUSI być PRZED Gameplay! Cutscenka ma wysoki GPU ale CPU jest spokojny
+        # Kluczowe: cpuVar < 8 (bardzo stabilny) + avgCPU < 50 (CPU nie pracuje ciężko)
+        if ($avgGPU -gt 30 -and $avgCPU -lt 50 -and $cpuVar -lt 8) {
+            return "Cutscene"
+        }
+
+        # GAMEPLAY: Wysoki GPU + CPU aktywny lub zmienny
+        # GPU > 60% + (CPU > 50% LUB cpuVar > 8) = aktywna gra (fizyka, AI, input)
+        if ($avgGPU -gt 60 -and ($avgCPU -gt 50 -or $cpuVar -gt 8)) {
+            return "Gameplay"
+        }
+
+        # GAMEPLAY: Umiarkowany GPU + aktywny CPU + zmienność
+        # v43.14: Zaostrzony - avgGPU > 40 wymagany (Chrome GPU=14% to NIE gra)
+        # cpuVar > 10 odróżnia grę (zmienny CPU) od pracy (stabilny CPU)
+        if ($avgGPU -gt 40 -and $avgCPU -gt 30 -and $cpuVar -gt 10) {
+            return "Gameplay"
+        }
+
+        # ACTIVE: CPU aktywne ale bez GPU (kompilacja, przetwarzanie)
+        if ($avgCPU -gt 35 -and $avgGPU -lt 15) {
+            return "Active"
+        }
+
+        return "Idle"
+    }
+
+    [void] RecordPhaseTime() {
+        if ($this.CurrentApp -and $this.CurrentApp -ne "Desktop") {
+            $duration = ([DateTime]::UtcNow - $this.PhaseStart).TotalSeconds
+            if (-not $this.AppPhaseHistory.ContainsKey($this.CurrentApp)) {
+                $this.AppPhaseHistory[$this.CurrentApp] = @{
+                    Loading = 0.0; Menu = 0.0; Gameplay = 0.0
+                    Cutscene = 0.0; Active = 0.0; Idle = 0.0
+                }
+            }
+            if ($this.AppPhaseHistory[$this.CurrentApp].ContainsKey($this.CurrentPhase)) {
+                $this.AppPhaseHistory[$this.CurrentApp][$this.CurrentPhase] += $duration
+            }
+        }
+    }
+
+    [string] GetStatus() {
+        $dur = [int]([DateTime]::UtcNow - $this.PhaseStart).TotalSeconds
+        return "$($this.CurrentApp): $($this.CurrentPhase) (${dur}s)"
+    }
+
+    [hashtable] GetAppProfile([string]$app) {
+        if ($this.AppPhaseHistory.ContainsKey($app)) {
+            return $this.AppPhaseHistory[$app]
+        }
+        return @{}
+    }
+
+    [string] GetRecommendedMode() {
+        $result = "Balanced"
+        switch ($this.CurrentPhase) {
+            "Loading"  { $result = "Turbo" }
+            "Gameplay" { $result = "Balanced" }
+            "Active"   { $result = "Turbo" }
+            "Menu"     { $result = "Silent" }
+            "Cutscene" { $result = "Silent" }
+            "Idle"     { $result = "Silent" }
+            "Paused"   { $result = "Silent" }
+        }
+        return $result
+    }
+
+    [void] SaveState([string]$dir) {
+        try {
+            $data = @{
+                AppPhaseHistory = $this.AppPhaseHistory
+                PhaseChanges = $this.PhaseChanges
+            }
+            $path = Join-Path $dir "PhaseDetector.json"
+            $data | ConvertTo-Json -Depth 5 | Set-Content $path -Encoding UTF8
+        } catch {}
+    }
+
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "PhaseDetector.json"
+            if (Test-Path $path) {
+                $data = Get-Content $path -Raw | ConvertFrom-Json
+                if ($data.AppPhaseHistory) {
+                    foreach ($prop in $data.AppPhaseHistory.PSObject.Properties) {
+                        $this.AppPhaseHistory[$prop.Name] = @{}
+                        foreach ($phase in $prop.Value.PSObject.Properties) {
+                            $this.AppPhaseHistory[$prop.Name][$phase.Name] = [double]$phase.Value
+                        }
+                    }
+                }
+                if ($data.PhaseChanges) { $this.PhaseChanges = [int]$data.PhaseChanges }
+            }
+        } catch {}
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FAN CONTROLLER - Inteligentne sterowanie wentylatorami via LHM/OHM
+# Szybkie zbijanie RPM gdy temp spada (nie czekaj na EC ramp-down)
+# ═══════════════════════════════════════════════════════════════════════════════
+class FanController {
+    [string] $Source = ""        # "LHM" lub "OHM"
+    [bool] $CanControl = $false  # Czy mamy dostęp do Control sensors
+    [bool] $CanRead = $false     # Czy mamy odczyt RPM
+    [bool] $Enabled = $false     # Czy user włączył fan control
+    [bool] $IsOverriding = $false # Czy aktualnie nadpisujemy EC
+    [int] $CurrentRPM = 0
+    [int] $TargetPercent = -1    # -1 = auto (EC), 0-100 = manual
+    [double] $LastTemp = 0
+    [double] $TempDropRate = 0   # °C/s - jak szybko temp spada
+    [datetime] $LastUpdate = [datetime]::MinValue
+    [datetime] $OverrideStart = [datetime]::MinValue
+    [int] $MaxOverrideSeconds = 120  # Max 2min override, potem oddaj EC
+    [hashtable] $FanSensorIds = @{}  # Identifier → Name mapping
+    [hashtable] $ControlSensorIds = @{}
+    # Learned thermal curve
+    [System.Collections.Generic.List[hashtable]] $ThermalHistory
+    [int] $SafeTemp = 75         # Powyżej tej temp NIGDY nie obniżaj fanów
+    
+    FanController() {
+        $this.ThermalHistory = [System.Collections.Generic.List[hashtable]]::new()
+    }
+    
+    # Initialize - wykryj dostępne sensory fanów
+    [void] Initialize([string]$source) {
+        $this.Source = $source
+        if (-not $source -or $source -eq "SystemOnly") { return }
+        
+        $ns = if ($source -eq "LHM") { "root\LibreHardwareMonitor" } else { "root\OpenHardwareMonitor" }
+        try {
+            $sensors = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop
+            
+            # Fan RPM sensors
+            $fans = $sensors | Where-Object { $_.SensorType -eq "Fan" -and $_.Value -gt 0 }
+            foreach ($f in $fans) {
+                $this.FanSensorIds[$f.Identifier] = $f.Name
+            }
+            $this.CanRead = ($this.FanSensorIds.Count -gt 0)
+            
+            # Control sensors (fan %)
+            $controls = $sensors | Where-Object { $_.SensorType -eq "Control" }
+            foreach ($c in $controls) {
+                $this.ControlSensorIds[$c.Identifier] = $c.Name
+            }
+            $this.CanControl = ($this.ControlSensorIds.Count -gt 0)
+            
+            if ($this.CanRead) {
+                $this.Enabled = $true
+                $this.CurrentRPM = [int]($fans | Select-Object -First 1).Value
+            }
+        } catch { }
+    }
+    
+    # Odczytaj aktualne RPM i temp, oblicz trend
+    [hashtable] Update([double]$temp, [string]$mode, [string]$phase) {
+        $result = @{
+            RPM = 0; FanPercent = -1; TempTrend = "stable"
+            Action = "none"; Reason = ""
+        }
+        if (-not $this.Enabled -or -not $this.CanRead) { return $result }
+        
+        $now = Get-Date
+        $ns = if ($this.Source -eq "LHM") { "root\LibreHardwareMonitor" } else { "root\OpenHardwareMonitor" }
+        
+        try {
+            $sensors = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop
+            
+            # Odczytaj RPM
+            $fanSensor = $sensors | Where-Object { $_.SensorType -eq "Fan" -and $_.Value -gt 0 } | Select-Object -First 1
+            if ($fanSensor) { $this.CurrentRPM = [int]$fanSensor.Value }
+            $result.RPM = $this.CurrentRPM
+            
+            # Odczytaj aktualny % kontroli
+            $ctrlSensor = $sensors | Where-Object { $_.SensorType -eq "Control" } | Select-Object -First 1
+            if ($ctrlSensor) { $result.FanPercent = [int]$ctrlSensor.Value }
+            
+            # Oblicz temp drop rate
+            if ($this.LastUpdate -ne [datetime]::MinValue) {
+                $dt = ($now - $this.LastUpdate).TotalSeconds
+                if ($dt -gt 0 -and $dt -lt 10) {
+                    $this.TempDropRate = ($this.LastTemp - $temp) / $dt  # +wartość = temp spada
+                }
+            }
+            $this.LastTemp = $temp
+            $this.LastUpdate = $now
+            
+            # Trend
+            $result.TempTrend = if ($this.TempDropRate -gt 0.3) { "falling" } 
+                               elseif ($this.TempDropRate -lt -0.3) { "rising" } 
+                               else { "stable" }
+            
+            # === DECYZJA: czy obniżyć fan? ===
+            # SAFETY: nigdy nie obniżaj powyżej SafeTemp
+            if ($temp -gt $this.SafeTemp) {
+                if ($this.IsOverriding) {
+                    $this.ReleaseControl($ns, $sensors)
+                    $result.Action = "release"; $result.Reason = "SAFETY: temp=$([int]$temp)>$($this.SafeTemp)"
+                }
+                return $result
+            }
+            
+            # Max override time - oddaj EC po 2min
+            if ($this.IsOverriding) {
+                $overrideDuration = ($now - $this.OverrideStart).TotalSeconds
+                if ($overrideDuration -gt $this.MaxOverrideSeconds) {
+                    $this.ReleaseControl($ns, $sensors)
+                    $result.Action = "release"; $result.Reason = "MAX-TIME: $([int]$overrideDuration)s"
+                    return $result
+                }
+            }
+            
+            # FAST RAMP DOWN: Temp spada + tryb Silent/Paused + temp<65°C
+            if ($this.CanControl -and $temp -lt 65 -and $this.TempDropRate -gt 0.2) {
+                if ($mode -eq "Silent" -or $phase -eq "Paused" -or $phase -eq "Idle") {
+                    # Oblicz target fan% na podstawie temp
+                    $targetPct = if ($temp -lt 45) { 25 }        # Prawie off
+                                 elseif ($temp -lt 50) { 30 }    # Minimum
+                                 elseif ($temp -lt 55) { 40 }    # Niski
+                                 elseif ($temp -lt 60) { 50 }    # Umiarkowany
+                                 else { 60 }                      # Jeszcze wysokawy
+                    
+                    # Tylko obniżaj - nigdy nie podnoś fan (EC to zrobi)
+                    if ($result.FanPercent -gt $targetPct + 10) {
+                        $this.SetFanPercent($ns, $sensors, $targetPct)
+                        $this.IsOverriding = $true
+                        if ($this.OverrideStart -eq [datetime]::MinValue) {
+                            $this.OverrideStart = $now
+                        }
+                        $result.Action = "lower"
+                        $result.Reason = "FAST-DOWN: temp=$([int]$temp) fan=$($result.FanPercent)%→$($targetPct)% drop=$([Math]::Round($this.TempDropRate,1))/s"
+                    }
+                }
+            }
+            
+            # Temp wzrasta lub tryb nie-Silent → oddaj kontrolę EC
+            if ($this.IsOverriding -and ($this.TempDropRate -lt -0.5 -or $mode -eq "Turbo")) {
+                $this.ReleaseControl($ns, $sensors)
+                $result.Action = "release"; $result.Reason = "TEMP-RISING or TURBO"
+            }
+            
+        } catch { }
+        
+        return $result
+    }
+    
+    # Ustaw fan% przez WMI (LHM)
+    hidden [void] SetFanPercent([string]$ns, $sensors, [int]$percent) {
+        if (-not $this.CanControl) { return }
+        try {
+            # LHM pozwala na set via WMI Set method na Control sensorach
+            $controls = $sensors | Where-Object { $_.SensorType -eq "Control" }
+            foreach ($ctrl in $controls) {
+                # Użyj Set-CimInstance lub WMI method
+                $ctrl | Set-CimInstance -Property @{ Value = [float]$percent } -ErrorAction SilentlyContinue
+            }
+            $this.TargetPercent = $percent
+        } catch {
+            # LHM WMI Set nie zadziałał - spróbuj inaczej
+            $this.CanControl = $false
+        }
+    }
+    
+    # Oddaj kontrolę EC (reset to auto)
+    hidden [void] ReleaseControl([string]$ns, $sensors) {
+        if (-not $this.IsOverriding) { return }
+        try {
+            # Set-CimInstance z wartością "default" lub 100% → EC przejmuje
+            $controls = $sensors | Where-Object { $_.SensorType -eq "Control" }
+            foreach ($ctrl in $controls) {
+                $ctrl | Set-CimInstance -Property @{ Value = [float]100 } -ErrorAction SilentlyContinue
+            }
+        } catch { }
+        $this.IsOverriding = $false
+        $this.TargetPercent = -1
+        $this.OverrideStart = [datetime]::MinValue
+    }
+    
+    [hashtable] GetStatus() {
+        return @{
+            Enabled = $this.Enabled
+            Source = $this.Source
+            CanControl = $this.CanControl
+            CanRead = $this.CanRead
+            RPM = $this.CurrentRPM
+            IsOverriding = $this.IsOverriding
+            TargetPercent = $this.TargetPercent
+            TempDropRate = [Math]::Round($this.TempDropRate, 2)
+            SafeTemp = $this.SafeTemp
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SHARED APP KNOWLEDGE - Centralna baza wiedzy per-app
+# Każdy silnik PISZE swoją wiedzę, każdy silnik CZYTA wiedzę innych
+# AICoordinator czyta WSZYSTKO i podejmuje finalną decyzję z pełnym kontekstem
+# ═══════════════════════════════════════════════════════════════════════════════
+class SharedAppKnowledge {
+    [hashtable] $Apps = @{}  # { "appName" = AppProfile }
+    [string] $ConfigDir = ""
+    
+    # Pobierz lub utwórz profil aplikacji
+    [hashtable] GetProfile([string]$app) {
+        if ([string]::IsNullOrWhiteSpace($app) -or $app -eq "Desktop") {
+            return $this.NewProfile()
+        }
+        $key = $app.ToLower()
+        if (-not $this.Apps.ContainsKey($key)) {
+            $this.Apps[$key] = $this.NewProfile()
+        }
+        return $this.Apps[$key]
+    }
+    
+    [hashtable] NewProfile() {
+        return @{
+            # === OD PROPHET ===
+            AvgCPU = 0.0; AvgGPU = 0.0; AvgTemp = 0.0
+            BestMode = ""; Sessions = 0; TotalTime = 0.0
+            # === OD Q-LEARNING ===
+            QBestAction = ""; QConfidence = 0.0
+            QPhaseActions = @{}  # { "Gameplay" = "Silent"; "Loading" = "Turbo" }
+            # === OD GPUAI ===
+            PreferredGPU = ""; IsGPUBound = $false
+            AvgGPULoad = 0.0; GPUCategory = ""  # "Heavy"/"Light"/"Work"
+            # === OD PHASE ===
+            DominantPhase = ""; PhaseHistory = @{}
+            # { "Gameplay" = 120.5; "Loading" = 10.2; "Idle" = 300.0 }
+            # === OD THERMAL ===
+            ThermalRisk = "Low"  # "Low"/"Medium"/"High"
+            PeakTemp = 0.0; AvgTempDelta = 0.0
+            # === OD CONTEXT ===
+            Category = ""  # "Gaming"/"Work"/"Media"/"Browser"/"System"
+            Priority = 5   # 1=highest, 6=lowest
+            # === OD NETWORKAI ===
+            NetworkMode = ""; AvgDownload = 0.0; AvgUpload = 0.0
+            # === OD ENERGY ===
+            Efficiency = 0.0  # 0-1 jak efektywnie app używa CPU
+            # === META ===
+            LastSeen = [datetime]::MinValue
+            UpdateCount = 0
+        }
+    }
+    
+    # === WRITE METHODS - każdy silnik pisze swoją wiedzę ===
+    
+    [void] WriteFromProphet([string]$app, [double]$avgCPU, [double]$avgGPU, [string]$bestMode, [int]$sessions) {
+        $p = $this.GetProfile($app)
+        $p.AvgCPU = $avgCPU; $p.AvgGPU = $avgGPU
+        $p.BestMode = $bestMode; $p.Sessions = $sessions
+        $p.LastSeen = Get-Date; $p.UpdateCount++
+    }
+    
+    [void] WriteFromQLearning([string]$app, [string]$bestAction, [double]$confidence, [string]$phase, [string]$phaseAction) {
+        $p = $this.GetProfile($app)
+        $p.QBestAction = $bestAction; $p.QConfidence = $confidence
+        if ($phase -and $phaseAction) { $p.QPhaseActions[$phase] = $phaseAction }
+        $p.LastSeen = Get-Date; $p.UpdateCount++
+    }
+    
+    [void] WriteFromGPUAI([string]$app, [string]$preferredGPU, [bool]$isGPUBound, [double]$avgGPULoad, [string]$category) {
+        $p = $this.GetProfile($app)
+        $p.PreferredGPU = $preferredGPU; $p.IsGPUBound = $isGPUBound
+        $p.AvgGPULoad = $avgGPULoad; $p.GPUCategory = $category
+        $p.LastSeen = Get-Date; $p.UpdateCount++
+    }
+    
+    [void] WriteFromPhase([string]$app, [string]$dominantPhase, [hashtable]$phaseHistory) {
+        $p = $this.GetProfile($app)
+        $p.DominantPhase = $dominantPhase
+        if ($phaseHistory) { $p.PhaseHistory = $phaseHistory }
+        $p.LastSeen = Get-Date; $p.UpdateCount++
+    }
+    
+    [void] WriteFromThermal([string]$app, [double]$avgTemp, [double]$peakTemp, [string]$risk) {
+        $p = $this.GetProfile($app)
+        $a = 0.9; $p.AvgTemp = $p.AvgTemp * $a + $avgTemp * (1 - $a)
+        if ($peakTemp -gt $p.PeakTemp) { $p.PeakTemp = $peakTemp }
+        $p.ThermalRisk = $risk
+        $p.LastSeen = Get-Date; $p.UpdateCount++
+    }
+    
+    [void] WriteFromContext([string]$app, [string]$category, [int]$priority) {
+        $p = $this.GetProfile($app)
+        $p.Category = $category; $p.Priority = $priority
+        $p.LastSeen = Get-Date; $p.UpdateCount++
+    }
+    
+    [void] WriteFromNetwork([string]$app, [string]$mode, [double]$dl, [double]$ul) {
+        $p = $this.GetProfile($app)
+        $p.NetworkMode = $mode; $p.AvgDownload = $dl; $p.AvgUpload = $ul
+        $p.LastSeen = Get-Date; $p.UpdateCount++
+    }
+    
+    [void] WriteFromEnergy([string]$app, [double]$efficiency) {
+        $p = $this.GetProfile($app)
+        $p.Efficiency = $efficiency
+        $p.LastSeen = Get-Date; $p.UpdateCount++
+    }
+    
+    # === READ - AICoordinator i inne silniki czytają pełny profil ===
+    
+    # Generuj KOMPLETNY score 0-100 na podstawie CAŁEJ wiedzy o aplikacji
+    [hashtable] GetAppIntelligence([string]$app, [string]$currentPhase) {
+        $p = $this.GetProfile($app)
+        $result = @{
+            RecommendedMode = "Balanced"
+            Score = 50
+            Confidence = 0.0  # 0-1 ile wiemy o tej app
+            Reasons = [System.Collections.Generic.List[string]]::new()
+        }
+        
+        if ($p.UpdateCount -lt 3) {
+            $result.Confidence = 0.1
+            $result.Reasons.Add("NEW-APP: brak danych")
+            return $result
+        }
+        
+        # Zbierz głosy z każdego źródła wiedzy
+        $votes = @{ Silent = 0.0; Balanced = 0.0; Turbo = 0.0 }
+        $totalWeight = 0.0
+        
+        # v43.14: Detect Q-Prophet CONFLICT (Q skrzywiony na Silent z powodu starych rewards)
+        $qProphetConflict = $false
+        if ($p.BestMode -and $p.QBestAction -and $p.BestMode -ne $p.QBestAction) {
+            $qProphetConflict = $true
+        }
+        
+        # 1. Prophet: historyczny najlepszy tryb (waga 2.5 - NAJWYŻSZA gdy wiarygodny)
+        if ($p.BestMode) {
+            $prophetWeight = if ($qProphetConflict) { 3.0 } else { 2.5 }  # Wyższa przy konflikcie
+            $votes[$p.BestMode] += $prophetWeight
+            $totalWeight += $prophetWeight
+            $result.Reasons.Add("Prophet=$($p.BestMode)")
+        }
+        
+        # 2. Q-Learning per phase (waga 1.5 - OBNIŻONA, Q może być skrzywiony)
+        if ($currentPhase -and $p.QPhaseActions.ContainsKey($currentPhase)) {
+            $qMode = $p.QPhaseActions[$currentPhase]
+            $qWeight = if ($qProphetConflict) { 1.0 } else { 2.0 }  # Niższa przy konflikcie
+            $votes[$qMode] += $qWeight
+            $totalWeight += $qWeight
+            $result.Reasons.Add("Q[$currentPhase]=$qMode")
+        } elseif ($p.QBestAction) {
+            $votes[$p.QBestAction] += 1.0
+            $totalWeight += 1.0
+            $result.Reasons.Add("Q=$($p.QBestAction)")
+        }
+        
+        # 3. GPUAI: GPU-bound = BALANCED (nie Silent! Silent throttle APU power budget)
+        if ($p.IsGPUBound) {
+            $votes["Balanced"] += 2.0
+            $totalWeight += 2.0
+            $result.Reasons.Add("GPU-BOUND→Balanced")
+        } elseif ($p.GPUCategory -eq "Heavy") {
+            $votes["Balanced"] += 1.0
+            $totalWeight += 1.0
+            $result.Reasons.Add("GPU=Heavy")
+        }
+        
+        # 4. Phase: kontekst fazy (waga 1.5)
+        if ($currentPhase) {
+            $phaseVote = switch ($currentPhase) {
+                "Loading"  { "Turbo" }
+                "Gameplay" { "Balanced" }
+                "Active"   { "Balanced" }
+                "Cutscene" { "Silent" }
+                "Menu"     { "Silent" }
+                "Idle"     { "Silent" }
+                "Paused"   { "Silent" }
+                default    { "Balanced" }
+            }
+            $votes[$phaseVote] += 1.5
+            $totalWeight += 1.5
+            $result.Reasons.Add("Phase=$currentPhase→$phaseVote")
+        }
+        
+        # 5. Thermal: ryzyko (waga 1.5)
+        if ($p.ThermalRisk -eq "High") {
+            $votes["Silent"] += 1.5
+            $totalWeight += 1.5
+            $result.Reasons.Add("THERMAL-RISK")
+        } elseif ($p.ThermalRisk -eq "Medium") {
+            $votes["Balanced"] += 0.5
+            $totalWeight += 0.5
+        }
+        
+        # 6. Context: kategoria (waga 1.5)
+        # v43.14: Audio apps = Balanced minimum (realtime buffers!)
+        if ($p.Category -eq "Audio") {
+            $votes["Balanced"] += 2.0  # Audio WYMAGA Balanced (realtime, low-latency)
+            $totalWeight += 2.0
+            $result.Reasons.Add("AUDIO→Balanced")
+        } elseif ($p.Category -eq "Gaming" -or $p.Category -eq "Rendering") {
+            if ($currentPhase -eq "Loading") { $votes["Turbo"] += 1.5 }
+            else { $votes["Balanced"] += 1.5 }
+            $totalWeight += 1.5
+        } elseif ($p.Category -eq "Coding") {
+            # Coding: Active=Balanced, Idle=Silent
+            if ($currentPhase -eq "Active") { $votes["Balanced"] += 1.0 }
+            else { $votes["Silent"] += 0.5 }
+            $totalWeight += 1.0
+        } elseif ($p.Category -eq "Work" -or $p.Category -eq "Browser" -or $p.Category -eq "Browsing") {
+            $votes["Silent"] += 0.5
+            $totalWeight += 0.5
+        }
+        
+        # 7. Energy: efektywność (waga 0.5)
+        if ($p.Efficiency -gt 0.7) {
+            $votes["Silent"] += 0.5  # Efektywna app - nie potrzebuje mocy
+            $totalWeight += 0.5
+        } elseif ($p.Efficiency -lt 0.3 -and $p.Efficiency -gt 0) {
+            $votes["Turbo"] += 0.5  # Nieefektywna - potrzebuje mocy
+            $totalWeight += 0.5
+        }
+        
+        # Oblicz zwycięzcę
+        if ($totalWeight -gt 0) {
+            $best = "Balanced"; $bestScore = $votes["Balanced"]
+            if ($votes["Silent"] -gt $bestScore) { $best = "Silent"; $bestScore = $votes["Silent"] }
+            if ($votes["Turbo"] -gt $bestScore) { $best = "Turbo"; $bestScore = $votes["Turbo"] }
+            $result.RecommendedMode = $best
+            
+            # Score 0-100 (Silent=25, Balanced=50, Turbo=75 +/- strength)
+            $baseScore = switch ($best) { "Silent" { 25 } "Balanced" { 50 } "Turbo" { 75 } default { 50 } }
+            $strength = if ($totalWeight -gt 0) { $bestScore / $totalWeight } else { 0.5 }
+            $result.Score = [Math]::Min(100, [Math]::Max(0, [int]($baseScore + ($strength - 0.5) * 30)))
+            $result.Confidence = [Math]::Min(1.0, $p.UpdateCount / 50.0)
+        }
+        
+        return $result
+    }
+    
+    # Save/Load
+    [void] SaveState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "SharedAppKnowledge.json"
+            $export = @{}
+            foreach ($key in $this.Apps.Keys) {
+                $p = $this.Apps[$key]
+                $export[$key] = @{
+                    AvgCPU = [Math]::Round($p.AvgCPU, 1); AvgGPU = [Math]::Round($p.AvgGPU, 1)
+                    AvgTemp = [Math]::Round($p.AvgTemp, 1); BestMode = $p.BestMode; Sessions = $p.Sessions
+                    QBestAction = $p.QBestAction; QConfidence = [Math]::Round($p.QConfidence, 2)
+                    QPhaseActions = $p.QPhaseActions
+                    PreferredGPU = $p.PreferredGPU; IsGPUBound = $p.IsGPUBound
+                    GPUCategory = $p.GPUCategory; DominantPhase = $p.DominantPhase
+                    PhaseHistory = $p.PhaseHistory; ThermalRisk = $p.ThermalRisk
+                    PeakTemp = [Math]::Round($p.PeakTemp, 1)
+                    Category = $p.Category; Priority = $p.Priority
+                    NetworkMode = $p.NetworkMode; Efficiency = [Math]::Round($p.Efficiency, 2)
+                    UpdateCount = $p.UpdateCount
+                }
+            }
+            $export | ConvertTo-Json -Depth 5 -Compress | Set-Content $path -Encoding UTF8 -Force
+        } catch {}
+    }
+    
+    [void] LoadState([string]$configDir) {
+        $this.ConfigDir = $configDir
+        try {
+            $path = Join-Path $configDir "SharedAppKnowledge.json"
+            if (Test-Path $path) {
+                $data = Get-Content $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                foreach ($prop in $data.PSObject.Properties) {
+                    $key = $prop.Name
+                    $v = $prop.Value
+                    $p = $this.NewProfile()
+                    $p.AvgCPU = if ($v.AvgCPU) { $v.AvgCPU } else { 0 }
+                    $p.AvgGPU = if ($v.AvgGPU) { $v.AvgGPU } else { 0 }
+                    $p.AvgTemp = if ($v.AvgTemp) { $v.AvgTemp } else { 0 }
+                    $p.BestMode = if ($v.BestMode) { $v.BestMode } else { "" }
+                    $p.Sessions = if ($v.Sessions) { [int]$v.Sessions } else { 0 }
+                    $p.QBestAction = if ($v.QBestAction) { $v.QBestAction } else { "" }
+                    $p.QConfidence = if ($v.QConfidence) { $v.QConfidence } else { 0 }
+                    $p.QPhaseActions = @{}
+                    if ($v.QPhaseActions) {
+                        $v.QPhaseActions.PSObject.Properties | ForEach-Object { $p.QPhaseActions[$_.Name] = $_.Value }
+                    }
+                    $p.PreferredGPU = if ($v.PreferredGPU) { $v.PreferredGPU } else { "" }
+                    $p.IsGPUBound = if ($v.IsGPUBound) { [bool]$v.IsGPUBound } else { $false }
+                    $p.GPUCategory = if ($v.GPUCategory) { $v.GPUCategory } else { "" }
+                    $p.DominantPhase = if ($v.DominantPhase) { $v.DominantPhase } else { "" }
+                    $p.PhaseHistory = @{}
+                    if ($v.PhaseHistory) {
+                        $v.PhaseHistory.PSObject.Properties | ForEach-Object { $p.PhaseHistory[$_.Name] = [double]$_.Value }
+                    }
+                    $p.ThermalRisk = if ($v.ThermalRisk) { $v.ThermalRisk } else { "Low" }
+                    $p.PeakTemp = if ($v.PeakTemp) { $v.PeakTemp } else { 0 }
+                    $p.Category = if ($v.Category) { $v.Category } else { "" }
+                    $p.Priority = if ($v.Priority) { [int]$v.Priority } else { 5 }
+                    $p.NetworkMode = if ($v.NetworkMode) { $v.NetworkMode } else { "" }
+                    $p.Efficiency = if ($v.Efficiency) { $v.Efficiency } else { 0 }
+                    $p.UpdateCount = if ($v.UpdateCount) { [int]$v.UpdateCount } else { 0 }
+                    $this.Apps[$key] = $p
+                }
+            }
+        } catch {}
+    }
+}
+
+# THERMAL PREDICTOR - Przewidywanie temperatury
+class ThermalPredictor {
+    [System.Collections.Generic.List[double]] $TempHistory
+    [System.Collections.Generic.List[double]] $CpuHistory
+    [hashtable] $AppThermalProfiles
+    [int] $MaxHistory
+    [double] $PredictedTemp
+    [double] $ThermalTrend
+    [bool] $OverheatWarning
+    ThermalPredictor() {
+        $this.TempHistory = [System.Collections.Generic.List[double]]::new()
+        $this.CpuHistory = [System.Collections.Generic.List[double]]::new()
+        $this.AppThermalProfiles = @{}
+        $this.MaxHistory = 60  # 2 minuty przy 2s intervals
+        $this.PredictedTemp = 50
+        $this.ThermalTrend = 0
+        $this.OverheatWarning = $false
+    }
+    [void] RecordSample([double]$temp, [double]$cpu, [string]$app) {
+        $this.TempHistory.Add($temp)
+        $this.CpuHistory.Add($cpu)
+        while ($this.TempHistory.Count -gt $this.MaxHistory) {
+            $this.TempHistory.RemoveAt(0)
+            $this.CpuHistory.RemoveAt(0)
+        }
+        # Ucz sie profilu termicznego aplikacji
+        if (-not [string]::IsNullOrWhiteSpace($app)) {
+            $appLower = $app.ToLower()
+            if (-not $this.AppThermalProfiles.ContainsKey($appLower)) {
+                $this.AppThermalProfiles[$appLower] = @{
+                    AvgTemp = $temp
+                    MaxTemp = $temp
+                    AvgCPU = $cpu
+                    ThermalRise = 0.0  # °C per minute
+                    Samples = 1
+                }
+            } else {
+                $profile = $this.AppThermalProfiles[$appLower]
+                $profile.Samples++
+                $profile.AvgTemp = ($profile.AvgTemp * ($profile.Samples - 1) + $temp) / $profile.Samples
+                $profile.AvgCPU = ($profile.AvgCPU * ($profile.Samples - 1) + $cpu) / $profile.Samples
+                if ($temp -gt $profile.MaxTemp) { $profile.MaxTemp = $temp }
+            }
+        }
+        $this.CalculatePrediction()
+    }
+    [void] CalculatePrediction() {
+        if ($this.TempHistory.Count -lt 10) { return }
+        # Oblicz trend temperatury (ostatnie 30 sekund vs poprzednie 30 sekund)
+        $recentCount = [Math]::Min(15, $this.TempHistory.Count / 2)
+        $recent = $this.TempHistory | Select-Object -Last $recentCount
+        $older = $this.TempHistory | Select-Object -First $recentCount
+        $recentAvg = ($recent | Measure-Object -Average).Average
+        $olderAvg = ($older | Measure-Object -Average).Average
+        $this.ThermalTrend = $recentAvg - $olderAvg  # °C zmiana
+        # Przewidywanie na 30 sekund do przodu
+        $currentTemp = $this.TempHistory[-1]
+        $this.PredictedTemp = $currentTemp + ($this.ThermalTrend * 2)
+        # Ostrzezenie o przegrzaniu
+        $this.OverheatWarning = ($this.PredictedTemp -gt 85) -or ($currentTemp -gt 80 -and $this.ThermalTrend -gt 2)
+    }
+    [double] GetPredictedTemp() {
+        return [Math]::Round($this.PredictedTemp, 1)
+    }
+    [bool] ShouldThrottle() {
+        # Sugeruj throttling jesli przewidywana temp > 88°C
+        return $this.PredictedTemp -gt 88 -or $this.OverheatWarning
+    }
+    [double] GetAppThermalRisk([string]$app) {
+        # Zwraca ryzyko termiczne dla aplikacji (0-100)
+        if ([string]::IsNullOrWhiteSpace($app)) { return 50 }
+        $appLower = $app.ToLower()
+        if ($this.AppThermalProfiles.ContainsKey($appLower)) {
+            $profile = $this.AppThermalProfiles[$appLower]
+            $risk = ($profile.MaxTemp - 50) * 2  # 50°C = 0%, 100°C = 100%
+            return [Math]::Max(0, [Math]::Min(100, $risk))
+        }
+        return 50
+    }
+    [string] GetStatus() {
+        $trend = if ($this.ThermalTrend -gt 1) { "?" } elseif ($this.ThermalTrend -lt -1) { "?" } else { "->" }
+        $warning = if ($this.OverheatWarning) { " [WARN]" } else { "" }
+        return "Pred:$([Math]::Round($this.PredictedTemp))°C $trend$warning"
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $data = @{
+                AppThermalProfiles = $this.AppThermalProfiles
+            }
+            $path = Join-Path $dir "ThermalProfiles.json"
+            $data | ConvertTo-Json -Depth 5 | Set-Content $path -Encoding UTF8
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "ThermalProfiles.json"
+            if (Test-Path $path) {
+                $data = Get-Content $path -Raw | ConvertFrom-Json
+                if ($data.AppThermalProfiles) {
+                    $this.AppThermalProfiles = @{}
+                    foreach ($prop in $data.AppThermalProfiles.PSObject.Properties) {
+                        $this.AppThermalProfiles[$prop.Name] = @{
+                            AvgTemp = $prop.Value.AvgTemp
+                            MaxTemp = $prop.Value.MaxTemp
+                            Samples = $prop.Value.Samples
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+}
+# USER PATTERN LEARNER - Uczenie sie wzorcow uzytkownika
+class UserPatternLearner {
+    [hashtable] $HourlyPatterns      # Wzorce dla kazdej godziny
+    [hashtable] $DayOfWeekPatterns   # Wzorce dla dni tygodnia
+    [hashtable] $AppUsagePatterns    # Kiedy uzywasz jakich aplikacji
+    [System.Collections.Generic.List[hashtable]] $SessionHistory
+    [int] $MaxSessions
+    [datetime] $SessionStart
+    [string] $LastDominantApp
+    UserPatternLearner() {
+        $this.HourlyPatterns = @{}
+        $this.DayOfWeekPatterns = @{}
+        $this.AppUsagePatterns = @{}
+        $this.SessionHistory = [System.Collections.Generic.List[hashtable]]::new()
+        $this.MaxSessions = 100
+        $this.SessionStart = Get-Date
+        $this.LastDominantApp = ""
+        # Inicjalizuj wzorce godzinowe
+        for ($h = 0; $h -lt 24; $h++) {
+            $this.HourlyPatterns[$h] = @{
+                AvgCPU = 20.0
+                AvgTemp = 50.0
+                DominantContext = "Idle"
+                DominantMode = "Balanced"
+                ActivityLevel = 0.5
+                Samples = 0
+            }
+        }
+        # Inicjalizuj wzorce dni tygodnia
+        for ($d = 0; $d -lt 7; $d++) {
+            $this.DayOfWeekPatterns[$d] = @{
+                PeakHours = @()
+                AvgSessionLength = 60
+                PreferredMode = "Balanced"
+                Samples = 0
+            }
+        }
+    }
+    [void] RecordSample([double]$cpu, [double]$temp, [string]$context, [string]$mode, [bool]$isActive) {
+        $now = Get-Date
+        $hour = $now.Hour
+        $dayOfWeek = [int]$now.DayOfWeek
+        # Aktualizuj wzorce godzinowe
+        $hourPattern = $this.HourlyPatterns[$hour]
+        $hourPattern.Samples++
+        $hourPattern.AvgCPU = ($hourPattern.AvgCPU * ($hourPattern.Samples - 1) + $cpu) / $hourPattern.Samples
+        $hourPattern.AvgTemp = ($hourPattern.AvgTemp * ($hourPattern.Samples - 1) + $temp) / $hourPattern.Samples
+        $hourPattern.DominantContext = $context
+        $hourPattern.DominantMode = $mode
+        $activityValue = if ($isActive) { 1.0 } else { 0.0 }
+        $hourPattern.ActivityLevel = ($hourPattern.ActivityLevel * 0.95) + ($activityValue * 0.05)
+        # Aktualizuj wzorce dni tygodnia
+        $dayPattern = $this.DayOfWeekPatterns[$dayOfWeek]
+        $dayPattern.Samples++
+        if ($cpu -gt 50 -and $hour -notin $dayPattern.PeakHours) {
+            $dayPattern.PeakHours += $hour
+            $dayPattern.PeakHours = $dayPattern.PeakHours | Select-Object -Unique | Sort-Object
+        }
+    }
+    [void] RecordAppUsage([string]$app) {
+        if ([string]::IsNullOrWhiteSpace($app)) { return }
+        $now = Get-Date
+        $hour = $now.Hour
+        $appLower = $app.ToLower()
+        if (-not $this.AppUsagePatterns.ContainsKey($appLower)) {
+            $this.AppUsagePatterns[$appLower] = @{
+                HourlyUsage = @{}
+                TotalLaunches = 0
+                AvgSessionMinutes = 10
+                LastUsed = $now
+            }
+        }
+        $pattern = $this.AppUsagePatterns[$appLower]
+        $pattern.TotalLaunches++
+        $pattern.LastUsed = $now
+        if (-not $pattern.HourlyUsage.ContainsKey($hour)) {
+            $pattern.HourlyUsage[$hour] = 0
+        }
+        $pattern.HourlyUsage[$hour]++
+    }
+    [string] PredictNextHourMode() {
+        $nextHour = ((Get-Date).Hour + 1) % 24
+        $pattern = $this.HourlyPatterns[$nextHour]
+        if ($pattern.Samples -gt 10) {
+            return $pattern.DominantMode
+        }
+        return "Unknown"
+    }
+    [double] GetExpectedActivityLevel() {
+        $hour = (Get-Date).Hour
+        return $this.HourlyPatterns[$hour].ActivityLevel
+    }
+    [bool] IsTypicallyActiveNow() {
+        return $this.GetExpectedActivityLevel() -gt 0.5
+    }
+    [string[]] PredictLikelyApps() {
+        $hour = (Get-Date).Hour
+        $likelyApps = @()
+        foreach ($app in $this.AppUsagePatterns.Keys) {
+            $pattern = $this.AppUsagePatterns[$app]
+            if ($pattern.HourlyUsage.ContainsKey($hour) -and $pattern.HourlyUsage[$hour] -gt 2) {
+                $likelyApps += $app
+            }
+        }
+        return $likelyApps | Select-Object -First 5
+    }
+    [string] GetStatus() {
+        $hour = (Get-Date).Hour
+        $pattern = $this.HourlyPatterns[$hour]
+        $activity = [Math]::Round($pattern.ActivityLevel * 100)
+        return "Act:$activity% Mode:$($pattern.DominantMode)"
+    }
+    [void] SaveState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "UserPatterns.json"
+            $data = @{
+                HourlyPatterns = $this.HourlyPatterns
+                DayOfWeekPatterns = $this.DayOfWeekPatterns
+                AppUsagePatterns = $this.AppUsagePatterns
+            }
+            $json = $data | ConvertTo-Json -Depth 5 -Compress
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "UserPatterns.json"
+            if (Test-Path $path) {
+                $json = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+                $data = $json | ConvertFrom-Json
+                if ($data.HourlyPatterns) {
+                    $data.HourlyPatterns.PSObject.Properties | ForEach-Object {
+                        $hour = [int]$_.Name
+                        $this.HourlyPatterns[$hour] = @{
+                            AvgCPU = [double]$_.Value.AvgCPU
+                            AvgTemp = [double]$_.Value.AvgTemp
+                            DominantContext = [string]$_.Value.DominantContext
+                            DominantMode = [string]$_.Value.DominantMode
+                            ActivityLevel = [double]$_.Value.ActivityLevel
+                            Samples = [int]$_.Value.Samples
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+}
+# ADAPTIVE RESPONSE TIMER - Dynamiczny czas reakcji
+class AdaptiveTimer {
+    [int] $CurrentInterval      # Aktualny interwal w ms
+    [int] $MinInterval          # Minimum (szybka reakcja)
+    [int] $MaxInterval          # Maximum (oszczednosc)
+    [string] $LastContext
+    [int] $StableCount
+    AdaptiveTimer() {
+        $this.CurrentInterval = 800   #  v39.3  #  FIXED: Domyslnie 1 sekunda (bylo 2)
+        $this.MinInterval = 250       #  v39.3       #  FIXED: 0.3 sekundy dla gier (bylo 0.5)
+        $this.MaxInterval = 2000      #  v39.3      #  FIXED: 3 sekundy dla idle (bylo 5)
+        $this.LastContext = ""
+        $this.StableCount = 0
+    }
+    [int] CalculateInterval([string]$context, [bool]$isActive, [bool]$isBoosting, [double]$cpu) {
+        $targetInterval = $this.CurrentInterval
+        # Szybka reakcja gdy:
+        if ($isBoosting) {
+            $targetInterval = $this.MinInterval  # Boosting = najszybciej
+        }
+        elseif ($context -eq "Audio") {
+            $targetInterval = 250  # - AUDIO/DAW = najszybsza reakcja dla MIDI!
+        }
+        elseif ($context -eq "Gaming") {
+            $targetInterval = 500  #  FIXED: Gaming = bardzo szybko (bylo 750)
+        }
+        elseif ($context -eq "Rendering" -or $cpu -gt 70) {
+            $targetInterval = 700  #  FIXED: Wysokie obciazenie (bylo 1000)
+        }
+        elseif ($isActive) {
+            $targetInterval = 1000  #  FIXED: Aktywny uzytkownik (bylo 1500)
+        }
+        elseif ($context -eq "Idle" -and -not $isActive) {
+            $targetInterval = $this.MaxInterval  # Idle = oszczedzaj
+        }
+        else {
+            $targetInterval = 1500  #  FIXED: Domyslnie (bylo 2000)
+        }
+        # Plynne przejscie (nie skacz natychmiast)
+        if ($targetInterval -lt $this.CurrentInterval) {
+            # Szybciej zwalniamy (responsywnosc) -  FIXED: szybsze przejscie
+            $this.CurrentInterval = [Math]::Max($targetInterval, $this.CurrentInterval - 300)
+        } else {
+            # Wolniej przyspieszamy (stabilnosc)
+            $this.CurrentInterval = [Math]::Min($targetInterval, $this.CurrentInterval + 150)
+        }
+        # Sprawdz stabilnosc kontekstu
+        if ($context -eq $this.LastContext) {
+            $this.StableCount++
+        } else {
+            $this.StableCount = 0
+            $this.LastContext = $context
+        }
+        return $this.CurrentInterval
+    }
+    [string] GetStatus() {
+        $freq = [Math]::Round(1000.0 / $this.CurrentInterval, 1)
+        return "${freq}Hz"
+    }
+}
+# SMART PRIORITY MANAGER - FIXED
+# ACTIVITY DETECTOR - Wykrywanie aktywnosci uzytkownika (mysz + klawiatura)
+$Script:IdleThresholdSeconds = 30
+$Script:UserIsActive = $false
+$Script:LastIdleSeconds = 0
+$Script:LastMouseX = 0
+$Script:LastMouseY = 0
+$Script:ActivityMethod = "None"
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)]
+public struct POINT {
+    public int X;
+    public int Y;
+}
+public static class Win32Mouse {
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+}
+'@ -PassThru | Out-Null
+function Get-IdleTimeSeconds {
+    # Metoda 1: GetLastInputInfo (lapie wszystko: mysz, klawiatura, kolko)
+    try {
+        $lii = New-Object LASTINPUTINFO
+        $lii.cbSize = [uint32]8
+        if ([Win32]::GetLastInputInfo([ref]$lii)) {
+            $currentTick = [Win32]::GetTickCount()
+            $idleMs = [int]($currentTick - $lii.dwTime)
+            $Script:LastIdleSeconds = [Math]::Max(0, [Math]::Floor($idleMs / 1000))
+            if ($idleMs -lt 2000) {
+                $Script:ActivityMethod = "Input"
+            }
+            return $Script:LastIdleSeconds
+        }
+    } catch {
+        Write-Error "Error in Get-IdleTimeSeconds (GetLastInputInfo): $_"
+    }
+    # Metoda 2: Backup - GetCursorPos (ruch myszy)
+    try {
+        $point = New-Object POINT
+        if ([Win32Mouse]::GetCursorPos([ref]$point)) {
+            $deltaX = [Math]::Abs($point.X - $Script:LastMouseX)
+            $deltaY = [Math]::Abs($point.Y - $Script:LastMouseY)
+            if (-not ([System.Management.Automation.PSTypeName]'Win32').Type) {
+                if ($deltaX -gt 3 -or $deltaY -gt 3) {
+                    $Script:LastIdleSeconds = 0
+                    $Script:ActivityMethod = "Mouse"
+                }
+                $Script:LastMouseX = $point.X
+                $Script:LastMouseY = $point.Y
+            }
+        }
+    } catch {
+        Write-Error "Error in Get-IdleTimeSeconds (GetCursorPos): $_"
+    }
+    return $Script:LastIdleSeconds
+}
+function Update-ActivityStatus {
+    $idleSeconds = Get-IdleTimeSeconds
+    if ($idleSeconds -lt $Script:IdleThresholdSeconds) {
+        $Script:UserIsActive = $true
+        return $true
+    } else {
+        $Script:UserIsActive = $false
+        $Script:ActivityMethod = "None"
+        return $false
+    }
+}
+function Get-UserActivityStatus {
+    $idle = Get-IdleTimeSeconds
+    if ($idle -lt $Script:IdleThresholdSeconds) {
+        return "Active[$($Script:ActivityMethod)]"
+    } else {
+        return "Idle ${idle}s"
+    }
+}
+# Funkcja pomocnicza do pobrania procesu na pierwszym planie
+function Get-ForegroundProcessName {
+    try {
+        $hwnd = [Win32]::GetForegroundWindow()
+        if ($hwnd -eq [IntPtr]::Zero) { return "" }
+        $processId = 0
+        [Win32]::GetWindowThreadProcessId($hwnd, [ref]$processId) | Out-Null
+        if ($processId -gt 0) {
+            try {
+                $process = Get-Process -Id $processId -ErrorAction Stop
+                if ($process) { 
+                    $processName = $process.ProcessName
+                    # #
+                    # IGNORUJ PROCESY SYSTEMOWE NA PIERWSZYM PLANIE
+                    # AI nie reaguje na te procesy nawet gdy sa aktywne
+                    # #
+                    if ($Script:BlacklistSet.Contains($processName)) {
+                        $process.Dispose()
+                        return "Desktop"  # Traktuj jak Desktop/brak aplikacji
+                    }
+                    #  FIXED: Uzyj nowej funkcji Get-ProcessDisplayName (automatyczne nazwy)
+                    $friendlyName = Get-ProcessDisplayName -ProcessName $processName -Process $process
+                    # Dla PWA/UWP - sprobuj pobrac prawdziwa nazwe z tytulu okna
+                    $pwaProcesses = @("pwahelper", "msedgewebview2", "applicationframehost", "wwahostgta", "wwahost", "electron")
+                    if ($pwaProcesses -contains $processName.ToLower() -or $processName -match "helper|host|webview") {
+                        $windowTitle = Get-ForegroundWindowTitle
+                        if (![string]::IsNullOrWhiteSpace($windowTitle) -and $windowTitle.Length -gt 1) {
+                            $friendlyName = $windowTitle
+                            if ($friendlyName.Length -gt 30 -and $friendlyName -match "^([^----]+)") {
+                                $friendlyName = $matches[1].Trim()
+                            }
+                        }
+                    }
+                    $process.Dispose()
+                    return $friendlyName
+                }
+            } catch {
+                return ""
+            }
+        }
+    } catch { }
+    return ""
+}
+# Deklaracja klasy SmartPriorityManager - FIXED
+class SmartPriorityManager {
+    [hashtable] $OriginalPriorities
+    [hashtable] $BoostedProcesses
+    [string] $CurrentForeground
+    [datetime] $LastUpdate
+    [int] $ProcessCount
+    [int] $MaxBoostedProcesses = 20
+    SmartPriorityManager() {
+        $this.OriginalPriorities = @{}
+        $this.BoostedProcesses = @{}
+        $this.CurrentForeground = ""
+        $this.LastUpdate = Get-Date
+        $this.ProcessCount = 0
+    }
+    [string] GetForegroundApp() {
+        return Get-ForegroundProcessName
+    }
+    [void] BoostProcess([string]$processName) {
+        if ([string]::IsNullOrWhiteSpace($processName)) { return }
+        if ($this.BoostedProcesses.Count -ge $this.MaxBoostedProcesses) {
+            $oldest = $this.BoostedProcesses.GetEnumerator() | 
+                      Sort-Object { $_.Value.BoostedAt } | 
+                      Select-Object -First 1
+            if ($oldest) {
+                $this.ResetPriority($oldest.Key)
+            }
+        }
+        try {
+            $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
+            foreach ($proc in $processes) {
+                try {
+                    if (-not $this.OriginalPriorities.ContainsKey($proc.Id)) {
+                        $this.OriginalPriorities[$proc.Id] = $proc.PriorityClass
+                    }
+                    $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::AboveNormal
+                    $this.BoostedProcesses[$proc.Id] = @{ Name = $processName; BoostedAt = Get-Date }
+                    $proc.Dispose()
+                } catch { 
+                    try { $proc.Dispose() } catch { }
+                }
+            }
+        } catch { }
+    }
+    [void] ResetPriority([int]$processId) {
+        try {
+            $proc = $null
+            $proc = Get-Process -Id $processId -ErrorAction Stop
+            if ($proc -and $this.OriginalPriorities.ContainsKey($processId)) {
+                $proc.PriorityClass = $this.OriginalPriorities[$processId]
+                $proc.Dispose()
+            }
+        } catch { 
+            # Proces juz nie istnieje - ignorujemy
+        }
+        $this.OriginalPriorities.Remove($processId)
+        $this.BoostedProcesses.Remove($processId)
+    }
+    [void] OptimizeForForeground([string]$foregroundApp, [System.Collections.Generic.HashSet[string]]$blacklist) {
+        if ([string]::IsNullOrWhiteSpace($foregroundApp)) { return }
+        if ($foregroundApp -eq $this.CurrentForeground) { return }
+        $this.CurrentForeground = $foregroundApp
+        $this.LastUpdate = Get-Date
+        try {
+            $existingProcs = Get-Process -Name $foregroundApp -ErrorAction SilentlyContinue
+            $alreadyHigh = $false
+            foreach ($ep in $existingProcs) {
+                if ($ep.PriorityClass -eq [System.Diagnostics.ProcessPriorityClass]::High) {
+                    $alreadyHigh = $true
+                }
+                $ep.Dispose()
+            }
+            if (-not $alreadyHigh) {
+                $this.BoostProcess($foregroundApp)
+            }
+        } catch {
+            $this.BoostProcess($foregroundApp)
+        }
+        try {
+            $bgProcesses = Get-Process -ErrorAction SilentlyContinue | Where-Object { 
+                $_.ProcessName -ne $foregroundApp -and 
+                -not $blacklist.Contains($_.ProcessName) -and
+                $_.PriorityClass -eq [System.Diagnostics.ProcessPriorityClass]::AboveNormal
+            } | Select-Object -First 10
+            foreach ($proc in $bgProcesses) {
+                try {
+                    if ($this.BoostedProcesses.ContainsKey($proc.Id)) {
+                        $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal
+                        $this.BoostedProcesses.Remove($proc.Id)
+                    }
+                    $proc.Dispose()
+                } catch { 
+                    try { $proc.Dispose() } catch { }
+                }
+            }
+        } catch { }
+        $this.ProcessCount = $this.BoostedProcesses.Count
+    }
+    [void] RefreshProcessList() {
+        $toRemove = @()
+        $keysToCheck = @($this.BoostedProcesses.Keys)
+        foreach ($procId in $keysToCheck) {
+            try {
+                $proc = $null
+                $proc = Get-Process -Id $procId -ErrorAction Stop
+                if ($proc) {
+                    $proc.Dispose()
+                }
+            } catch { 
+                $toRemove += $procId 
+            }
+        }
+        foreach ($procId in $toRemove) {
+            $this.BoostedProcesses.Remove($procId)
+            $this.OriginalPriorities.Remove($procId)
+        }
+        $this.ProcessCount = $this.BoostedProcesses.Count
+    }
+    [void] ResetAllPriorities() {
+        $keysToProcess = @($this.OriginalPriorities.Keys)
+        foreach ($processId in $keysToProcess) {
+            try {
+                $proc = $null
+                $proc = Get-Process -Id $processId -ErrorAction Stop
+                if ($proc) { 
+                    $proc.PriorityClass = $this.OriginalPriorities[$processId] 
+                    $proc.Dispose()
+                }
+            } catch { 
+                # Proces juz nie istnieje - ignorujemy
+            }
+        }
+        $this.OriginalPriorities.Clear()
+        $this.BoostedProcesses.Clear()
+        $this.ProcessCount = 0
+    }
+    [int] GetBoostedCount() { return $this.BoostedProcesses.Count }
+}
+# #
+# PROBALANCE - Automatic CPU Hog Restraint (jak Process Lasso)
+# #
+class ProBalance {
+    [hashtable] $ProcessCPU            # PID -> CPU% history
+    [hashtable] $ThrottledProcesses    # PID -> {Name, OriginalPriority, ThrottledAt, CPUAtThrottle}
+    [hashtable] $SystemProcesses       # Protected system processes
+    [double] $ThrottleThreshold = 70.0 # CPU% threshold (obnizone z 80% - bardziej czuly)
+    [int] $ThrottleDuration = 3        # Sekund wysokiego CPU zanim throttle (obnizone z 10s - szybsza reakcja)
+    [int] $RestoreCooldown = 5         # Sekund niskiego CPU zanim restore (nowe)
+    [int] $MaxThrottled = 10           # Max throttled processes
+    [bool] $Enabled = $true
+    [int] $TotalThrottles = 0
+    [int] $TotalRestores = 0
+    [int] $LogicalCores = 1
+    [hashtable] $LastCPUTime = @{}     # PID -> LastCPUTime (do precyzyjnego obliczenia CPU%)
+    ProBalance([int]$cores) {
+        $this.ProcessCPU = @{}
+        $this.ThrottledProcesses = @{}
+        $this.LogicalCores = [Math]::Max(1, $cores)
+        # Protected processes - nie throttle tych (core Windows system processes)
+        $this.SystemProcesses = @{
+            # Core System
+            "System" = $true
+            "Idle" = $true
+            "Registry" = $true
+            "smss" = $true
+            "csrss" = $true
+            "wininit" = $true
+            "services" = $true
+            "lsass" = $true
+            "winlogon" = $true
+            # Windows Subsystem
+            "svchost" = $true
+            "RuntimeBroker" = $true
+            "dwm" = $true              # Desktop Window Manager (GUI)
+            "explorer" = $true         # File Explorer & Taskbar
+            "ShellExperienceHost" = $true  # Start Menu
+            "SearchHost" = $true       # Windows Search
+            "StartMenuExperienceHost" = $true
+            # Security & Updates
+            "MsMpEng" = $true          # Windows Defender
+            "SecurityHealthService" = $true
+            "TrustedInstaller" = $true # Windows Updates
+            "wuauclt" = $true
+            "UsoClient" = $true
+            # Audio & Input
+            "audiodg" = $true          # Audio
+            "ctfmon" = $true           # Text Input
+            # Network
+            "dns" = $true
+            "BITS" = $true
+            # Self-protection
+            "CPUManager" = $true
+            "powershell" = $true       # Protect PowerShell (ENGINE)
+            "pwsh" = $true             # PowerShell 7+
+        }
+    }
+    [void] Update([string]$foregroundApp) {
+        if (-not $this.Enabled) { return }
+        try {
+            $processes = Get-Process | Where-Object { 
+                $_.CPU -gt 0 -and 
+                -not $this.SystemProcesses.ContainsKey($_.ProcessName)
+            }
+            $currentTime = [DateTime]::Now
+            foreach ($proc in $processes) {
+                try {
+                    $processId = $proc.Id
+                    $cpuPercent = 0
+                    if ($this.LastCPUTime.ContainsKey($processId)) {
+                        $lastInfo = $this.LastCPUTime[$processId]
+                        $elapsedSec = ($currentTime - $lastInfo.Time).TotalSeconds
+                        if ($elapsedSec -gt 0.1) {  # Minimum 100ms miedzy probkami
+                            $cpuDelta = ($proc.TotalProcessorTime.TotalSeconds - $lastInfo.CPUTime)
+                            # CPU% = (delta CPU time / elapsed time) * 100
+                            $cpuPercent = [Math]::Min(100, ($cpuDelta / $elapsedSec) * 100)
+                        }
+                    }
+                    # Zapisz aktualny CPU time
+                    $this.LastCPUTime[$processId] = @{
+                        CPUTime = $proc.TotalProcessorTime.TotalSeconds
+                        Time = $currentTime
+                    }
+                    # Inicjalizuj history jesli nowy proces
+                    if (-not $this.ProcessCPU.ContainsKey($processId)) {
+                        $this.ProcessCPU[$processId] = @{
+                            Name = $proc.ProcessName
+                            History = [System.Collections.Generic.List[double]]::new()
+                            HighCPUSince = $null
+                            LowCPUSince = $null
+                            LastUpdate = $currentTime
+                        }
+                    }
+                    $data = $this.ProcessCPU[$processId]
+                    # Dodaj tylko jesli mamy rzeczywisty pomiar
+                    if ($cpuPercent -gt 0) {
+                        $data.History.Add($cpuPercent)
+                        # Ogranicz history do 15 punktow (~30s przy update co 2s)
+                        if ($data.History.Count -gt 15) {
+                            $data.History.RemoveAt(0)
+                        }
+                    }
+                    # Srednie CPU z ostatnich 5 punktow (bardziej reaktywne niz 10)
+                    $recentCount = [Math]::Min(5, $data.History.Count)
+                    $avgCPU = 0
+                    if ($recentCount -gt 0) {
+                        for ($i = $data.History.Count - $recentCount; $i -lt $data.History.Count; $i++) {
+                            $avgCPU += $data.History[$i]
+                        }
+                        $avgCPU /= $recentCount
+                    }
+                    # Czy to CPU hog- (powyzej threshold)
+                    $isCPUHog = $avgCPU -gt $this.ThrottleThreshold
+                    if ($isCPUHog) {
+                        # CPU hog detected
+                        if ($null -eq $data.HighCPUSince) {
+                            $data.HighCPUSince = $currentTime
+                        }
+                        $data.LowCPUSince = $null  # Reset low CPU timer
+                        # Throttle jesli przekroczyl duration
+                        $hogDuration = ($currentTime - $data.HighCPUSince).TotalSeconds
+                        if ($hogDuration -ge $this.ThrottleDuration -and 
+                            -not $this.ThrottledProcesses.ContainsKey($processId) -and
+                            $proc.ProcessName -ne $foregroundApp) {
+                            # Don't throttle if at max
+                            if ($this.ThrottledProcesses.Count -lt $this.MaxThrottled) {
+                                $this.ThrottleProcess($proc, $avgCPU)
+                            }
+                        }
+                    } else {
+                        # CPU usage OK
+                        $data.HighCPUSince = $null  # Reset high CPU timer
+                        if ($this.ThrottledProcesses.ContainsKey($processId)) {
+                            if ($null -eq $data.LowCPUSince) {
+                                $data.LowCPUSince = $currentTime
+                            }
+                            $lowDuration = ($currentTime - $data.LowCPUSince).TotalSeconds
+                            if ($lowDuration -ge $this.RestoreCooldown) {
+                                $this.RestoreProcess($processId)
+                            }
+                        }
+                    }
+                    $data.LastUpdate = $currentTime
+                    $proc.Dispose()
+                } catch {
+                    try { $proc.Dispose() } catch { }
+                }
+            }
+            # Cleanup dead processes
+            $this.CleanupDeadProcesses()
+        } catch {
+            # Ignore errors
+        }
+    }
+    [void] ThrottleProcess([System.Diagnostics.Process]$proc, [double]$cpuUsage) {
+        try {
+            $processId = $proc.Id
+            $originalPriority = $proc.PriorityClass
+            # Throttle to BelowNormal (nie Idle - zbyt drastyczne)
+            $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+            $this.ThrottledProcesses[$processId] = @{
+                Name = $proc.ProcessName
+                OriginalPriority = $originalPriority
+                ThrottledAt = [DateTime]::Now
+                CPUAtThrottle = [Math]::Round($cpuUsage, 1)
+            }
+            $this.TotalThrottles++
+            # Log
+            Add-Log "- ProBalance: Throttled '$($proc.ProcessName)' (PID $processId) - CPU $([Math]::Round($cpuUsage, 1))% -> BelowNormal"
+        } catch {
+            # Ignore errors (process may have exited)
+        }
+    }
+    [void] RestoreProcess([int]$processId) {
+        if (-not $this.ThrottledProcesses.ContainsKey($processId)) { return }
+        try {
+            $info = $this.ThrottledProcesses[$processId]
+            $proc = Get-Process -Id $processId -ErrorAction Stop
+            # Restore original priority
+            $proc.PriorityClass = $info.OriginalPriority
+            $duration = ([DateTime]::Now - $info.ThrottledAt).TotalSeconds
+            $this.TotalRestores++
+            # Log
+            Add-Log "- ProBalance: Restored '$($info.Name)' (PID $processId) - throttled for $([Math]::Round($duration, 0))s"
+            $proc.Dispose()
+        } catch {
+            # Process died - OK
+        }
+        $this.ThrottledProcesses.Remove($processId)
+    }
+    [void] CleanupDeadProcesses() {
+        # ProcessCPU cleanup
+        $deadPIDs = @()
+        foreach ($processId in $this.ProcessCPU.Keys) {
+            try {
+                $proc = Get-Process -Id $processId -ErrorAction Stop
+                $proc.Dispose()
+            } catch {
+                $deadPIDs += $processId
+            }
+        }
+        foreach ($processId in $deadPIDs) {
+            $this.ProcessCPU.Remove($processId)
+            if ($this.LastCPUTime.ContainsKey($processId)) {
+                $this.LastCPUTime.Remove($processId)
+            }
+        }
+        # ThrottledProcesses cleanup
+        $deadThrottled = @()
+        foreach ($processId2 in $this.ThrottledProcesses.Keys) {
+            try {
+                $proc = Get-Process -Id $processId2 -ErrorAction Stop
+                $proc.Dispose()
+            } catch {
+                $deadThrottled += $processId2
+            }
+        }
+        foreach ($processId2 in $deadThrottled) {
+            $this.ThrottledProcesses.Remove($processId2)
+        }
+    }
+    [void] RestoreAll() {
+        $pidsToRestore = @($this.ThrottledProcesses.Keys)
+        foreach ($processId3 in $pidsToRestore) {
+            $this.RestoreProcess($processId3)
+        }
+    }
+    [string] GetStatus() {
+        $throttled = $this.ThrottledProcesses.Count
+        return "Throttled:$throttled Total:$($this.TotalThrottles)/$($this.TotalRestores) Enabled:$($this.Enabled)"
+    }
+    [hashtable] GetStats() {
+        return @{
+            Enabled = $this.Enabled
+            CurrentlyThrottled = $this.ThrottledProcesses.Count
+            TotalThrottles = $this.TotalThrottles
+            TotalRestores = $this.TotalRestores
+            Threshold = $this.ThrottleThreshold
+            ThrottledProcesses = $this.ThrottledProcesses.Values | ForEach-Object { 
+                "$($_.Name) ($($_.CPUAtThrottle)%)" 
+            }
+        }
+    }
+    # - V40: ApplyAIRecommendations - zastosuj rekomendacje ProcessAI
+    [void] ApplyAIRecommendations([hashtable]$recommendations) {
+        if (-not $this.Enabled -or -not $recommendations) { return }
+        try {
+            # Lista procesow ktore AI oznaczyl jako bezpieczne do throttle
+            $safeToThrottle = $recommendations.SafeToThrottle
+            # Lista procesow wysokiego priorytetu (gaming/rendering)
+            $highPriority = $recommendations.HighPriority
+            
+            # 0. Wyczysc stare AI temporary protection (zachowaj tylko core system processes)
+            $coreSystem = @("System", "Idle", "svchost", "csrss", "smss", "wininit", "services", "lsass", "dwm", "explorer", "CPUManager")
+            $toRemove = @()
+            foreach ($key in $this.SystemProcesses.Keys) {
+                if ($coreSystem -notcontains $key) {
+                    $toRemove += $key
+                }
+            }
+            foreach ($key in $toRemove) {
+                $this.SystemProcesses.Remove($key)
+            }
+            
+            # 1. Dodaj AI-recommended high priority do ochrony
+            if ($highPriority) {
+                foreach ($appName in $highPriority) {
+                    if (-not [string]::IsNullOrWhiteSpace($appName)) {
+                        $this.SystemProcesses[$appName] = $true  # Temporary protection
+                    }
+                }
+            }
+            
+            # 2. Throttle procesy AI-recommended dla throttlingu (jesli CPU wysoki)
+            if ($safeToThrottle) {
+                $processes = Get-Process | Where-Object { 
+                    $safeToThrottle -contains $_.ProcessName -and
+                    -not $this.ThrottledProcesses.ContainsKey($_.Id)
+                }
+                foreach ($proc in $processes) {
+                    try {
+                        if ($this.ThrottledProcesses.Count -lt $this.MaxThrottled) {
+                            # Throttle tylko jezeli proces uzywa > 5% CPU (nie throttle idle)
+                            if ($this.ProcessCPU.ContainsKey($proc.Id)) {
+                                $data = $this.ProcessCPU[$proc.Id]
+                                $recentCount = [Math]::Min(3, $data.History.Count)
+                                if ($recentCount -gt 0) {
+                                    $avgCPU = 0
+                                    for ($i = $data.History.Count - $recentCount; $i -lt $data.History.Count; $i++) {
+                                        $avgCPU += $data.History[$i]
+                                    }
+                                    $avgCPU /= $recentCount
+                                    if ($avgCPU -gt 5.0) {  # Throttle tylko aktywne procesy
+                                        $this.ThrottleProcess($proc, $avgCPU)
+                                    }
+                                }
+                            }
+                        }
+                        $proc.Dispose()
+                    } catch {
+                        try { $proc.Dispose() } catch { }
+                    }
+                }
+            }
+        } catch {
+            # Ignore errors
+        }
+    }
+}
+class PerformanceBooster {
+    [hashtable] $KnownHeavyApps          # Apps wymagające boost
+    [hashtable] $AppExecutablePaths      # App -> ścieżka exe dla cache warming
+    [hashtable] $FrozenProcesses         # PID -> {Name, OriginalPriority, FrozenAt}
+    [hashtable] $BoostedProcesses        # PID -> {Name, OriginalPriority, BoostedAt}
+    [bool] $Enabled = $true
+    [bool] $PreemptiveBoostEnabled = $true
+    [bool] $PriorityBoostEnabled = $true
+    [bool] $BackgroundFreezeEnabled = $true
+    [bool] $MemoryPreallocationEnabled = $true
+    [bool] $DiskCacheWarmingEnabled = $true
+    [int] $PreemptiveBoostSeconds = 3     # Ile sekund przed uruchomieniem
+    [int] $MaxFrozenProcesses = 15
+    [int] $TotalPreemptiveBoosts = 0
+    [int] $TotalPriorityBoosts = 0
+    [int] $TotalFreezes = 0
+    [int] $TotalCacheWarms = 0
+    [datetime] $LastPreemptiveBoost = [datetime]::MinValue
+    [string] $LastBoostReason = ""
+    # Protected processes - nigdy nie freeze
+    [hashtable] $ProtectedProcesses = @{
+        "System" = $true; "Idle" = $true; "svchost" = $true; "csrss" = $true
+        "smss" = $true; "wininit" = $true; "services" = $true; "lsass" = $true
+        "dwm" = $true; "explorer" = $true; "winlogon" = $true; "fontdrvhost" = $true
+        "sihost" = $true; "taskhostw" = $true; "RuntimeBroker" = $true
+        "SearchHost" = $true; "StartMenuExperienceHost" = $true
+        "powershell" = $true; "pwsh" = $true; "conhost" = $true
+        "SecurityHealthService" = $true; "MsMpEng" = $true; "NisSrv" = $true
+        "audiodg" = $true; "ctfmon" = $true; "dllhost" = $true
+    }
+    # Heavy apps które wymagają boost (domyślna lista)
+    [hashtable] $DefaultHeavyApps = @{
+        # Gry
+        "steam" = @{ Priority = "High"; NeedsCache = $true; Category = "Gaming" }
+        "steamwebhelper" = @{ Priority = "Normal"; NeedsCache = $false; Category = "Gaming" }
+        "EpicGamesLauncher" = @{ Priority = "High"; NeedsCache = $true; Category = "Gaming" }
+        "Origin" = @{ Priority = "High"; NeedsCache = $true; Category = "Gaming" }
+        "Battle.net" = @{ Priority = "High"; NeedsCache = $true; Category = "Gaming" }
+        "GalaxyClient" = @{ Priority = "High"; NeedsCache = $true; Category = "Gaming" }
+        # IDE / Development
+        "devenv" = @{ Priority = "High"; NeedsCache = $true; Category = "Development" }
+        "Code" = @{ Priority = "AboveNormal"; NeedsCache = $true; Category = "Development" }
+        "rider64" = @{ Priority = "High"; NeedsCache = $true; Category = "Development" }
+        "idea64" = @{ Priority = "High"; NeedsCache = $true; Category = "Development" }
+        "pycharm64" = @{ Priority = "High"; NeedsCache = $true; Category = "Development" }
+        "AndroidStudio" = @{ Priority = "High"; NeedsCache = $true; Category = "Development" }
+        # Creative
+        "Photoshop" = @{ Priority = "High"; NeedsCache = $true; Category = "Creative" }
+        "AfterFX" = @{ Priority = "High"; NeedsCache = $true; Category = "Creative" }
+        "Premiere Pro" = @{ Priority = "High"; NeedsCache = $true; Category = "Creative" }
+        "blender" = @{ Priority = "High"; NeedsCache = $true; Category = "Creative" }
+        "Unity" = @{ Priority = "High"; NeedsCache = $true; Category = "Creative" }
+        "UE4Editor" = @{ Priority = "High"; NeedsCache = $true; Category = "Creative" }
+        # Office
+        "WINWORD" = @{ Priority = "AboveNormal"; NeedsCache = $false; Category = "Office" }
+        "EXCEL" = @{ Priority = "AboveNormal"; NeedsCache = $false; Category = "Office" }
+        "POWERPNT" = @{ Priority = "AboveNormal"; NeedsCache = $false; Category = "Office" }
+    }
+    PerformanceBooster() {
+        $this.KnownHeavyApps = $this.DefaultHeavyApps.Clone()
+        $this.AppExecutablePaths = @{}
+        $this.FrozenProcesses = @{}
+        $this.BoostedProcesses = @{}
+    }
+    # 1. PREEMPTIVE BOOST - Boost PRZED uruchomieniem ciężkiej aplikacji
+    [hashtable] CheckPreemptiveBoost([ProphetMemory]$prophet, $chainPredictor) {
+        if (-not $this.PreemptiveBoostEnabled -or -not $prophet) { 
+            return @{ ShouldBoost = $false } 
+        }
+        $now = [datetime]::Now
+        $cooldown = ($now - $this.LastPreemptiveBoost).TotalSeconds
+        # PREEMPTIVE ma sens tylko PRZED uruchomieniem, nie ciągle
+        if ($cooldown -lt 120) { return @{ ShouldBoost = $false } }
+        $isAppRunning = {
+            param([string]$appName)
+            if ([string]::IsNullOrWhiteSpace($appName)) { return $true }
+            $procName = $appName -replace '\.exe$', ''
+            $running = Get-Process -Name $procName -ErrorAction SilentlyContinue
+            return ($null -ne $running -and $running.Count -gt 0)
+        }
+        # Sprawdź Chain prediction - use CurrentPrediction property
+        if ($chainPredictor -and ![string]::IsNullOrWhiteSpace($chainPredictor.CurrentPrediction)) {
+            $appName = $chainPredictor.CurrentPrediction
+            $confidence = $chainPredictor.PredictionConfidence
+            if (& $isAppRunning $appName) {
+                return @{ ShouldBoost = $false }
+            }
+            if ($confidence -lt 0.7) {
+                return @{ ShouldBoost = $false }
+            }
+            # Czy to heavy app?
+            if ($this.IsHeavyApp($appName) -or ($prophet.Apps.ContainsKey($appName) -and $prophet.Apps[$appName].IsHeavy)) {
+                $this.LastPreemptiveBoost = $now
+                $this.TotalPreemptiveBoosts++
+                $this.LastBoostReason = "Chain predicted: $appName"
+                return @{
+                    ShouldBoost = $true
+                    App = $appName
+                    Reason = "PREEMPTIVE: Chain -> $appName"
+                    Confidence = $confidence
+                }
+            }
+        }
+        # Hour pattern jest zbyt agresywny i nie sprawdza rzeczywistego kontekstu
+        # Zostaje tylko Chain prediction z wysokim confidence
+        <#
+        # Sprawdź Prophet hourly prediction
+        $hour = $now.Hour
+        $heavyAppsThisHour = @()
+        foreach ($appKey in $prophet.Apps.Keys) {
+            $app = $prophet.Apps[$appKey]
+            if ($app.IsHeavy -and $app.HourHits[$hour] -gt 2) {
+                $heavyAppsThisHour += @{ Name = $appKey; Hits = $app.HourHits[$hour] }
+            }
+        }
+        if ($heavyAppsThisHour.Count -gt 0) {
+            $topApp = $heavyAppsThisHour | Sort-Object { $_.Hits } -Descending | Select-Object -First 1
+            $this.LastPreemptiveBoost = $now
+            $this.TotalPreemptiveBoosts++
+            $this.LastBoostReason = "Hourly pattern: $($topApp.Name)"
+            return @{
+                ShouldBoost = $true
+                App = $topApp.Name
+                Reason = "PREEMPTIVE: Hour pattern -> $($topApp.Name)"
+                Confidence = [Math]::Min(0.9, $topApp.Hits / 10.0)
+            }
+        }
+        #>
+        return @{ ShouldBoost = $false }
+    }
+    # 2. PROCESS PRIORITY BOOST - Ustaw wysoki priorytet dla uruchomionej app
+    [bool] BoostProcessPriority([string]$processName) {
+        return $this.BoostProcessPriority($processName, 0)
+    }
+    [bool] BoostProcessPriority([string]$processName, [int]$processId) {
+        if (-not $this.PriorityBoostEnabled) { return $false }
+        try {
+            $procs = if ($processId -gt 0) {
+                @(Get-Process -Id $processId -ErrorAction SilentlyContinue)
+            } else {
+                @(Get-Process -Name $processName -ErrorAction SilentlyContinue)
+            }
+            foreach ($proc in $procs) {
+                if ($this.BoostedProcesses.ContainsKey($proc.Id)) { continue }
+                $targetPriority = [System.Diagnostics.ProcessPriorityClass]::High
+                # Sprawdź czy mamy custom priority dla tej app
+                if ($this.KnownHeavyApps.ContainsKey($processName)) {
+                    $priorityStr = $this.KnownHeavyApps[$processName].Priority
+                    $targetPriority = switch ($priorityStr) {
+                        "High" { [System.Diagnostics.ProcessPriorityClass]::High }
+                        "AboveNormal" { [System.Diagnostics.ProcessPriorityClass]::AboveNormal }
+                        "RealTime" { [System.Diagnostics.ProcessPriorityClass]::High }  # Safety: nie RealTime
+                        default { [System.Diagnostics.ProcessPriorityClass]::AboveNormal }
+                    }
+                }
+                $originalPriority = $proc.PriorityClass
+                $proc.PriorityClass = $targetPriority
+                $this.BoostedProcesses[$proc.Id] = @{
+                    Name = $processName
+                    OriginalPriority = $originalPriority
+                    BoostedAt = [datetime]::Now
+                    TargetPriority = $targetPriority
+                }
+                $this.TotalPriorityBoosts++
+                # Próbuj ustawić CPU affinity na P-cores (dla hybrid CPU)
+                $this.SetOptimalAffinity($proc)
+            }
+            return $true
+        } catch {
+            return $false
+        }
+    }
+    [void] SetOptimalAffinity([System.Diagnostics.Process]$proc) {
+        try {
+            # Dla 8+ core CPU, użyj pierwszych 8 rdzeni (typowo P-cores)
+            $coreCount = [Environment]::ProcessorCount
+            if ($coreCount -ge 8) {
+                # Ustaw affinity na pierwsze 8 rdzeni (bitmask: 0xFF = 255)
+                $proc.ProcessorAffinity = [IntPtr]255
+            }
+        } catch { }
+    }
+    # 3. BACKGROUND FREEZE - Zamroź niepotrzebne procesy w tle
+    [int] FreezeBackgroundProcesses([string]$foregroundApp) {
+        if (-not $this.BackgroundFreezeEnabled) { return 0 }
+        $frozenCount = 0
+        try {
+            # Pobierz procesy używające dużo zasobów
+            $heavyBgProcesses = Get-Process | Where-Object {
+                $_.WorkingSet64 -gt 100MB -and  # >100MB RAM
+                $_.ProcessName -ne $foregroundApp -and
+                -not $this.ProtectedProcesses.ContainsKey($_.ProcessName) -and
+                -not $this.FrozenProcesses.ContainsKey($_.Id) -and
+                -not $this.IsHeavyApp($_.ProcessName) -and  # Nie freeze innych heavy apps
+                $_.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::BelowNormal  # V38: Nie freeze juz throttlowanych przez ProBalance
+            } | Sort-Object WorkingSet64 -Descending | Select-Object -First $this.MaxFrozenProcesses
+            foreach ($proc in $heavyBgProcesses) {
+                if ($this.SuspendProcess($proc)) {
+                    $this.FrozenProcesses[$proc.Id] = @{
+                        Name = $proc.ProcessName
+                        FrozenAt = [datetime]::Now
+                        MemoryMB = [Math]::Round($proc.WorkingSet64 / 1MB, 0)
+                    }
+                    $this.TotalFreezes++
+                    $frozenCount++
+                }
+            }
+        } catch { }
+        return $frozenCount
+    }
+    [void] UnfreezeAllProcesses() {
+        foreach ($processId in @($this.FrozenProcesses.Keys)) {
+            try {
+                $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+                if ($proc) {
+                    $this.ResumeProcess($proc)
+                }
+            } catch { }
+            $this.FrozenProcesses.Remove($processId)
+        }
+    }
+    [bool] SuspendProcess([System.Diagnostics.Process]$proc) {
+        # Setting to Idle effectively "freezes" the process for CPU scheduling
+        try {
+            $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Idle
+            return $true
+        } catch { }
+        return $false
+    }
+    [bool] ResumeProcess([System.Diagnostics.Process]$proc) {
+        try {
+            $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal
+            return $true
+        } catch { }
+        return $false
+    }
+    # 4. MEMORY PRE-ALLOCATION - Zwolnij RAM przed uruchomieniem ciężkiej app
+    [hashtable] PreallocateMemory([string]$appName) {
+        if (-not $this.MemoryPreallocationEnabled) { 
+            return @{ Success = $false; FreedMB = 0 } 
+        }
+        $beforeMB = [Math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+        try {
+            # Aggressive GC - this is safe, no Win32 calls
+            [GC]::Collect(2, [GCCollectionMode]::Forced, $true)
+            [GC]::WaitForPendingFinalizers()
+            [GC]::Collect(2, [GCCollectionMode]::Forced, $true)
+            # EmptyWorkingSet would require Win32 which breaks class parsing
+        } catch { }
+        $afterMB = [Math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+        $freedMB = [Math]::Max(0, $beforeMB - $afterMB)
+        return @{
+            Success = $true
+            FreedMB = $freedMB
+            Reason = "Memory prepared for $appName"
+        }
+    }
+    # 5. DISK CACHE WARMING - Wczytaj pliki aplikacji do cache
+    [bool] WarmDiskCache([string]$appName) {
+        return $this.WarmDiskCache($appName, "")
+    }
+    [bool] WarmDiskCache([string]$appName, [string]$exePath) {
+        if (-not $this.DiskCacheWarmingEnabled) { return $false }
+        try {
+            $pathToWarm = $exePath
+            # Jeśli nie mamy ścieżki, spróbuj znaleźć
+            if ([string]::IsNullOrWhiteSpace($pathToWarm)) {
+                if ($this.AppExecutablePaths.ContainsKey($appName)) {
+                    $pathToWarm = $this.AppExecutablePaths[$appName]
+                } else {
+                    # Spróbuj znaleźć przez Get-Process
+                    $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($proc -and $proc.Path) {
+                        $pathToWarm = $proc.Path
+                        $this.AppExecutablePaths[$appName] = $pathToWarm
+                    }
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($pathToWarm) -or -not (Test-Path $pathToWarm)) {
+                return $false
+            }
+            # Warm the executable and DLLs in same directory
+            $appDir = [System.IO.Path]::GetDirectoryName($pathToWarm)
+            # Start background job to warm cache
+            Start-Job -ScriptBlock {
+                param($dir, $exe)
+                # Read main executable
+                if (Test-Path $exe) {
+                    $bytes = [System.IO.File]::ReadAllBytes($exe)
+                    $bytes = $null
+                }
+                # Read DLLs (first 20, sorted by size)
+                $dlls = Get-ChildItem -Path $dir -Filter "*.dll" -ErrorAction SilentlyContinue | 
+                    Sort-Object Length -Descending | 
+                    Select-Object -First 20
+                foreach ($dll in $dlls) {
+                    try {
+                        $bytes = [System.IO.File]::ReadAllBytes($dll.FullName)
+                        $bytes = $null
+                    } catch { }
+                }
+            } -ArgumentList $appDir, $pathToWarm | Out-Null
+            $this.TotalCacheWarms++
+            return $true
+        } catch {
+            return $false
+        }
+    }
+    # HELPER METHODS
+    [bool] IsHeavyApp([string]$appName) {
+        return $this.KnownHeavyApps.ContainsKey($appName)
+    }
+    [void] LearnHeavyApp([string]$appName, [double]$peakCPU, [double]$peakRAM) {
+        if ($peakCPU -gt 70 -or $peakRAM -gt 800) {  # >70% CPU lub >800MB RAM
+            if (-not $this.KnownHeavyApps.ContainsKey($appName)) {
+                $this.KnownHeavyApps[$appName] = @{
+                    Priority = "AboveNormal"
+                    NeedsCache = ($peakRAM -gt 500)
+                    Category = "Learned"
+                    PeakCPU = $peakCPU
+                    PeakRAM = $peakRAM
+                }
+            }
+        }
+    }
+    [void] RestoreAllPriorities() {
+        foreach ($processId in @($this.BoostedProcesses.Keys)) {
+            try {
+                $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+                if ($proc) {
+                    $original = $this.BoostedProcesses[$processId].OriginalPriority
+                    $proc.PriorityClass = $original
+                }
+            } catch { }
+            $this.BoostedProcesses.Remove($processId)
+        }
+    }
+    [void] Cleanup() {
+        # Cleanup dead processes
+        $deadPIDs = @()
+        foreach ($processId in $this.BoostedProcesses.Keys) {
+            try {
+                $proc = Get-Process -Id $processId -ErrorAction Stop
+            } catch {
+                $deadPIDs += $processId
+            }
+        }
+        foreach ($processId in $deadPIDs) {
+            $this.BoostedProcesses.Remove($processId)
+        }
+        # Auto-unfreeze after 60 seconds
+        $now = [datetime]::Now
+        $toUnfreeze = @()
+        foreach ($processId in $this.FrozenProcesses.Keys) {
+            $info = $this.FrozenProcesses[$processId]
+            if (($now - $info.FrozenAt).TotalSeconds -gt 60) {
+                $toUnfreeze += $processId
+            }
+        }
+        foreach ($processId in $toUnfreeze) {
+            try {
+                $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+                if ($proc) { $this.ResumeProcess($proc) }
+            } catch { }
+            $this.FrozenProcesses.Remove($processId)
+        }
+    }
+    [hashtable] GetStats() {
+        return @{
+            Enabled = $this.Enabled
+            PreemptiveBoosts = $this.TotalPreemptiveBoosts
+            PriorityBoosts = $this.TotalPriorityBoosts
+            Freezes = $this.TotalFreezes
+            CacheWarms = $this.TotalCacheWarms
+            CurrentlyBoosted = $this.BoostedProcesses.Count
+            CurrentlyFrozen = $this.FrozenProcesses.Count
+            LastBoostReason = $this.LastBoostReason
+            KnownHeavyApps = $this.KnownHeavyApps.Count
+        }
+    }
+    [string] GetStatus() {
+        return "Boosts:$($this.TotalPriorityBoosts) Preempt:$($this.TotalPreemptiveBoosts) Frozen:$($this.FrozenProcesses.Count) Cache:$($this.TotalCacheWarms)"
+    }
+}
+# LOAD PREDICTOR - FIXED z limitem wzorcow
+class LoadPredictor {
+    [double[,]] $HourlyPatterns
+    [int[,]] $HourlySamples
+    [double[]] $ShortTermBuffer
+    [int] $BufferIndex
+    [int] $BufferCount
+    [hashtable] $AppLaunchPatterns
+    [double] $LastPrediction
+    [string] $PredictionReason
+    [int] $MaxAppPatterns = 50
+    LoadPredictor() {
+        $this.HourlyPatterns = [double[,]]::new(24, 7)
+        $this.HourlySamples = [int[,]]::new(24, 7)
+        $this.ShortTermBuffer = [double[]]::new(30)
+        $this.BufferIndex = 0
+        $this.BufferCount = 0
+        $this.AppLaunchPatterns = @{}
+        $this.LastPrediction = 0
+        $this.PredictionReason = ""
+        for ($h = 0; $h -lt 24; $h++) {
+            for ($d = 0; $d -lt 7; $d++) {
+                $this.HourlyPatterns[$h, $d] = 15.0
+                $this.HourlySamples[$h, $d] = 0
+            }
+        }
+    }
+    [void] RecordSample([double]$cpu, [double]$io) {
+        $this.ShortTermBuffer[$this.BufferIndex] = $cpu
+        $this.BufferIndex = ($this.BufferIndex + 1) % 30
+        if ($this.BufferCount -lt 30) { $this.BufferCount++ }
+        $hour = (Get-Date).Hour
+        $dayOfWeek = [int](Get-Date).DayOfWeek
+        $samples = $this.HourlySamples[$hour, $dayOfWeek]
+        $currentAvg = $this.HourlyPatterns[$hour, $dayOfWeek]
+        if ($samples -eq 0) {
+            $this.HourlyPatterns[$hour, $dayOfWeek] = $cpu
+        } else {
+            $alpha = 1.0 / [Math]::Min(100, $samples + 1)
+            $this.HourlyPatterns[$hour, $dayOfWeek] = ($currentAvg * (1 - $alpha)) + ($cpu * $alpha)
+        }
+        $this.HourlySamples[$hour, $dayOfWeek]++
+    }
+    [void] RecordAppLaunch([string]$appName) {
+        if ([string]::IsNullOrWhiteSpace($appName)) { return }
+        if ($this.AppLaunchPatterns.Count -ge $this.MaxAppPatterns -and 
+            -not $this.AppLaunchPatterns.ContainsKey($appName)) {
+            $oldest = $this.AppLaunchPatterns.GetEnumerator() | Select-Object -First 1
+            if ($oldest) {
+                $this.AppLaunchPatterns.Remove($oldest.Key)
+            }
+        }
+        $hour = (Get-Date).Hour
+        $dayOfWeek = [int](Get-Date).DayOfWeek
+        $key = "$hour-$dayOfWeek"
+        if (-not $this.AppLaunchPatterns.ContainsKey($appName)) {
+            $this.AppLaunchPatterns[$appName] = @{}
+        }
+        if (-not $this.AppLaunchPatterns[$appName].ContainsKey($key)) {
+            $this.AppLaunchPatterns[$appName][$key] = 0
+        }
+        $this.AppLaunchPatterns[$appName][$key]++
+    }
+    [double] PredictNextMinute() {
+        $prediction = 0.0
+        $reasons = @()
+        $hour = (Get-Date).Hour
+        $nextHour = ($hour + 1) % 24
+        $dayOfWeek = [int](Get-Date).DayOfWeek
+        $historicalAvg = $this.HourlyPatterns[$hour, $dayOfWeek]
+        $nextHourAvg = $this.HourlyPatterns[$nextHour, $dayOfWeek]
+        $minuteOfHour = (Get-Date).Minute
+        $hourlyPrediction = $historicalAvg + (($nextHourAvg - $historicalAvg) * ($minuteOfHour / 60.0))
+        $prediction += $hourlyPrediction * 0.4
+        if ($this.BufferCount -ge 5) {
+            $recentSum = 0.0
+            $oldSum = 0.0
+            $recentCount = [Math]::Min(5, $this.BufferCount)
+            $oldCount = [Math]::Min(10, $this.BufferCount)
+            for ($i = 0; $i -lt $recentCount; $i++) {
+                $idx = ($this.BufferIndex - 1 - $i + 30) % 30
+                $recentSum += $this.ShortTermBuffer[$idx]
+            }
+            for ($i = $recentCount; $i -lt $oldCount; $i++) {
+                $idx = ($this.BufferIndex - 1 - $i + 30) % 30
+                $oldSum += $this.ShortTermBuffer[$idx]
+            }
+            $recentAvg = $recentSum / $recentCount
+            $oldAvg = if ($oldCount -gt $recentCount) { $oldSum / ($oldCount - $recentCount) } else { $recentAvg }
+            $trend = $recentAvg - $oldAvg
+            $trendPrediction = $recentAvg + ($trend * 2)
+            $trendPrediction = [Math]::Max(0, [Math]::Min(100, $trendPrediction))
+            $prediction += $trendPrediction * 0.6
+            if ($trend -gt 5) { $reasons += "Rising trend" }
+            elseif ($trend -lt -5) { $reasons += "Falling trend" }
+        } else {
+            $prediction += $historicalAvg * 0.6
+        }
+        $prediction = [Math]::Max(0, [Math]::Min(100, $prediction))
+        $this.LastPrediction = [Math]::Round($prediction, 1)
+        $this.PredictionReason = if ($reasons.Count -gt 0) { $reasons -join ", " } else { "Stable" }
+        return $this.LastPrediction
+    }
+    [string[]] PredictNextApps([ProphetMemory]$prophet) {
+        $predicted = @()
+        $hour = (Get-Date).Hour
+        $dayOfWeek = [int](Get-Date).DayOfWeek
+        $key = "$hour-$dayOfWeek"
+        foreach ($appName in $this.AppLaunchPatterns.Keys) {
+            $pattern = $this.AppLaunchPatterns[$appName]
+            if ($pattern.ContainsKey($key) -and $pattern[$key] -ge 3) {
+                $predicted += $appName
+            }
+        }
+        if ($prophet -and $prophet.Apps) {
+            foreach ($appName in $prophet.Apps.Keys) {
+                $app = $prophet.Apps[$appName]
+                if ($app.HourHits -and $app.HourHits[$hour] -ge 3) {
+                    if ($predicted -notcontains $appName) {
+                        $predicted += $appName
+                    }
+                }
+            }
+        }
+        return $predicted | Select-Object -First 5
+    }
+    [int] GetPatternCount() {
+        $count = 0
+        for ($h = 0; $h -lt 24; $h++) {
+            for ($d = 0; $d -lt 7; $d++) {
+                if ($this.HourlySamples[$h, $d] -gt 0) { $count++ }
+            }
+        }
+        return $count
+    }
+    [void] SavePatterns([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "LoadPatterns.json"
+            $hourlyData = @{}
+            for ($h = 0; $h -lt 24; $h++) {
+                $hourlyData["$h"] = @{}
+                for ($d = 0; $d -lt 7; $d++) {
+                    $hourlyData["$h"]["$d"] = @{
+                        Avg = $this.HourlyPatterns[$h, $d]
+                        Samples = $this.HourlySamples[$h, $d]
+                    }
+                }
+            }
+            $data = @{
+                HourlyData = $hourlyData
+                AppLaunchPatterns = $this.AppLaunchPatterns
+            }
+            $json = $data | ConvertTo-Json -Depth 5 -Compress
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadPatterns([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "LoadPatterns.json"
+            if (Test-Path $path) {
+                $json = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+                $data = $json | ConvertFrom-Json
+                if ($data.HourlyData) {
+                    $data.HourlyData.PSObject.Properties | ForEach-Object {
+                        $h = [int]$_.Name
+                        $hourData = $_.Value  # v39 FIX: Zachowaj wartosc przed wewnetrzna petla
+                        $hourData.PSObject.Properties | ForEach-Object {
+                            $d = [int]$_.Name
+                            $this.HourlyPatterns[$h, $d] = [double]$_.Value.Avg
+                            $this.HourlySamples[$h, $d] = [int]$_.Value.Samples
+                        }
+                    }
+                }
+                if ($data.AppLaunchPatterns) {
+                    $data.AppLaunchPatterns.PSObject.Properties | ForEach-Object {
+                        $appName = $_.Name
+                        $this.AppLaunchPatterns[$appName] = @{}
+                        $_.Value.PSObject.Properties | ForEach-Object {
+                            $hourName = $_.Name  # v39 FIX
+                            $this.AppLaunchPatterns[$appName][$hourName] = [int]$_.Value
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+}
+#  MEGA AI: Q-LEARNING AGENT - Reinforcement Learning
+class QLearningAgent {
+    [hashtable] $QTable
+    [double] $LearningRate
+    [double] $DiscountFactor
+    [double] $ExplorationRate
+    [string] $LastState
+    [string] $LastAction
+    [int] $TotalUpdates
+    [double] $CumulativeReward
+    [double] $LastReward           # V37.8.5: Ostatni reward (do wyswietlania w Configurator)
+    [double] $LastRAM              # V35: Ostatni poziom RAM
+    [bool] $LastRAMSpike           # V35: Czy byl spike RAM
+    [string] $CurrentApp           # v43.14: Aktywna app (per-app learning)
+    QLearningAgent() {
+        $this.QTable = @{}
+        $this.LearningRate = 0.2
+        $this.DiscountFactor = 0.9
+        $this.ExplorationRate = 0.15
+        $this.LastState = ""
+        $this.LastAction = ""
+        $this.TotalUpdates = 0
+        $this.CumulativeReward = 0
+        $this.LastReward = 0.0
+        $this.LastRAM = 0
+        $this.LastRAMSpike = $false
+        $this.CurrentApp = ""
+    }
+    [string] DiscretizeState([double]$cpu, [double]$temp, [bool]$active, [string]$context, [double]$ram, [bool]$ramSpike, [string]$phase) {
+        $cpuBin = [Math]::Min(4, [Math]::Floor($cpu / 20))
+        $tempBin = if ($temp -lt 60) { 0 } elseif ($temp -lt 80) { 1 } else { 2 }
+        $actBin = if ($active) { 1 } else { 0 }
+        $ctxBin = switch ($context) { "Gaming" { 2 } "Rendering" { 2 } "Audio" { 2 } default { if ($context -eq "Idle") { 0 } else { 1 } } }
+        $ramBin = if ($ramSpike) { 4 } elseif ($ram -lt 40) { 0 } elseif ($ram -lt 60) { 1 } elseif ($ram -lt 75) { 2 } elseif ($ram -lt 85) { 3 } else { 4 }
+        $phaseBin = switch ($phase) { "Loading" { "L" } "Gameplay" { "G" } "Active" { "A" } "Cutscene" { "C" } "Menu" { "M" } "Paused" { "Z" } default { "I" } }
+        # v43.14: App w state - Q-Learning uczy się PER-APP
+        $appBin = if ($this.CurrentApp) { $this.CurrentApp.Substring(0, [Math]::Min(8, $this.CurrentApp.Length)).ToLower() } else { "none" }
+        $this.LastRAM = $ram
+        $this.LastRAMSpike = $ramSpike
+        return "$appBin|C$cpuBin-T$tempBin-A$actBin-X$ctxBin-R$ramBin-P$phaseBin"
+    }
+    # Kompatybilnosc wsteczna - sygnatura bez Phase
+    [string] DiscretizeState([double]$cpu, [double]$temp, [bool]$active, [string]$context, [double]$ram, [bool]$ramSpike) {
+        return $this.DiscretizeState($cpu, $temp, $active, $context, $ram, $ramSpike, "Idle")
+    }
+    # Kompatybilnosc wsteczna - stara sygnatura bez RAM
+    [string] DiscretizeState([double]$cpu, [double]$temp, [bool]$active, [string]$context) {
+        return $this.DiscretizeState($cpu, $temp, $active, $context, $this.LastRAM, $false)
+    }
+    [void] InitState([string]$s) {
+        if (-not $this.QTable.ContainsKey($s)) {
+            $this.QTable[$s] = @{ "Turbo" = 0.0; "Balanced" = 0.0; "Silent" = 0.0 }
+        }
+    }
+    [string] SelectAction([string]$state) {
+        $this.InitState($state)
+        $action = "Balanced"
+        if ((Get-Random -Minimum 0.0 -Maximum 1.0) -lt $this.ExplorationRate) {
+            $action = @("Turbo", "Balanced", "Silent")[(Get-Random -Maximum 3)]
+        } else {
+            $q = $this.QTable[$state]
+            # ZMIANA: Przy równych Q-values preferuj niższy tryb (Silent > Balanced > Turbo)
+            # To promuje efektywność energetyczną
+            $best = "Silent"; $bestV = $q["Silent"]
+            if ($q["Balanced"] -gt $bestV) { $best = "Balanced"; $bestV = $q["Balanced"] }
+            if ($q["Turbo"] -gt $bestV) { $best = "Turbo" }
+            $action = $best
+        }
+        # v43.1 FIX: Zapisz LastState i LastAction dla następnej iteracji Update()
+        $this.LastState = $state
+        $this.LastAction = $action
+        return $action
+    }
+    [void] Update([string]$state, [string]$action, [double]$reward, [string]$nextState) {
+        $this.InitState($state); $this.InitState($nextState)
+        $currentQ = $this.QTable[$state][$action]
+        $maxNextQ = [Math]::Max([Math]::Max($this.QTable[$nextState]["Turbo"], $this.QTable[$nextState]["Balanced"]), $this.QTable[$nextState]["Silent"])
+        $this.QTable[$state][$action] = $currentQ + $this.LearningRate * ($reward + $this.DiscountFactor * $maxNextQ - $currentQ)
+        $this.TotalUpdates++
+        $this.CumulativeReward += $reward
+        $this.LastReward = $reward  # v39: Zapisz ostatni reward
+        $this.ExplorationRate = [Math]::Max(0.05, $this.ExplorationRate * 0.9999)
+        $this.LastState = $state; $this.LastAction = $action
+    }
+    [double] CalcReward([string]$action, [double]$cpu, [double]$temp, [double]$prevTemp, [bool]$active, [double]$ram, [bool]$ramSpike, [string]$phase) {
+        $r = 0.0
+        # === PHASE-AWARE REWARDS ===
+        # v43.14 FIX: Zbalansowane nagrody - Silent NIE dominuje bezwarunkowo
+        switch ($phase) {
+            "Loading" {
+                switch ($action) {
+                    "Turbo"    { $r += 2.0 }
+                    "Balanced" { $r += 1.0 }
+                    "Silent"   { $r -= 1.5 }
+                }
+            }
+            "Gameplay" {
+                switch ($action) {
+                    "Turbo"    { if ($cpu -gt 60) { $r += 1.0 } else { $r -= 0.5 } }
+                    "Balanced" { $r += 1.0 }
+                    "Silent"   { if ($cpu -lt 25) { $r += 0.5 } else { $r -= 0.5 } }
+                }
+            }
+            "Cutscene" {
+                switch ($action) {
+                    "Turbo"    { $r -= 1.0 }
+                    "Balanced" { $r += 0.5 }
+                    "Silent"   { $r += 1.0 }
+                }
+            }
+            "Menu" {
+                switch ($action) {
+                    "Turbo"    { $r -= 1.5 }
+                    "Balanced" { $r += 0.0 }
+                    "Silent"   { $r += 1.0 }
+                }
+            }
+            "Active" {
+                switch ($action) {
+                    "Turbo"    { $r += 1.5 }
+                    "Balanced" { $r += 1.0 }
+                    "Silent"   { $r -= 1.0 }
+                }
+            }
+            "Idle" {
+                # v43.14 FIX: Mniejsze nagrody w Idle - nie dominuj Q-table
+                switch ($action) {
+                    "Turbo"    { $r -= 1.0 }
+                    "Balanced" { $r += 0.0 }
+                    "Silent"   { $r += 1.0 }
+                }
+            }
+            "Paused" {
+                switch ($action) {
+                    "Turbo"    { $r -= 1.5 }
+                    "Balanced" { $r -= 0.5 }
+                    "Silent"   { $r += 1.5 }
+                }
+            }
+        }
+        # === NOWA FILOZOFIA: Nagradzaj MINIMALNY tryb ktory wystarcza ===
+        # === RAM SPIKE - najwyzszy priorytet ===
+        if ($ramSpike) {
+            switch ($action) {
+                "Turbo" { $r += 2.0 }      # Nagroda za Turbo przy spike RAM (zmniejszona z 3.0)
+                "Balanced" { $r += 0.5 }   # Mala nagroda
+                "Silent" { $r -= 2.0 }     # Kara za Silent przy spike RAM (zmniejszona z 3.0)
+            }
+        }
+        # === Wysoki RAM (>80%) bez spike'a ===
+        elseif ($ram -gt 80) {
+            switch ($action) {
+                "Turbo" { $r += 1.0 }
+                "Balanced" { $r += 0.5 }
+                "Silent" { $r -= 0.5 }
+            }
+        }
+        # v43.14: Thermal limit for proportional penalty
+        $thermalLimit = if ($null -ne $Script:ThermalLimit) { $Script:ThermalLimit } else { 90 }
+        $thermalMargin = $thermalLimit - $temp
+        # === Standardowa logika CPU ===
+        switch ($action) {
+            "Turbo" { 
+                if ($cpu -gt 85) { $r += 2.5 }
+                elseif ($cpu -gt $Script:TurboThreshold) { $r += 0.5 }
+                elseif ($cpu -lt $Script:BalancedThreshold -and -not $ramSpike) { 
+                    $r -= 2.0   # v43.14: Zmniejszona z 3.0 (mniejsza dominacja Silent)
+                }
+                if ($thermalMargin -lt 5 -and $cpu -lt 60) { $r -= 1.5 }
+                elseif ($thermalMargin -lt 15 -and $cpu -lt 40) { $r -= 0.5 }
+            }
+            "Silent" { 
+                # v43.14 FIX: Zmniejszone nagrody - Silent nie powinien dominować Q-table
+                if ($cpu -lt 20 -and -not $active -and $ram -lt 60) { 
+                    $r += 2.0   # Zmniejszona z 4.0
+                } 
+                elseif ($cpu -lt $Script:BalancedThreshold -and $ram -lt 70) { 
+                    $r += 1.0   # Zmniejszona z 2.5
+                }
+                elseif ($cpu -gt $Script:TurboThreshold -or $ram -gt 80) { 
+                    $r -= 1.5   # Zwiększona kara - Silent przy wysokim CPU = ZŁO
+                }
+                # Thermal bonus proporcjonalny
+                if ($temp -lt ($thermalLimit - 35)) { $r += 0.3 }  # Tylko daleko od limitu
+            }
+            "Balanced" { 
+                # v43.14: Balanced dostaje BAZOWY bonus (najlepszy kompromis)
+                if ($cpu -ge 25 -and $cpu -le 70) { 
+                    $r += 1.5
+                }
+                elseif ($cpu -lt 20 -and $ram -lt 60) {
+                    $r -= 0.5   # Zmniejszona z 1.0 - Balanced w Idle też OK
+                }
+                # v43.14: Bonus za "headroom" - Balanced daje CPU headroom na burst
+                if ($active) { $r += 0.5 }
+            }
+        }
+        # === NAGRODA ZA EFEKTYWNOSC ENERGETYCZNA ===
+        # v43.14 FIX: Zmniejszona nagroda - duplicated z Phase reward
+        if (-not ($Script:PerfMonitor -and $Script:PerfMonitor.HasRecentStutter())) {
+            switch ($action) {
+                "Silent" { 
+                    if ($cpu -lt 50) { $r += 0.5 }   # Zmniejszona z 1.5 (deduplikacja)
+                }
+                "Balanced" { 
+                    if ($cpu -lt 40) { $r += 0.3 }   # Zmniejszona z 0.5
+                }
+            }
+        }
+        # === Penalizuj tryby ktore powoduja stuttering ===
+        if ($Script:PerfMonitor -and $Script:PerfMonitor.HasRecentStutter()) {
+            switch ($action) {
+                "Silent" { 
+                    # ZMNIEJSZONA kara za Silent (z 5.0 na 2.0)
+                    # Stuttering moze byc z innych powodow niz brak mocy
+                    $r -= 2.0
+                }
+                "Balanced" { 
+                    $r -= 1.0   # Zmniejszona z 2.0
+                }
+                "Turbo" { 
+                    # Bez nagrody - Turbo nie jest "nagradzany" za stuttering
+                    # Powinien byc uzywany gdy potrzebny, nie gdy wystapi stutter
+                }
+            }
+        }
+        # v43.14: Context-aware reward (Audio/Gaming/Rendering)
+        # Audio apps (Kontakt, Cubase, etc.) WYMAGAJĄ Balanced minimum (realtime buffers)
+        if ($Script:CurrentAppContext) {
+            switch ($Script:CurrentAppContext) {
+                "Audio" {
+                    switch ($action) {
+                        "Silent"   { $r -= 1.5 }   # Audio + Silent = buffer underruns!
+                        "Balanced" { $r += 1.5 }    # Audio = Balanced (stable latency)
+                        "Turbo"    { $r += 0.3 }    # Turbo OK ale nie konieczny
+                    }
+                }
+                "Rendering" {
+                    switch ($action) {
+                        "Silent"   { $r -= 1.0 }
+                        "Balanced" { $r += 0.5 }
+                        "Turbo"    { $r += 1.5 }    # Rendering needs max CPU
+                    }
+                }
+                "Gaming" {
+                    switch ($action) {
+                        "Balanced" { $r += 0.5 }    # Gaming = GPU-bound usually
+                    }
+                }
+            }
+        }
+        # v43.14: CPUAgressiveness modyfikuje reward
+        # Aggressive (>50): bonus za Turbo, penalty za Silent
+        # Conservative (<50): bonus za Silent, penalty za Turbo
+        if ($null -ne $Script:CPUAgressiveness) {
+            $aggrMod = ($Script:CPUAgressiveness - 50) / 100.0  # -0.5 to +0.5
+            switch ($action) {
+                "Turbo"    { $r += $aggrMod * 1.5 }   # aggressive: +0.75, conservative: -0.75
+                "Silent"   { $r -= $aggrMod * 1.5 }   # aggressive: -0.75, conservative: +0.75
+                # Balanced: neutral (no change)
+            }
+        }
+        return $r
+    }
+    # Kompatybilnosc wsteczna - sygnatura bez Phase
+    [double] CalcReward([string]$action, [double]$cpu, [double]$temp, [double]$prevTemp, [bool]$active, [double]$ram, [bool]$ramSpike) {
+        return $this.CalcReward($action, $cpu, $temp, $prevTemp, $active, $ram, $ramSpike, "Idle")
+    }
+    # Kompatybilnosc wsteczna - stara sygnatura bez RAM
+    [double] CalcReward([string]$action, [double]$cpu, [double]$temp, [double]$prevTemp, [bool]$active) {
+        return $this.CalcReward($action, $cpu, $temp, $prevTemp, $active, $this.LastRAM, $this.LastRAMSpike, "Idle")
+    }
+    [string] GetStatus() { return "Q:$($this.QTable.Count) Exp:$([Math]::Round($this.ExplorationRate * 100))%" }
+    [void] SaveState([string]$dir) {
+        try {
+            $path = Join-Path $dir "QLearning.json"
+            $data = @{ QTable = $this.QTable; ExplorationRate = $this.ExplorationRate; TotalUpdates = $this.TotalUpdates }
+            [System.IO.File]::WriteAllText($path, ($data | ConvertTo-Json -Depth 4 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "QLearning.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.QTable) {
+                    $data.QTable.PSObject.Properties | ForEach-Object {
+                        $stateName = $_.Name
+                        $this.QTable[$stateName] = @{}
+                        $_.Value.PSObject.Properties | ForEach-Object {
+                            $actionName = $_.Name
+                            $this.QTable[$stateName][$actionName] = [double]$_.Value
+                        }
+                    }
+                }
+                if ($data.ExplorationRate) { $this.ExplorationRate = $data.ExplorationRate }
+                if ($data.TotalUpdates) { $this.TotalUpdates = $data.TotalUpdates }
+            }
+        } catch { }
+    }
+}
+class EnsembleVoter {
+    [hashtable] $Weights
+    [hashtable] $Accuracy
+    [int] $TotalVotes
+    [double] $LastRAM              # V35: Ostatni poziom RAM
+    [bool] $LastRAMSpike           # V35: Czy byl spike RAM
+    EnsembleVoter() {
+        #  WSZYSTKIE modeli z podobnymi wagami - DEMOKRATYCZNE glosowanie
+        $this.Weights = @{ 
+            "Brain" = 0.08
+            "QLearning" = 0.08
+            "Bandit" = 0.05
+            "Genetic" = 0.06
+            "Context" = 0.07
+            "Thermal" = 0.06
+            "Pattern" = 0.07
+            "GPU" = 0.10           # V40.2: Zwiększona waga GPU (dGPU/iGPU reakcja)
+            "Predictor" = 0.06
+            "Chain" = 0.05
+            "Trend" = 0.06
+            "Tuner" = 0.06
+            "Energy" = 0.06
+            "Prophet" = 0.06
+            "Anomaly" = 0.06
+            "Activity" = 0.06
+            "IOMonitor" = 0.08
+            "RAMMonitor" = 0.08   # V35 NEW: RAM Monitor jako glos
+        }
+        $this.Accuracy = @{ 
+            "Brain" = 0.6
+            "QLearning" = 0.5
+            "Bandit" = 0.4
+            "Genetic" = 0.5
+            "Context" = 0.6
+            "Thermal" = 0.5
+            "Pattern" = 0.6
+            "GPU" = 0.7            # V40.2: Zwiększona accuracy GPU (hardware-based = reliable)
+            "Predictor" = 0.5
+            "Chain" = 0.4
+            "Trend" = 0.5
+            "Tuner" = 0.5
+            "Energy" = 0.5
+            "Prophet" = 0.5
+            "Anomaly" = 0.7
+            "Activity" = 0.6
+            "IOMonitor" = 0.6
+            "RAMMonitor" = 0.7   # V35 NEW: RAM Monitor accuracy (wysoka - spikes sa wiarygodne)
+        }
+        $this.TotalVotes = 0
+        $this.LastRAM = 0
+        $this.LastRAMSpike = $false
+    }
+    [string] Vote([hashtable]$decisions, [double]$ram, [bool]$ramSpike) {
+        $scores = @{ "Turbo" = 0.0; "Balanced" = 0.0; "Silent" = 0.0 }
+        $voteCount = @{ "Turbo" = 0; "Balanced" = 0; "Silent" = 0 }
+        $this.LastRAM = $ram
+        $this.LastRAMSpike = $ramSpike
+        $ramVote = "Balanced"
+        if ($ramSpike) {
+            $ramVote = "Turbo"
+        } elseif ($ram -gt 85) {
+            $ramVote = "Turbo"
+        } elseif ($ram -gt 70) {
+            $ramVote = "Balanced"
+        } elseif ($ram -lt 50) {
+            $ramVote = "Silent"
+        }
+        # Dodaj glos RAM do decisions
+        $decisions["RAMMonitor"] = $ramVote
+        foreach ($m in $decisions.Keys) {
+            $d = $decisions[$m]
+            if (-not $d) { continue }
+            $w = if ($this.Weights.ContainsKey($m)) { $this.Weights[$m] } else { 0.05 }
+            $a = if ($this.Accuracy.ContainsKey($m)) { $this.Accuracy[$m] } else { 0.5 }
+            if ($m -eq "RAMMonitor" -and $ramSpike) {
+                $w *= 1.5  # 50% wiecej wagi przy spike
+            }
+            $scores[$d] += $w * $a
+            $voteCount[$d]++
+        }
+        # ZMIENIONA LOGIKA: Faworyzuj minimalny wystarczajacy tryb
+        # Sprawdzamy od Silent do Turbo - pierwszy ktory ma dobre wyniki wygrywa
+        $winner = "Balanced"
+        $maxS = 0.0
+        
+        # BONUS dla Silent przy niskim RAM - efektywnosc energetyczna
+        if ($ram -lt 60 -and -not $ramSpike) {
+            $scores["Silent"] += 0.1
+        }
+        
+        if ($ramSpike) {
+            $scores["Turbo"] += 0.15
+        }
+        
+        # Wybierz tryb z najwyzszym score
+        # ALE: Silent nie wymaga tylu glosow co Turbo (efektywnosc)
+        if ($scores["Silent"] -gt $scores["Balanced"] -and $scores["Silent"] -gt $scores["Turbo"] * 0.9 -and -not $ramSpike) {
+            # Silent wygrywa jesli ma najwyzszy score LUB jest blisko Turbo (preferuj efektywnosc)
+            $winner = "Silent"
+            $maxS = $scores["Silent"]
+        }
+        elseif ($scores["Turbo"] -gt $scores["Balanced"] -and $voteCount["Turbo"] -ge 4) {
+            # Turbo wymaga >= 4 glosow (zmniejszone z 5 ale wciaz wymaga konsensusu)
+            $winner = "Turbo"
+            $maxS = $scores["Turbo"]
+        }
+        else {
+            # Balanced jako fallback
+            $winner = "Balanced"
+            $maxS = $scores["Balanced"]
+        }
+        
+        $this.TotalVotes++
+        return $winner
+    }
+    # Kompatybilnosc wsteczna - stara sygnatura bez RAM
+    [string] Vote([hashtable]$decisions) {
+        return $this.Vote($decisions, $this.LastRAM, $this.LastRAMSpike)
+    }
+    [void] UpdateAccuracy([string]$model, [bool]$correct) {
+        if (-not $this.Accuracy.ContainsKey($model)) { return }
+        if ($correct) { $this.Accuracy[$model] = [Math]::Min(0.95, $this.Accuracy[$model] * 1.02 + 0.01) }
+        else { $this.Accuracy[$model] = [Math]::Max(0.3, $this.Accuracy[$model] * 0.98) }
+    }
+    [void] UpdateRAMAccuracy([bool]$ramWasHelpful) {
+        if ($ramWasHelpful) {
+            $this.Accuracy["RAMMonitor"] = [Math]::Min(0.95, $this.Accuracy["RAMMonitor"] * 1.03 + 0.02)
+        } else {
+            $this.Accuracy["RAMMonitor"] = [Math]::Max(0.4, $this.Accuracy["RAMMonitor"] * 0.97)
+        }
+    }
+    [string] GetStatus() {
+        $best = "Brain"; $bestA = 0
+        foreach ($m in $this.Accuracy.Keys) { if ($this.Accuracy[$m] -gt $bestA) { $bestA = $this.Accuracy[$m]; $best = $m } }
+        return "Best:$best($([Math]::Round($bestA * 100))%)"
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $path = Join-Path $dir "EnsembleWeights.json"
+            [System.IO.File]::WriteAllText($path, (@{ Weights = $this.Weights; Accuracy = $this.Accuracy; TotalVotes = $this.TotalVotes } | ConvertTo-Json -Depth 3 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "EnsembleWeights.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.Weights) { $data.Weights.PSObject.Properties | ForEach-Object { $this.Weights[$_.Name] = [double]$_.Value } }
+                if ($data.Accuracy) { $data.Accuracy.PSObject.Properties | ForEach-Object { $this.Accuracy[$_.Name] = [double]$_.Value } }
+                if ($data.TotalVotes) { $this.TotalVotes = $data.TotalVotes }
+            }
+        } catch { }
+    }
+}
+#  MEGA AI: ENERGY TRACKER - Efficiency monitoring
+class EnergyTracker {
+    [double] $TotalScore
+    [int] $Samples
+    [double] $CurrentEfficiency
+    [hashtable] $ModeStats
+    EnergyTracker() {
+        $this.TotalScore = 0; $this.Samples = 0; $this.CurrentEfficiency = 0.5
+        $this.ModeStats = @{ "Turbo" = @{ S = 0; T = 0.0 }; "Balanced" = @{ S = 0; T = 0.0 }; "Silent" = @{ S = 0; T = 0.0 } }
+    }
+    [void] Record([string]$mode, [double]$cpu, [double]$temp, [bool]$active) {
+        $eff = 0.5
+        #  SYNC: uses variables z config.json
+        switch ($mode) {
+            "Turbo" { $eff = if ($cpu -gt $Script:TurboThreshold) { 0.9 } elseif ($cpu -gt 30) { 0.6 } else { 0.2 } }
+            "Silent" { $eff = if ($cpu -lt $Script:ForceSilentCPU -and -not $active) { 0.95 } elseif ($cpu -lt 30) { 0.7 } else { 0.3 } }
+            "Balanced" { $eff = if ($cpu -gt 20 -and $cpu -lt $Script:TurboThreshold) { 0.8 } else { 0.6 } }
+        }
+        if ($temp -gt 85) { $eff *= 0.7 } elseif ($temp -gt 75) { $eff *= 0.9 }
+        $this.TotalScore += $eff; $this.Samples++
+        $this.ModeStats[$mode].S++; $this.ModeStats[$mode].T += $eff
+        $this.CurrentEfficiency = ($this.CurrentEfficiency * 0.9) + ($eff * 0.1)
+    }
+    [double] GetEfficiency() { if ($this.Samples -eq 0) { return 0.5 } else { return [Math]::Round($this.TotalScore / $this.Samples, 3) } }
+    [string] GetStatus() { return "Eff:$([Math]::Round($this.CurrentEfficiency * 100))%" }
+    [void] SaveState([string]$dir) {
+        try {
+            $path = Join-Path $dir "EnergyStats.json"
+            [System.IO.File]::WriteAllText($path, (@{ TotalScore = $this.TotalScore; Samples = $this.Samples; ModeStats = $this.ModeStats } | ConvertTo-Json -Depth 3 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "EnergyStats.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.TotalScore) { $this.TotalScore = $data.TotalScore }
+                if ($data.Samples) { $this.Samples = $data.Samples }
+            }
+        } catch { }
+    }
+}
+# Odpowiedzialnosci:
+# 1. Dynamicznie dostosowuje progi spike detection na podstawie temperatury CPU
+# 2. Zimny CPU (< 60°C) -> nizsze progi (agresywna detekcja, szybsza reakcja)
+# 3. Goracy CPU (> 75°C) -> wyzsze progi (ostrozna detekcja, less boost)
+# 4. Zapobiega przegrzaniu podczas intensywnego uzycia
+class AdaptiveThresholdManager {
+    # Bazowe progi (standardowe)
+    [double] $BaseSpikeThreshold = 8.0
+    [double] $BaseAccelThreshold = 3.0
+    # Strefy temperatur (°C)
+    [double] $TempCool = 60.0      # Ponizej = zimny CPU
+    [double] $TempNormal = 75.0    # 60-75 = normalny
+    [double] $TempWarm = 85.0      # 75-85 = cieply
+    # Powyzej 85°C = goracy
+    # Mnozniki progow dla kazdej strefy
+    [hashtable] $ThresholdMultipliers = @{
+        COOL = @{ Spike = 0.5; Accel = 0.67 }   # 50% nizej spike, 67% nizej accel
+        NORMAL = @{ Spike = 1.0; Accel = 1.0 }  # Bazowe wartosci
+        WARM = @{ Spike = 1.25; Accel = 1.33 }  # 25% wyzej spike, 33% wyzej accel
+        HOT = @{ Spike = 1.875; Accel = 2.0 }   # 87.5% wyzej spike, 100% wyzej accel
+    }
+    # Statystyki
+    [int] $TotalAdjustments = 0
+    [string] $LastZone = "NORMAL"
+    [datetime] $LastAdjustmentTime = [datetime]::MinValue
+    AdaptiveThresholdManager() {
+        # Konstruktor - inicjalizacja
+    }
+    # #
+    # GLOWNA METODA - Oblicz adaptive thresholds
+    # #
+    [hashtable] GetAdaptiveThresholds([double]$currentTemp, [string]$currentMode) {
+        # Okresl strefe temperatury
+        $zone = $this.DetermineTemperatureZone($currentTemp)
+        # Pobierz mnozniki dla strefy
+        $multipliers = $this.ThresholdMultipliers[$zone]
+        # Oblicz adaptive thresholds
+        $adaptiveSpikeThreshold = $this.BaseSpikeThreshold * $multipliers.Spike
+        $adaptiveAccelThreshold = $this.BaseAccelThreshold * $multipliers.Accel
+        # Statystyki
+        if ($zone -ne $this.LastZone) {
+            $this.TotalAdjustments++
+            $this.LastZone = $zone
+            $this.LastAdjustmentTime = [datetime]::Now
+        }
+        # Okresl kolor i ikone dla UI
+        $uiInfo = $this.GetUIInfo($zone)
+        return @{
+            SpikeThreshold = [Math]::Round($adaptiveSpikeThreshold, 1)
+            AccelThreshold = [Math]::Round($adaptiveAccelThreshold, 1)
+            Zone = $zone
+            Temperature = [Math]::Round($currentTemp, 1)
+            Reason = $uiInfo.Reason
+            Icon = $uiInfo.Icon
+            Color = $uiInfo.Color
+            Multiplier = $multipliers.Spike
+        }
+    }
+    # #
+    # Okresl strefe temperatury
+    # #
+    [string] DetermineTemperatureZone([double]$temp) {
+        if ($temp -lt $this.TempCool) {
+            return "COOL"
+        } elseif ($temp -lt $this.TempNormal) {
+            return "NORMAL"
+        } elseif ($temp -lt $this.TempWarm) {
+            return "WARM"
+        } else {
+            return "HOT"
+        }
+        # Fallback (nigdy nie powinno sie wykonac)
+        return "NORMAL"
+    }
+    # #
+    # UI Info dla kazdej strefy
+    # #
+    [hashtable] GetUIInfo([string]$zone) {
+        switch ($zone) {
+            "COOL" {
+                return @{
+                    Reason = "Cool CPU - Aggressive detection enabled"
+                    Icon = "?"
+                    Color = "Cyan"
+                }
+            }
+            "NORMAL" {
+                return @{
+                    Reason = "Normal CPU - Standard detection"
+                    Icon = ""
+                    Color = "Green"
+                }
+            }
+            "WARM" {
+                return @{
+                    Reason = "Warm CPU - Conservative detection"
+                    Icon = ""
+                    Color = "Yellow"
+                }
+            }
+            "HOT" {
+                return @{
+                    Reason = "Hot CPU - Critical-only detection"
+                    Icon = ""
+                    Color = "Red"
+                }
+            }
+            default {
+                return @{
+                    Reason = "Unknown zone"
+                    Icon = "?"
+                    Color = "Gray"
+                }
+            }
+        }
+        # Fallback (nigdy nie powinno sie wykonac, ale PowerShell wymaga)
+        return @{
+            Reason = "Unknown zone"
+            Icon = "?"
+            Color = "Gray"
+        }
+    }
+    # #
+    # Statystyki do logowania
+    # #
+    [string] GetStats() {
+        return "Adjustments: $($this.TotalAdjustments) | Current Zone: $($this.LastZone)"
+    }
+}
+# Odpowiedzialnosci:
+# 1. Monitoruje RAM i wykrywa nagle skoki (spike detection)
+# 2. Adaptacyjne progi - dostosowuje sie do wzorcow uzytkownika
+# 3. Wykrywa trendy (powolny ale ciagly wzrost)
+# 4. Uczy sie aplikacji ktore potrzebuja boost'a -> PRE-BOOST
+# 5. NATYCHMIASTOWA reakcja - nie czeka na AI
+class RAMAnalyzer {
+    # Aktualne dane
+    [double] $CurrentRAM                # Aktualne uzycie RAM (%)
+    [double] $PreviousRAM               # Poprzednia probka
+    [double] $Delta                     # Roznica (CurrentRAM - PreviousRAM) - pierwsza pochodna
+    [double] $Acceleration              # Zmiana delta (Delta[n] - Delta[n-1])
+    [double] $PreviousDelta             # Poprzednia delta (do obliczenia acceleration)
+    [System.Collections.Generic.List[double]] $AccelerationHistory  # Historia przyspieszen
+    [double] $AccelerationThreshold     # Prog przyspieszenia (>3%)
+    [string] $TrendType                 # "EXPONENTIAL", "LINEAR", "DECEL", "NONE"
+    [int] $ExponentialStreak            # Ile probek z przyspieszeniem
+    # Historia do analizy
+    [System.Collections.Generic.List[double]] $RAMHistory        # Historia uzycia RAM
+    [System.Collections.Generic.List[double]] $DeltaHistory      # Historia zmian (delt)
+    [int] $HistorySize                  # Max rozmiar historii
+    # Statystyki adaptacyjne
+    [double] $AvgDelta                  # Srednia delta
+    [double] $StdDevDelta               # Odchylenie standardowe delt
+    [double] $SpikeThreshold            # Adaptacyjny prog spike'a
+    [double] $MinSpikeThreshold         # Minimalny prog (nie nizszy niz)
+    # Wykrywanie trendu
+    [int] $ConsecutiveRises             # Ile probek z rzedu rosnie
+    [double] $TrendSum                  # Suma wzrostow w trendzie
+    [int] $TrendThresholdCount          # Po ilu probkach uznajemy trend
+    [double] $TrendThresholdSum         # Jaka suma wzrostow = trend
+    # Stan spike/boost
+    [bool] $SpikeDetected               # Czy wykryto spike
+    [bool] $TrendDetected               # Czy wykryto trend wzrostowy
+    [string] $BoostReason               # Powod boost'a
+    [datetime] $LastBoostTime           # Kiedy ostatni boost
+    [int] $BoostCooldown                # Sekundy miedzy boost'ami (anty-spam)
+    # Uczenie sie aplikacji
+    [hashtable] $AppPatterns            # { "app.exe" = @{ BoostCount; TotalSeen; AvgSpike; NeedsBoost } }
+    [string] $CurrentApp                # Aktualnie aktywna aplikacja
+    [int] $LearningThreshold            # Po ilu obserwacjach "znamy" app
+    # Statystyki
+    [int] $TotalSpikesDetected
+    [int] $TotalTrendsDetected
+    [int] $TotalPreBoosts
+    [AdaptiveThresholdManager] $ThresholdManager
+    RAMAnalyzer() {
+        $this.CurrentRAM = 0
+        $this.PreviousRAM = 0
+        $this.Delta = 0
+        $this.Acceleration = 0
+        $this.PreviousDelta = 0
+        $this.AccelerationHistory = [System.Collections.Generic.List[double]]::new()
+        $this.AccelerationThreshold = 3.0    # Przyspieszenie >3% = eksponencjalne
+        $this.TrendType = "NONE"
+        $this.ExponentialStreak = 0
+        $this.RAMHistory = [System.Collections.Generic.List[double]]::new()
+        $this.DeltaHistory = [System.Collections.Generic.List[double]]::new()
+        $this.HistorySize = 30  # ~60 sekund historii przy 2s iteracji
+        $this.AvgDelta = 0
+        $this.StdDevDelta = 2.0  # Startowe odchylenie
+        $this.SpikeThreshold = 5.0  # V38 FIX: Obnizony startowy prog z 8% do 5%
+        $this.MinSpikeThreshold = 3.0  # V38 FIX: Obnizony minimalny prog z 5% do 3%
+        $this.ConsecutiveRises = 0
+        $this.TrendSum = 0
+        $this.TrendThresholdCount = 4  # V38: 4 probki rosnace = trend (kompromis)
+        $this.TrendThresholdSum = 8.0  # V38: Suma >8% = trend (kompromis)
+        $this.SpikeDetected = $false
+        $this.TrendDetected = $false
+        $this.BoostReason = ""
+        $this.LastBoostTime = [datetime]::MinValue
+        $this.BoostCooldown = 10  # Min 10s miedzy boost'ami
+        $this.AppPatterns = @{}
+        $this.CurrentApp = ""
+        $this.LearningThreshold = 5  # Po 5 obserwacjach znamy app
+        $this.TotalSpikesDetected = 0
+        $this.TotalTrendsDetected = 0
+        $this.TotalPreBoosts = 0
+        $this.ThresholdManager = [AdaptiveThresholdManager]::new()
+    }
+    # #
+    # GLOWNA METODA: Aktualizuj i analizuj RAM
+    # #
+    [hashtable] Update([string]$activeApp, [double]$currentTemp, [string]$currentMode) {
+        $this.CurrentApp = $activeApp
+        $this.SpikeDetected = $false
+        $this.TrendDetected = $false
+        $this.BoostReason = ""
+        $thresholdInfo = $this.ThresholdManager.GetAdaptiveThresholds($currentTemp, $currentMode)
+        $this.SpikeThreshold = $thresholdInfo.SpikeThreshold
+        $this.AccelerationThreshold = $thresholdInfo.AccelThreshold
+        # 1. Odczytaj aktualne RAM z systemu
+        $this.PreviousRAM = $this.CurrentRAM
+        $this.CurrentRAM = $this.GetSystemRAM()
+        # 2. Oblicz delte
+        if ($this.PreviousRAM -gt 0) {
+            $this.Delta = $this.CurrentRAM - $this.PreviousRAM
+        } else {
+            $this.Delta = 0
+        }
+        if ($this.PreviousDelta -ne 0 -or $this.Delta -ne 0) {
+            $this.Acceleration = $this.Delta - $this.PreviousDelta
+        } else {
+            $this.Acceleration = 0
+        }
+        $this.PreviousDelta = $this.Delta  # Zapisz dla nastepnej iteracji
+        # 2b. Dodaj do historii acceleration
+        $this.AccelerationHistory.Add($this.Acceleration)
+        if ($this.AccelerationHistory.Count -gt $this.HistorySize) {
+            $this.AccelerationHistory.RemoveAt(0)
+        }
+        # 3. Aktualizuj historie
+        $this.UpdateHistory()
+        # 4. Przelicz statystyki adaptacyjne
+        $this.UpdateAdaptiveStats()
+        $this.DetectTrendType()
+        # 5. Sprawdz PRE-BOOST (znana ciezka aplikacja)
+        $preBoostNeeded = $this.CheckPreBoost($activeApp)
+        if ($preBoostNeeded) {
+            return @{
+                RAM = [int]$this.CurrentRAM
+                Delta = [Math]::Round($this.Delta, 1)
+                Spike = $false
+                Trend = $false
+                PreBoost = $true
+                BoostNeeded = "Turbo"
+                Reason = " PRE-BOOST: $activeApp (learned)"
+                Threshold = [Math]::Round($this.SpikeThreshold, 1)
+                Acceleration = [Math]::Round($this.Acceleration, 1)
+                TrendType = $this.TrendType
+                ThresholdZone = $thresholdInfo.Zone
+                ThresholdIcon = $thresholdInfo.Icon
+                ThresholdReason = $thresholdInfo.Reason
+            }
+        }
+        $earlySpikeResult = $this.CheckEarlySpike()
+        if ($earlySpikeResult) {
+            $this.RecordAppSpike($activeApp)
+            $boostLevel = $this.GetBoostLevel()
+            return @{
+                RAM = [int]$this.CurrentRAM
+                Delta = [Math]::Round($this.Delta, 1)
+                Spike = $true
+                Trend = $false
+                PreBoost = $false
+                BoostNeeded = $boostLevel  # TURBO lub EXTREME
+                Reason = " EARLY SPIKE: Accel +$([Math]::Round($this.Acceleration, 1))% (Exponential)"
+                Threshold = [Math]::Round($this.SpikeThreshold, 1)
+                Acceleration = [Math]::Round($this.Acceleration, 1)
+                TrendType = $this.TrendType
+                ThresholdZone = $thresholdInfo.Zone
+                ThresholdIcon = $thresholdInfo.Icon
+                ThresholdReason = $thresholdInfo.Reason
+            }
+        }
+        # 6. Sprawdz SPIKE (nagly skok)
+        $spikeResult = $this.CheckSpike()
+        if ($spikeResult) {
+            $this.RecordAppSpike($activeApp)
+            $boostLevel = $this.GetBoostLevel()  # v39: moze byc EXTREME
+            return @{
+                RAM = [int]$this.CurrentRAM
+                Delta = [Math]::Round($this.Delta, 1)
+                Spike = $true
+                Trend = $false
+                PreBoost = $false
+                BoostNeeded = $boostLevel
+                Reason = " SPIKE: +$([Math]::Round($this.Delta, 1))% (prog: $([Math]::Round($this.SpikeThreshold, 1))%)"
+                Threshold = [Math]::Round($this.SpikeThreshold, 1)
+                Acceleration = [Math]::Round($this.Acceleration, 1)
+                TrendType = $this.TrendType
+                ThresholdZone = $thresholdInfo.Zone
+                ThresholdIcon = $thresholdInfo.Icon
+                ThresholdReason = $thresholdInfo.Reason
+            }
+        }
+        # 7. Sprawdz TREND (powolny wzrost)
+        $trendResult = $this.CheckTrend()
+        if ($trendResult) {
+            $this.RecordAppSpike($activeApp)
+            return @{
+                RAM = [int]$this.CurrentRAM
+                Delta = [Math]::Round($this.Delta, 1)
+                Spike = $false
+                Trend = $true
+                PreBoost = $false
+                BoostNeeded = "Balanced"  # Trend = lagodniejszy boost
+                Reason = " TREND: +$([Math]::Round($this.TrendSum, 1))% w $($this.ConsecutiveRises) probkach"
+                Threshold = [Math]::Round($this.SpikeThreshold, 1)
+                Acceleration = [Math]::Round($this.Acceleration, 1)
+                TrendType = $this.TrendType
+                ThresholdZone = $thresholdInfo.Zone
+                ThresholdIcon = $thresholdInfo.Icon
+                ThresholdReason = $thresholdInfo.Reason
+            }
+        }
+        # 8. Brak potrzeby boost'a
+        return @{
+            RAM = [int]$this.CurrentRAM
+            Delta = [Math]::Round($this.Delta, 1)
+            Spike = $false
+            Trend = $false
+            PreBoost = $false
+            BoostNeeded = "None"
+            Reason = ""
+            Threshold = [Math]::Round($this.SpikeThreshold, 1)
+            Acceleration = [Math]::Round($this.Acceleration, 1)
+            TrendType = $this.TrendType
+            ThresholdZone = $thresholdInfo.Zone
+            ThresholdIcon = $thresholdInfo.Icon
+            ThresholdReason = $thresholdInfo.Reason
+        }
+    }
+    # #
+    # ODCZYT RAM Z SYSTEMU
+    # #
+    [double] GetSystemRAM() {
+        try {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -Property FreePhysicalMemory, TotalVisibleMemorySize
+            $totalKB = $os.TotalVisibleMemorySize
+            $freeKB = $os.FreePhysicalMemory
+            $usedKB = $totalKB - $freeKB
+            $usedPercent = ($usedKB / $totalKB) * 100
+            return [Math]::Round($usedPercent, 1)
+        } catch {
+            return $this.CurrentRAM  # Zwroc poprzednia wartosc przy bledzie
+        }
+    }
+    # #
+    # AKTUALIZACJA HISTORII
+    # #
+    [void] UpdateHistory() {
+        # Dodaj do historii RAM
+        $this.RAMHistory.Add($this.CurrentRAM)
+        if ($this.RAMHistory.Count -gt $this.HistorySize) {
+            $this.RAMHistory.RemoveAt(0)
+        }
+        # Dodaj do historii delt (tylko jesli mamy poprzednia probke)
+        if ($this.PreviousRAM -gt 0) {
+            $this.DeltaHistory.Add($this.Delta)
+            if ($this.DeltaHistory.Count -gt $this.HistorySize) {
+                $this.DeltaHistory.RemoveAt(0)
+            }
+        }
+    }
+    # #
+    # STATYSTYKI ADAPTACYJNE
+    # #
+    [void] UpdateAdaptiveStats() {
+        if ($this.DeltaHistory.Count -lt 5) { return }  # Za malo danych
+        # Oblicz srednia delte
+        $sum = 0.0
+        foreach ($d in $this.DeltaHistory) { $sum += [Math]::Abs($d) }
+        $this.AvgDelta = $sum / $this.DeltaHistory.Count
+        # Oblicz odchylenie standardowe
+        $sumSq = 0.0
+        foreach ($d in $this.DeltaHistory) {
+            $diff = [Math]::Abs($d) - $this.AvgDelta
+            $sumSq += ($diff * $diff)
+        }
+        $this.StdDevDelta = [Math]::Sqrt($sumSq / $this.DeltaHistory.Count)
+        # Oblicz adaptacyjny prog spike'a
+        # Prog = srednia + (2 x odchylenie), minimum MinSpikeThreshold
+        $calculatedThreshold = $this.AvgDelta + (2.0 * $this.StdDevDelta)
+        $this.SpikeThreshold = [Math]::Max($this.MinSpikeThreshold, $calculatedThreshold)
+    }
+    # #
+    # WYKRYWANIE SPIKE'A
+    # #
+    [bool] CheckSpike() {
+        # Czy delta przekracza prog?
+        if ($this.Delta -gt $this.SpikeThreshold) {
+            # Sprawdz cooldown (anty-spam)
+            $timeSinceLastBoost = ([datetime]::Now - $this.LastBoostTime).TotalSeconds
+            if ($timeSinceLastBoost -lt $this.BoostCooldown) {
+                return $false
+            }
+            $this.SpikeDetected = $true
+            $this.TotalSpikesDetected++
+            $this.LastBoostTime = [datetime]::Now
+            $this.BoostReason = "SPIKE +$([Math]::Round($this.Delta, 1))%"
+            # Reset trendu (spike ma priorytet)
+            $this.ConsecutiveRises = 0
+            $this.TrendSum = 0
+            return $true
+        }
+        return $false
+    }
+    # #
+    # WYKRYWANIE TRENDU
+    # #
+    [bool] CheckTrend() {
+        # Czy RAM rosnie? V38: Obnizono prog z 0.5% do 0.3%
+        if ($this.Delta -gt 0.3) {  # Minimalny wzrost 0.3%
+            $this.ConsecutiveRises++
+            $this.TrendSum += $this.Delta
+        } else {
+            # Reset jesli nie rosnie
+            $this.ConsecutiveRises = 0
+            $this.TrendSum = 0
+            return $false
+        }
+        # Czy mamy trend?
+        if ($this.ConsecutiveRises -ge $this.TrendThresholdCount -and $this.TrendSum -ge $this.TrendThresholdSum) {
+            # Sprawdz cooldown
+            $timeSinceLastBoost = ([datetime]::Now - $this.LastBoostTime).TotalSeconds
+            if ($timeSinceLastBoost -lt $this.BoostCooldown) {
+                return $false
+            }
+            $this.TrendDetected = $true
+            $this.TotalTrendsDetected++
+            $this.LastBoostTime = [datetime]::Now
+            $this.BoostReason = "TREND +$([Math]::Round($this.TrendSum, 1))%"
+            # Reset po wykryciu
+            $this.ConsecutiveRises = 0
+            $this.TrendSum = 0
+            return $true
+        }
+        return $false
+    }
+    # #
+    # UCZENIE SIE APLIKACJI
+    # #
+    [void] RecordAppSpike([string]$app) {
+        if ([string]::IsNullOrWhiteSpace($app)) { return }
+        # Wyciagnij nazwe exe (bez sciezki)
+        $appName = [System.IO.Path]::GetFileName($app)
+        if ([string]::IsNullOrWhiteSpace($appName)) { $appName = $app }
+        if (-not $this.AppPatterns.ContainsKey($appName)) {
+            $this.AppPatterns[$appName] = @{
+                BoostCount = 0
+                TotalSeen = 0
+                TotalSpike = 0.0
+                AvgSpike = 0.0
+                NeedsBoost = $false
+            }
+        }
+        $pattern = $this.AppPatterns[$appName]
+        $pattern.BoostCount++
+        $pattern.TotalSeen++
+        $pattern.TotalSpike += [Math]::Abs($this.Delta)
+        $pattern.AvgSpike = $pattern.TotalSpike / $pattern.BoostCount
+        # Czy app "potrzebuje boost'a"?
+        # Jesli >60% obserwacji to spike/trend -> NeedsBoost = true
+        if ($pattern.TotalSeen -ge $this.LearningThreshold) {
+            $boostRatio = $pattern.BoostCount / $pattern.TotalSeen
+            $pattern.NeedsBoost = ($boostRatio -gt 0.6)
+        }
+    }
+    [void] RecordAppNormal([string]$app) {
+        if ([string]::IsNullOrWhiteSpace($app)) { return }
+        $appName = [System.IO.Path]::GetFileName($app)
+        if ([string]::IsNullOrWhiteSpace($appName)) { $appName = $app }
+        if ($this.AppPatterns.ContainsKey($appName)) {
+            $this.AppPatterns[$appName].TotalSeen++
+            # Przelicz czy nadal NeedsBoost
+            $pattern = $this.AppPatterns[$appName]
+            if ($pattern.TotalSeen -ge $this.LearningThreshold) {
+                $boostRatio = $pattern.BoostCount / $pattern.TotalSeen
+                $pattern.NeedsBoost = ($boostRatio -gt 0.6)
+            }
+        }
+    }
+    # #
+    # PRE-BOOST (dla nauczonych aplikacji)
+    # #
+    [bool] CheckPreBoost([string]$app) {
+        if ([string]::IsNullOrWhiteSpace($app)) { return $false }
+        $appName = [System.IO.Path]::GetFileName($app)
+        if ([string]::IsNullOrWhiteSpace($appName)) { return $false }
+        if ($this.AppPatterns.ContainsKey($appName)) {
+            $pattern = $this.AppPatterns[$appName]
+            # Czy app wymaga pre-boost I czy RAM jeszcze nie skoczyl znaczaco?
+            if ($pattern.NeedsBoost -and $this.Delta -lt 3) {
+                # Sprawdz cooldown
+                $timeSinceLastBoost = ([datetime]::Now - $this.LastBoostTime).TotalSeconds
+                if ($timeSinceLastBoost -lt $this.BoostCooldown * 2) {  # Dluzszy cooldown dla pre-boost
+                    return $false
+                }
+                $this.TotalPreBoosts++
+                $this.LastBoostTime = [datetime]::Now
+                return $true
+            }
+        }
+        return $false
+    }
+    # #
+    # POMOCNICZE
+    # #
+    [string] GetStatus() {
+        return "RAM:$([int]$this.CurrentRAM)% D:$([Math]::Round($this.Delta,1)) T:$([Math]::Round($this.SpikeThreshold,1)) Spk:$($this.TotalSpikesDetected)"
+    }
+    [int] GetLearnedAppsCount() {
+        return $this.AppPatterns.Count
+    }
+    [int] GetAppsNeedingBoostCount() {
+        $count = 0
+        foreach ($app in $this.AppPatterns.Keys) {
+            if ($this.AppPatterns[$app].NeedsBoost) { $count++ }
+        }
+        return $count
+    }
+    [string[]] GetLearnedApps() {
+        $apps = @()
+        foreach ($app in $this.AppPatterns.Keys) {
+            if ($this.AppPatterns[$app].NeedsBoost) {
+                $apps += $app
+            }
+        }
+        return $apps
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $path = Join-Path $dir "RAMAnalyzer.json"
+            $data = @{
+                AppPatterns = $this.AppPatterns
+                TotalSpikesDetected = $this.TotalSpikesDetected
+                TotalTrendsDetected = $this.TotalTrendsDetected
+                TotalPreBoosts = $this.TotalPreBoosts
+                AvgDelta = $this.AvgDelta
+                StdDevDelta = $this.StdDevDelta
+            }
+            [System.IO.File]::WriteAllText($path, ($data | ConvertTo-Json -Depth 4 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "RAMAnalyzer.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.TotalSpikesDetected) { $this.TotalSpikesDetected = $data.TotalSpikesDetected }
+                if ($data.TotalTrendsDetected) { $this.TotalTrendsDetected = $data.TotalTrendsDetected }
+                if ($data.TotalPreBoosts) { $this.TotalPreBoosts = $data.TotalPreBoosts }
+                if ($data.AvgDelta) { $this.AvgDelta = $data.AvgDelta }
+                if ($data.StdDevDelta) { $this.StdDevDelta = $data.StdDevDelta }
+                # Odtworz AppPatterns
+                if ($data.AppPatterns) {
+                    $data.AppPatterns.PSObject.Properties | ForEach-Object {
+                        $this.AppPatterns[$_.Name] = @{
+                            BoostCount = $_.Value.BoostCount
+                            TotalSeen = $_.Value.TotalSeen
+                            TotalSpike = $_.Value.TotalSpike
+                            AvgSpike = $_.Value.AvgSpike
+                            NeedsBoost = $_.Value.NeedsBoost
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+    # #
+    # #
+    [void] DetectTrendType() {
+        if ($this.AccelerationHistory.Count -lt 3) {
+            $this.TrendType = "NONE"
+            return
+        }
+        # Wez ostatnie 3 wartosci acceleration
+        $recentCount = [Math]::Min(3, $this.AccelerationHistory.Count)
+        $recent = $this.AccelerationHistory.GetRange(
+            $this.AccelerationHistory.Count - $recentCount, 
+            $recentCount
+        )
+        # Oblicz srednia acceleration
+        $avgAccel = 0.0
+        foreach ($a in $recent) { $avgAccel += $a }
+        $avgAccel = $avgAccel / $recent.Count
+        # KLASYFIKACJA TRENDU:
+        if ($avgAccel -gt $this.AccelerationThreshold) {
+            # Przyspieszenie rosnie -> EKSPONENCJALNY
+            $this.TrendType = "EXPONENTIAL"
+            $this.ExponentialStreak++
+        } elseif ($avgAccel -lt -2.0) {
+            # Przyspieszenie maleje -> DECELERATION (stabilizacja)
+            $this.TrendType = "DECEL"
+            $this.ExponentialStreak = 0
+        } elseif ($this.Delta -gt 1.0 -and [Math]::Abs($avgAccel) -lt 1.0) {
+            # Delta dodatnia, ale przyspieszenie ~0 -> LINIOWY
+            $this.TrendType = "LINEAR"
+            $this.ExponentialStreak = 0
+        } else {
+            $this.TrendType = "NONE"
+            $this.ExponentialStreak = 0
+        }
+    }
+    # #
+    # #
+    [bool] CheckEarlySpike() {
+        # NOWY: Wykryj spike WCZESNIEJ przy wysokim acceleration
+        if ($this.Acceleration -gt $this.AccelerationThreshold -and 
+            $this.ExponentialStreak -ge 2) {
+            # Sprawdz cooldown
+            $timeSinceLastBoost = ([datetime]::Now - $this.LastBoostTime).TotalSeconds
+            if ($timeSinceLastBoost -lt $this.BoostCooldown) {
+                return $false
+            }
+            $this.SpikeDetected = $true
+            $this.LastBoostTime = [datetime]::Now
+            $this.BoostReason = "EARLY SPIKE (Accel: +$([Math]::Round($this.Acceleration, 1))%)"
+            return $true
+        }
+        return $false
+    }
+    # #
+    # #
+    [string] GetBoostLevel() {
+        switch ($this.TrendType) {
+            "EXPONENTIAL" {
+                # Bardzo szybkie przyspieszenie -> EXTREME
+                if ($this.Acceleration -gt 5.0) {
+                    return "EXTREME"
+                } else {
+                    return "TURBO"
+                }
+            }
+            "LINEAR" {
+                # Staly wzrost -> BALANCED
+                return "BALANCED"
+            }
+            "DECEL" {
+                # Zwalnianie -> lagodny lub brak
+                if ($this.Delta -gt 5.0) {
+                    return "BALANCED"
+                } else {
+                    return "NONE"
+                }
+            }
+            default {
+                # Brak trendu
+                if ($this.Delta -gt $this.SpikeThreshold) {
+                    return "TURBO"
+                } else {
+                    return "NONE"
+                }
+            }
+        }
+        # Fallback (nigdy nie powinno sie tu dotrzec)
+        return "NONE"
+    }
+}
+#  AI COORDINATOR - Lightweight Engine Manager & Knowledge Transfer
+# Odpowiedzialnosci:
+# 1. Decyduje ktory silnik AI powinien byc aktywny (na podstawie obciazenia)
+# 2. Zarzadza transferem wiedzy miedzy silnikami
+# 3. QLearning zawsze dziala w tle jako "kregoslup"
+# 4. Wydaje INTENCJE - nie manipuluje CPU bezposrednio
+class AICoordinator {
+    # Stan koordynatora
+    [string] $ActiveEngine              # Aktualnie uzywany silnik decyzyjny
+    [string] $PreviousEngine            # Poprzedni silnik (do logowania zmian)
+    [bool] $NeuralBrainEnabled          # Czy NeuralBrain wlaczony przez uzytkownika
+    [bool] $EnsembleEnabled             # Czy Ensemble wlaczony przez uzytkownika
+    # Metryki obciazenia
+    [double] $CurrentCPU                # Aktualne obciazenie CPU
+    [double] $CurrentTemp               # Aktualna temperatura
+    [double] $AvgCPU                    # Srednie CPU (rolling)
+    [int] $HighLoadCount                # Ile razy z rzedu wysokie obciazenie
+    [int] $LowLoadCount                 # Ile razy z rzedu niskie obciazenie
+    # Transfer wiedzy
+    [datetime] $LastTransferTime        # Kiedy ostatni transfer
+    [int] $TransferCount                # Ile transferow wykonano
+    [int] $MinTransferInterval          # Minimalny czas miedzy transferami (sekundy)
+    [int] $QLearningUpdatesThreshold    # Po ilu updatech QLearning transferowac
+    # Statystyki
+    [hashtable] $EngineUsageTime        # Ile czasu kazdy silnik byl aktywny
+    [hashtable] $EngineDecisionCount    # Ile decyzji podjal kazdy silnik
+    [System.Collections.Generic.List[string]] $ActivityLog  # Log aktywnosci
+    # v43.14: Adaptive weights
+    [hashtable] $AdaptiveWeights        # Per-engine accuracy multiplier (0.5-1.5)
+    [hashtable] $LastModelScores        # Scores z poprzedniej iteracji (do nagradzania)
+    [string] $LastDecidedMode           # Tryb wybrany w poprzedniej iteracji
+    AICoordinator() {
+        $this.ActiveEngine = "QLearning"
+        $this.PreviousEngine = "QLearning"
+        # Beda synchronizowane ze skryptem przez SetNeuralBrainEnabled/SetEnsembleEnabled
+        $this.NeuralBrainEnabled = $false
+        $this.EnsembleEnabled = $false
+        $this.CurrentCPU = 0
+        $this.CurrentTemp = 0
+        $this.AvgCPU = 30
+        $this.HighLoadCount = 0
+        $this.LowLoadCount = 0
+        $this.LastTransferTime = [datetime]::Now
+        $this.TransferCount = 0
+        $this.MinTransferInterval = 300  # 5 minut minimum miedzy transferami
+        $this.QLearningUpdatesThreshold = 50  # Transfer po 50 updatech QLearning
+        $this.EngineUsageTime = @{
+            "QLearning" = 0
+            "NeuralBrain" = 0
+            "Ensemble" = 0
+            "Hybrid" = 0  # QLearning + NeuralBrain
+        }
+        $this.EngineDecisionCount = @{
+            "QLearning" = 0
+            "NeuralBrain" = 0
+            "Ensemble" = 0
+            "Hybrid" = 0
+        }
+        $this.ActivityLog = [System.Collections.Generic.List[string]]::new()
+    }
+    # #
+    # GLOWNA METODA: Wybierz optymalny silnik na podstawie warunkow
+    # #
+    [string] DecideActiveEngine([double]$cpu, [double]$temp, [string]$context, [int]$qLearningUpdates) {
+        $this.CurrentCPU = $cpu
+        $this.CurrentTemp = $temp
+        # Rolling average CPU (wygladzanie)
+        $this.AvgCPU = ($this.AvgCPU * 0.8) + ($cpu * 0.2)
+        # Zliczaj okresy wysokiego/niskiego obciazenia
+        if ($cpu -gt 70) {
+            $this.HighLoadCount++
+            $this.LowLoadCount = 0
+        } elseif ($cpu -lt 25) {
+            $this.LowLoadCount++
+            $this.HighLoadCount = 0
+        } else {
+            # Srednie obciazenie - powolny reset
+            $this.HighLoadCount = [Math]::Max(0, $this.HighLoadCount - 1)
+            $this.LowLoadCount = [Math]::Max(0, $this.LowLoadCount - 1)
+        }
+        $newEngine = $this.ActiveEngine
+        $reason = ""
+        # ??- LOGIKA WYBORU SILNIKA ???
+        # PRIORYTET 1: Bardzo wysokie obciazenie (>85%) lub temperatura (>90°C)
+        # -> Tylko QLearning (najlzejszy)
+        if ($cpu -gt 85 -or $temp -gt 90 -or $this.HighLoadCount -gt 10) {
+            $newEngine = "QLearning"
+            $reason = "Critical load (CPU:$([int]$cpu)% Temp:$([int]$temp)C) - lightweight mode"
+        }
+        # PRIORYTET 2: Wysokie obciazenie (>70%) przez dluzszy czas
+        # -> QLearning + NeuralBrain (bez Ensemble - najciezszy)
+        elseif ($cpu -gt 70 -or $this.HighLoadCount -gt 5) {
+            if ($this.NeuralBrainEnabled) {
+                $newEngine = "Hybrid"  # QLearning + NeuralBrain
+                $reason = "High load ($([int]$cpu)%) - Hybrid mode (no Ensemble)"
+            } else {
+                $newEngine = "QLearning"
+                $reason = "High load ($([int]$cpu)%) - QLearning only"
+            }
+        }
+        # PRIORYTET 3: Srednie obciazenie (25-70%)
+        # -> Pelna moc AI jesli wlaczone
+        elseif ($cpu -ge 25 -and $cpu -le 70) {
+            if ($this.EnsembleEnabled) {
+                $newEngine = "Ensemble"
+                $reason = "Normal load ($([int]$cpu)%) - Ensemble voting"
+            } elseif ($this.NeuralBrainEnabled) {
+                $newEngine = "NeuralBrain"
+                $reason = "Normal load ($([int]$cpu)%) - NeuralBrain active"
+            } else {
+                $newEngine = "QLearning"
+                $reason = "Normal load ($([int]$cpu)%) - QLearning (others disabled)"
+            }
+        }
+        # PRIORYTET 4: Niskie obciazenie (<25%)
+        # -> Mozna uzyc pelnej mocy AI (system ma zasoby)
+        else {
+            if ($this.EnsembleEnabled) {
+                $newEngine = "Ensemble"
+                $reason = "Low load ($([int]$cpu)%) - Ensemble voting available"
+            } elseif ($this.NeuralBrainEnabled) {
+                $newEngine = "NeuralBrain"
+                $reason = "Low load ($([int]$cpu)%) - NeuralBrain active"
+            } else {
+                $newEngine = "QLearning"
+                $reason = "Low load ($([int]$cpu)%) - QLearning only"
+            }
+        }
+        # Specjalny kontekst: Gaming/Rendering -> preferuj szybsze decyzje
+        if ($context -eq "Gaming" -or $context -eq "Rendering") {
+            if ($newEngine -eq "Ensemble" -and $cpu -gt 50) {
+                $newEngine = "Hybrid"
+                $reason = "$context context - faster decisions (Hybrid)"
+            }
+        }
+        # Loguj zmiane silnika
+        if ($newEngine -ne $this.ActiveEngine) {
+            $this.LogActivity(" Engine switch: $($this.ActiveEngine) -> $newEngine | $reason")
+            $this.PreviousEngine = $this.ActiveEngine
+        }
+        # Aktualizuj statystyki
+        $this.ActiveEngine = $newEngine
+        $this.EngineDecisionCount[$newEngine]++
+        return $newEngine
+    }
+    # #
+    # TRANSFER WIEDZY: QLearning -> NeuralBrain/Ensemble
+    # #
+    [bool] ShouldTransferKnowledge([int]$qLearningUpdates) {
+        # Warunki transferu:
+        # 1. Minal minimalny czas od ostatniego transferu
+        # 2. QLearning zebral wystarczajaco duzo nowych danych
+        # 3. System nie jest przeciazony
+        $timeSinceLastTransfer = ([datetime]::Now - $this.LastTransferTime).TotalSeconds
+        if ($timeSinceLastTransfer -lt $this.MinTransferInterval) {
+            return $false
+        }
+        if ($qLearningUpdates -lt $this.QLearningUpdatesThreshold) {
+            return $false
+        }
+        #  SYNC: uses variables z config.json
+        if ($this.CurrentCPU -gt $Script:TurboThreshold) {
+            return $false  # Nie transferuj przy wysokim obciazeniu
+        }
+        return $true
+    }
+    [hashtable] TransferFromQLearning($qLearning) {
+        # Wyciagnij najistotniejsze dane z QLearning
+        $transferData = @{
+            # Preferencje trybow dla roznych stanow CPU
+            ModePreferences = @{
+                "HighCPU" = "Turbo"      # Default
+                "MediumCPU" = "Balanced"
+                "LowCPU" = "Silent"
+            }
+            # Skutecznosc trybow (z Q-values)
+            ModeEffectiveness = @{
+                "Turbo" = 0.5
+                "Balanced" = 0.5
+                "Silent" = 0.5
+            }
+            # Konteksty nauczone
+            ContextPatterns = @{}
+            # Timestamp
+            TransferTime = [datetime]::Now
+            UpdateCount = 0
+        }
+        if ($null -eq $qLearning -or $null -eq $qLearning.QTable) {
+            return $transferData
+        }
+        $transferData.UpdateCount = $qLearning.TotalUpdates
+        # Analizuj Q-Table aby wyciagnac preferencje
+        $turboSum = 0.0; $balancedSum = 0.0; $silentSum = 0.0
+        $turboCount = 0; $balancedCount = 0; $silentCount = 0
+        foreach ($state in $qLearning.QTable.Keys) {
+            $qValues = $qLearning.QTable[$state]
+            if ($null -eq $qValues) { continue }
+            # Sumuj Q-values dla kazdego trybu
+            if ($qValues.ContainsKey("Turbo")) { $turboSum += $qValues["Turbo"]; $turboCount++ }
+            if ($qValues.ContainsKey("Balanced")) { $balancedSum += $qValues["Balanced"]; $balancedCount++ }
+            if ($qValues.ContainsKey("Silent")) { $silentSum += $qValues["Silent"]; $silentCount++ }
+            # Wyciagnij kontekst ze stanu (format: C0-T0-A0-X0)
+            if ($state -match "C(\d)-.*-X(\d)") {
+                $cpuBin = [int]$matches[1]
+                $ctxBin = [int]$matches[2]
+                # Znajdz najlepszy tryb dla tego stanu
+                $bestMode = "Balanced"
+                $bestQ = $qValues["Balanced"]
+                if ($qValues["Turbo"] -gt $bestQ) { $bestMode = "Turbo"; $bestQ = $qValues["Turbo"] }
+                if ($qValues["Silent"] -gt $bestQ) { $bestMode = "Silent" }
+                # Zapisz wzorzec kontekstowy
+                $ctxName = switch ($ctxBin) { 0 { "Idle" } 1 { "Work" } 2 { "Heavy" } default { "Unknown" } }
+                $cpuRange = switch ($cpuBin) { 0 { "0-20%" } 1 { "20-40%" } 2 { "40-60%" } 3 { "60-80%" } 4 { "80-100%" } default { "?" } }
+                $key = "$ctxName-$cpuRange"
+                $transferData.ContextPatterns[$key] = $bestMode
+            }
+        }
+        # Oblicz srednia skutecznosc trybow (znormalizowana 0-1)
+        if ($turboCount -gt 0) { 
+            $avg = $turboSum / $turboCount
+            $transferData.ModeEffectiveness["Turbo"] = [Math]::Max(0, [Math]::Min(1, ($avg + 5) / 10))
+        }
+        if ($balancedCount -gt 0) { 
+            $avg = $balancedSum / $balancedCount
+            $transferData.ModeEffectiveness["Balanced"] = [Math]::Max(0, [Math]::Min(1, ($avg + 5) / 10))
+        }
+        if ($silentCount -gt 0) { 
+            $avg = $silentSum / $silentCount
+            $transferData.ModeEffectiveness["Silent"] = [Math]::Max(0, [Math]::Min(1, ($avg + 5) / 10))
+        }
+        # Ustal preferencje na podstawie danych
+        $best = $transferData.ModeEffectiveness.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1
+        $transferData.ModePreferences["Default"] = $best.Key
+        $this.LastTransferTime = [datetime]::Now
+        $this.TransferCount++
+        $this.LogActivity(" Knowledge transfer #$($this.TransferCount): QLearning -> AI ($($transferData.ContextPatterns.Count) patterns)")
+        return $transferData
+    }
+    # Aplikuj wiedze do NeuralBrain
+    [void] ApplyToNeuralBrain($brain, [hashtable]$transferData) {
+        if ($null -eq $brain -or $null -eq $transferData) { return }
+        try {
+            # Dostosuj wagi NeuralBrain na podstawie skutecznosci trybow
+            foreach ($mode in $transferData.ModeEffectiveness.Keys) {
+                $effectiveness = $transferData.ModeEffectiveness[$mode]
+                # Delikatna korekta wag (nie nadpisuj calkowicie)
+                if ($brain.Weights.ContainsKey($mode)) {
+                    $currentWeight = $brain.Weights[$mode]
+                    $brain.Weights[$mode] = ($currentWeight * 0.7) + ($effectiveness * 100 * 0.3)
+                }
+            }
+            $this.LogActivity(" NeuralBrain updated with QLearning knowledge")
+        } catch {
+            $this.LogActivity("[WARN] Failed to apply knowledge to NeuralBrain")
+        }
+    }
+    # Aplikuj wiedze do Ensemble
+    [void] ApplyToEnsemble($ensemble, [hashtable]$transferData) {
+        if ($null -eq $ensemble -or $null -eq $transferData) { return }
+        try {
+            # Dostosuj accuracy modeli na podstawie skutecznosci
+            foreach ($mode in $transferData.ModeEffectiveness.Keys) {
+                $effectiveness = $transferData.ModeEffectiveness[$mode]
+                # Ensemble accuracy to jak dobrze model przewiduje
+                # QLearning pokazuje ktore tryby dzialaja najlepiej
+                if ($ensemble.Accuracy.ContainsKey("QLearning")) {
+                    $ensemble.Accuracy["QLearning"] = [Math]::Max($ensemble.Accuracy["QLearning"], $effectiveness)
+                }
+            }
+            # Zwieksz wage QLearning w Ensemble jesli zbiera dobre dane
+            if ($ensemble.Weights.ContainsKey("QLearning")) {
+                $avgEffectiveness = ($transferData.ModeEffectiveness.Values | Measure-Object -Average).Average
+                if ($avgEffectiveness -gt 0.6) {
+                    $ensemble.Weights["QLearning"] = [Math]::Min(1.5, $ensemble.Weights["QLearning"] + 0.1)
+                }
+            }
+            $this.LogActivity(" Ensemble updated with QLearning accuracy data")
+        } catch {
+            $this.LogActivity("[WARN] Failed to apply knowledge to Ensemble")
+        }
+    }
+    # #
+    # ZARZADZANIE STANEM SILNIKOW (wlaczanie/wylaczanie przez uzytkownika)
+    # #
+    [void] SetNeuralBrainEnabled([bool]$enabled) {
+        if ($this.NeuralBrainEnabled -ne $enabled) {
+            $this.NeuralBrainEnabled = $enabled
+            $status = if ($enabled) { "ENABLED" } else { "DISABLED" }
+            $this.LogActivity(" NeuralBrain $status by user")
+            # Jesli wylaczono, przelacz na QLearning
+            if (-not $enabled -and $this.ActiveEngine -eq "NeuralBrain") {
+                $this.ActiveEngine = "QLearning"
+                $this.LogActivity(" Switched to QLearning (NeuralBrain disabled)")
+            }
+        }
+    }
+    [void] SetEnsembleEnabled([bool]$enabled) {
+        if ($this.EnsembleEnabled -ne $enabled) {
+            $this.EnsembleEnabled = $enabled
+            $status = if ($enabled) { "ENABLED" } else { "DISABLED" }
+            $this.LogActivity(" Ensemble $status by user")
+            # Jesli wylaczono, przelacz na nizszy poziom
+            if (-not $enabled -and $this.ActiveEngine -eq "Ensemble") {
+                if ($this.NeuralBrainEnabled) {
+                    $this.ActiveEngine = "NeuralBrain"
+                } else {
+                    $this.ActiveEngine = "QLearning"
+                }
+                $this.LogActivity(" Switched to $($this.ActiveEngine) (Ensemble disabled)")
+            }
+        }
+    }
+    # #
+    # POMOCNICZE
+    # #
+    [void] LogActivity([string]$message) {
+        $timestamp = (Get-Date).ToString("HH:mm:ss")
+        $logEntry = "[$timestamp] $message"
+        # Dodaj do wewnetrznego logu (max 50 wpisow)
+        $this.ActivityLog.Add($logEntry)
+        if ($this.ActivityLog.Count -gt 50) {
+            $this.ActivityLog.RemoveAt(0)
+        }
+    }
+    [string] GetStatus() {
+        $brainStatus = if ($this.NeuralBrainEnabled) { "ON" } else { "OFF" }
+        $ensembleStatus = if ($this.EnsembleEnabled) { "ON" } else { "OFF" }
+        return "Engine:$($this.ActiveEngine) | Brain:$brainStatus Ensemble:$ensembleStatus | Transfers:$($this.TransferCount)"
+    }
+    [string] GetActiveEngineName() {
+        return $this.ActiveEngine
+    }
+    [hashtable] GetEngineStats() {
+        return @{
+            ActiveEngine = $this.ActiveEngine
+            NeuralBrainEnabled = $this.NeuralBrainEnabled
+            EnsembleEnabled = $this.EnsembleEnabled
+            TransferCount = $this.TransferCount
+            AvgCPU = [Math]::Round($this.AvgCPU, 1)
+            HighLoadCount = $this.HighLoadCount
+            DecisionCounts = $this.EngineDecisionCount
+        }
+    }
+    # #
+    # NOWE V37.7.5: SAVE TRANSFER STATE - Zawsze zapisuj transfer
+    # #
+    [void] SaveTransferState([hashtable]$transferData, [string]$dir) {
+        <#
+        Zapisuje dane transferu do JSON ZAWSZE, niezaleznie czy Advanced engines ON
+        Gdy sie wlacza - czytaja ze stanu i maja dostep do wszystkich danych
+        #>
+        try {
+            if (-not $transferData) { return }
+            # Zapisz ostatni transfer do cache
+            $cacheFile = Join-Path $dir "TransferCache.json"
+            $cacheData = @{
+                Timestamp = (Get-Date).ToString("o")
+                ModePreferences = $transferData.ModePreferences
+                ModeEffectiveness = $transferData.ModeEffectiveness
+                ContextPatterns = $transferData.ContextPatterns
+                AppPatterns = $transferData.AppPatterns
+            }
+            [System.IO.File]::WriteAllText($cacheFile, ($cacheData | ConvertTo-Json -Depth 3 -Compress), [System.Text.Encoding]::UTF8)
+            # Zaktualizuj EnsembleWeights.json niezaleznie od statusu
+            $ensemblePath = Join-Path $dir "EnsembleWeights.json"
+            if (Test-Path $ensemblePath) {
+                try {
+                    $existingEnsemble = [System.IO.File]::ReadAllText($ensemblePath) | ConvertFrom-Json
+                    # Zaktualizuj accuracy na podstawie transferu
+                    foreach ($mode in $transferData.ModeEffectiveness.Keys) {
+                        $effectiveness = $transferData.ModeEffectiveness[$mode]
+                        if (-not $existingEnsemble.Accuracy) { $existingEnsemble | Add-Member -Name Accuracy -Value @{} -MemberType NoteProperty }
+                        $existingEnsemble.Accuracy[$mode] = [Math]::Max($existingEnsemble.Accuracy[$mode], $effectiveness)
+                    }
+                    [System.IO.File]::WriteAllText($ensemblePath, ($existingEnsemble | ConvertTo-Json -Depth 3 -Compress), [System.Text.Encoding]::UTF8)
+                } catch { }
+            }
+            # Zaktualizuj BrainState.json niezaleznie od statusu
+            $brainPath = Join-Path $dir "BrainState.json"
+            if (Test-Path $brainPath) {
+                try {
+                    $existingBrain = [System.IO.File]::ReadAllText($brainPath) | ConvertFrom-Json
+                    # Zaktualizuj weights na podstawie transferu
+                    if (-not $existingBrain.Weights) { $existingBrain | Add-Member -Name Weights -Value @{} -MemberType NoteProperty }
+                    foreach ($mode in $transferData.ModeEffectiveness.Keys) {
+                        $effectiveness = $transferData.ModeEffectiveness[$mode]
+                        $existingBrain.Weights[$mode] = ($existingBrain.Weights[$mode] * 0.7) + ($effectiveness * 100 * 0.3)
+                    }
+                    [System.IO.File]::WriteAllText($brainPath, ($existingBrain | ConvertTo-Json -Depth 3 -Compress), [System.Text.Encoding]::UTF8)
+                } catch { }
+            }
+            $this.LogActivity(" Transfer state saved (cache + Ensemble + Brain)")
+        } catch { }
+    }
+    # #
+    # LOAD TRANSFER CACHE - Laduj ostatni transfer dla nowych engines
+    # #
+    [hashtable] LoadTransferCache([string]$dir) {
+        <#
+        Laduje ostatni transfer z cache - uzywane gdy Advanced engine sie wlacza
+        #>
+        try {
+            $cacheFile = Join-Path $dir "TransferCache.json"
+            if (Test-Path $cacheFile) {
+                $data = [System.IO.File]::ReadAllText($cacheFile) | ConvertFrom-Json
+                return @{
+                    ModePreferences = $data.ModePreferences
+                    ModeEffectiveness = $data.ModeEffectiveness
+                    ContextPatterns = $data.ContextPatterns
+                    AppPatterns = $data.AppPatterns
+                }
+            }
+        } catch { }
+        return @{ ModePreferences = @{}; ModeEffectiveness = @{} }
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $path = Join-Path $dir "AICoordinator.json"
+            $data = @{
+                ActiveEngine = $this.ActiveEngine
+                TransferCount = $this.TransferCount
+                EngineDecisionCount = $this.EngineDecisionCount
+                NeuralBrainEnabled = $this.NeuralBrainEnabled
+                EnsembleEnabled = $this.EnsembleEnabled
+                LastTransferTime = $this.LastTransferTime.ToString("o")
+                AvgCPU = [Math]::Round($this.AvgCPU, 1)
+            }
+            [System.IO.File]::WriteAllText($path, ($data | ConvertTo-Json -Depth 3 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "AICoordinator.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.ActiveEngine) { $this.ActiveEngine = $data.ActiveEngine }
+                if ($data.TransferCount) { $this.TransferCount = $data.TransferCount }
+                if ($data.NeuralBrainEnabled -ne $null) { $this.NeuralBrainEnabled = $data.NeuralBrainEnabled }
+                if ($data.EnsembleEnabled -ne $null) { $this.EnsembleEnabled = $data.EnsembleEnabled }
+                if ($data.AvgCPU) { $this.AvgCPU = $data.AvgCPU }
+                if ($data.LastTransferTime) { 
+                    try { $this.LastTransferTime = [datetime]::Parse($data.LastTransferTime) } catch { }
+                }
+                if ($data.EngineDecisionCount) {
+                    $data.EngineDecisionCount.PSObject.Properties | ForEach-Object {
+                        $this.EngineDecisionCount[$_.Name] = [int]$_.Value
+                    }
+                }
+            }
+        } catch { }
+    }
+    # ═══════════════════════════════════════════════════════════════════════════
+    # v43.8: EXTENDED KNOWLEDGE TRANSFER - integracja Prophet, GPUBound, Bandit, Genetic
+    # ═══════════════════════════════════════════════════════════════════════════
+    [void] IntegrateProphetData($prophet, [hashtable]$transferData) {
+        if ($null -eq $prophet -or $prophet.Apps.Count -eq 0) { return }
+        try {
+            if (-not $transferData.ContainsKey("ProphetProfiles")) {
+                $transferData.ProphetProfiles = @{}
+            }
+            $profileCount = 0
+            foreach ($appName in $prophet.Apps.Keys) {
+                $app = $prophet.Apps[$appName]
+                if ($app.ContainsKey('Samples') -and $app.Samples -ge 30) {
+                    $category = $app.Category -replace "^LEARNING_", ""
+                    $preferredMode = switch ($category) {
+                        "HEAVY" { "Turbo" }
+                        "MEDIUM" { "Balanced" }
+                        "LIGHT" { "Silent" }
+                        default { "Balanced" }
+                    }
+                    $transferData.ProphetProfiles[$appName] = @{
+                        Category = $category
+                        PreferredMode = $preferredMode
+                        Confidence = [Math]::Min(1.0, $app.Samples / 100.0)
+                        AvgCPU = $app.AvgCPU
+                    }
+                    $profileCount++
+                }
+            }
+            $this.LogActivity("   Prophet: $profileCount app profiles integrated")
+        } catch {
+            $this.LogActivity("[WARN] Prophet integration failed")
+        }
+    }
+    [void] IntegrateGPUBoundData($gpuBound, [hashtable]$transferData) {
+        if ($null -eq $gpuBound) { return }
+        try {
+            if (-not $transferData.ContainsKey("GPUBoundScenarios")) {
+                $transferData.GPUBoundScenarios = @{}
+            }
+            if ($gpuBound.IsConfident) {
+                $transferData.GPUBoundScenarios["Detected"] = @{
+                    IsActive = $true
+                    PreferredMode = "Balanced"
+                    Reason = "GPU-bound: CPU<50% + GPU>75% = nie Turbo"
+                    Confidence = $gpuBound.Confidence
+                }
+                $this.LogActivity("   GPU-Bound: scenario detected and integrated")
+            }
+        } catch {
+            $this.LogActivity("[WARN] GPU-Bound integration failed")
+        }
+    }
+    [void] IntegrateBanditData($bandit, [hashtable]$transferData) {
+        if ($null -eq $bandit -or $bandit.TotalPulls -lt 50) { return }
+        try {
+            if (-not $transferData.ContainsKey("BanditStats")) {
+                $transferData.BanditStats = @{}
+            }
+            foreach ($arm in $bandit.Arms.Keys) {
+                $successes = $bandit.Successes[$arm]
+                $failures = $bandit.Failures[$arm]
+                $total = $successes + $failures
+                if ($total -gt 10) {
+                    $successRate = $successes / $total
+                    $transferData.BanditStats[$arm] = @{
+                        SuccessRate = $successRate
+                        TotalPulls = $total
+                        Confidence = [Math]::Min(1.0, $total / 100.0)
+                    }
+                }
+            }
+            $this.LogActivity("   Bandit: Thompson Sampling stats integrated")
+        } catch {
+            $this.LogActivity("[WARN] Bandit integration failed")
+        }
+    }
+    [void] IntegrateGeneticData($genetic, [hashtable]$transferData) {
+        if ($null -eq $genetic -or $genetic.Generation -lt 10) { return }
+        try {
+            if (-not $transferData.ContainsKey("GeneticParams")) {
+                $transferData.GeneticParams = @{}
+            }
+            $bestParams = $genetic.GetCurrentParams()
+            if ($bestParams.TurboThreshold) {
+                $transferData.GeneticParams = @{
+                    TurboThreshold = $bestParams.TurboThreshold
+                    BalancedThreshold = $bestParams.BalancedThreshold
+                    Generation = $genetic.Generation
+                    Fitness = $genetic.BestFitness
+                }
+                $this.LogActivity("   Genetic: evolved thresholds integrated (gen $($genetic.Generation))")
+            }
+        } catch {
+            $this.LogActivity("[WARN] Genetic integration failed")
+        }
+    }
+    [void] ApplyEnrichedToEnsemble($ensemble, [hashtable]$transferData) {
+        if ($null -eq $ensemble) { return }
+        try {
+            # Aplikuj bazowe dane QLearning (używa istniejącej metody)
+            $this.ApplyToEnsemble($ensemble, $transferData)
+            # Rozszerz o Prophet profiles
+            if ($transferData.ContainsKey("ProphetProfiles")) {
+                foreach ($appName in $transferData.ProphetProfiles.Keys) {
+                    $profile = $transferData.ProphetProfiles[$appName]
+                    $modelKey = "Prophet_$appName"
+                    $targetWeight = switch ($profile.PreferredMode) {
+                        "Turbo" { 0.8 }
+                        "Silent" { 0.3 }
+                        default { 0.5 }
+                    }
+                    if (-not $ensemble.Weights.ContainsKey($modelKey)) {
+                        $ensemble.Weights[$modelKey] = 0.5
+                    }
+                    $ensemble.Weights[$modelKey] = ($ensemble.Weights[$modelKey] * 0.7) + ($targetWeight * $profile.Confidence * 0.3)
+                }
+            }
+            # Rozszerz o GPU-Bound scenarios
+            if ($transferData.ContainsKey("GPUBoundScenarios") -and $transferData.GPUBoundScenarios.ContainsKey("Detected")) {
+                $modelKey = "GPUBound_Scenario"
+                if (-not $ensemble.Weights.ContainsKey($modelKey)) {
+                    $ensemble.Weights[$modelKey] = 0.5
+                }
+                $ensemble.Weights[$modelKey] = ($ensemble.Weights[$modelKey] * 0.7) + (0.5 * 0.3)
+            }
+            # Rozszerz o Bandit stats
+            if ($transferData.ContainsKey("BanditStats")) {
+                foreach ($arm in $transferData.BanditStats.Keys) {
+                    $stats = $transferData.BanditStats[$arm]
+                    $modelKey = "Bandit_$arm"
+                    if (-not $ensemble.Weights.ContainsKey($modelKey)) {
+                        $ensemble.Weights[$modelKey] = 0.5
+                    }
+                    $ensemble.Weights[$modelKey] = ($ensemble.Weights[$modelKey] * 0.7) + ($stats.SuccessRate * 0.3)
+                }
+            }
+            # Rozszerz o Genetic params
+            if ($transferData.ContainsKey("GeneticParams")) {
+                $params = $transferData.GeneticParams
+                $turboWeight = 1.0 - (($params.TurboThreshold - 70) / 30.0)
+                $modelKey = "Genetic_Turbo"
+                if (-not $ensemble.Weights.ContainsKey($modelKey)) {
+                    $ensemble.Weights[$modelKey] = 0.5
+                }
+                $ensemble.Weights[$modelKey] = ($ensemble.Weights[$modelKey] * 0.8) + ($turboWeight * 0.2)
+            }
+            $sources = @()
+            if ($transferData.ContainsKey("ProphetProfiles")) { $sources += "Prophet" }
+            if ($transferData.ContainsKey("GPUBoundScenarios")) { $sources += "GPU-Bound" }
+            if ($transferData.ContainsKey("BanditStats")) { $sources += "Bandit" }
+            if ($transferData.ContainsKey("GeneticParams")) { $sources += "Genetic" }
+            if ($sources.Count -gt 0) {
+                $this.LogActivity(" Ensemble enriched with: $($sources -join ', ')")
+            }
+        } catch {
+            $this.LogActivity("[WARN] Enriched Ensemble application failed")
+        }
+    }
+    [void] TransferBackFromEnsemble($ensemble, $qLearning, $prophet) {
+        if ($null -eq $ensemble) { return }
+        try {
+            $topModels = $ensemble.Weights.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5
+            $boostCount = 0
+            # Ensemble → Q-Learning: boost najlepszych trybów
+            if ($qLearning -and $topModels) {
+                foreach ($model in $topModels) {
+                    if ($model.Key -match "QLearning_") {
+                        $weight = $model.Value
+                        foreach ($state in $qLearning.QTable.Keys) {
+                            $bestMode = ($qLearning.QTable[$state].GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Key
+                            $boostFactor = 1.0 + ($weight * 0.2)
+                            $qLearning.QTable[$state][$bestMode] *= $boostFactor
+                            $boostCount++
+                        }
+                    }
+                }
+            }
+            # Ensemble → Prophet: przyspiesz finalizację
+            if ($prophet -and $topModels) {
+                foreach ($model in $topModels) {
+                    if ($model.Key -match "Prophet_(\w+)") {
+                        $appName = $matches[1]
+                        if ($prophet.Apps.ContainsKey($appName) -and $prophet.Apps[$appName].Category -match "^LEARNING_") {
+                            $prophet.Apps[$appName].Samples += 5
+                        }
+                    }
+                }
+            }
+            if ($boostCount -gt 0) {
+                $this.LogActivity(" Ensemble → QLearning: $boostCount Q-value boosts")
+            }
+        } catch {
+            $this.LogActivity("[WARN] Transfer back from Ensemble failed")
+        }
+    }
+    [void] TransferBackFromBrain($brain, $qLearning) {
+        if ($null -eq $brain -or $null -eq $qLearning) { return }
+        try {
+            $bias = $brain.AggressionBias
+            $boostCount = 0
+            if ($bias -ne 0) {
+                foreach ($state in $qLearning.QTable.Keys) {
+                    if ($bias -gt 0) {
+                        $qLearning.QTable[$state]["Turbo"] *= (1.0 + $bias * 0.1)
+                    } else {
+                        $qLearning.QTable[$state]["Silent"] *= (1.0 + [Math]::Abs($bias) * 0.1)
+                    }
+                    $boostCount++
+                }
+                $biasDirection = if ($bias -gt 0) { "Turbo" } else { "Silent" }
+                $this.LogActivity(" Brain → QLearning: AggressionBias=$([Math]::Round($bias,2)) boosted $biasDirection ($boostCount states)")
+            }
+        } catch {
+            $this.LogActivity("[WARN] Transfer back from Brain failed")
+        }
+    }
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GŁÓWNA METODA DECYZYJNA: Waży głosy WSZYSTKICH silników AI
+    # Wywoływana w main loop zamiast hardcoded hierarchii
+    # ═══════════════════════════════════════════════════════════════════════════
+    [hashtable] DecideMode([hashtable]$modelScores, [double]$cpu, [double]$gpu, [double]$temp, [string]$prevMode, [string]$qAction, [string]$foregroundApp, [string]$phase) {
+        # Wagi bazowe silników
+        $baseWeights = @{
+            "QLearning" = 2.0; "Prophet" = 1.8; "Context" = 1.5; "Thermal" = 1.5
+            "Phase" = 1.6; "GPU" = 1.3; "Energy" = 1.2; "Trend" = 1.0
+            "IOMonitor" = 1.0; "NetworkAI" = 0.6; "Pattern" = 0.8; "Brain" = 0.8
+            "Bandit" = 0.7; "Genetic" = 0.6; "Chain" = 0.6; "Predictor" = 0.5
+            "Anomaly" = 0.5; "Tuner" = 0.4; "Activity" = 0.4; "PowerBoost" = 0.3
+            "AppIntel" = 2.5
+        }
+        
+        # v43.14: Adaptive weights - silniki które trafnie głosują dostają wyższą wagę
+        if (-not $this.AdaptiveWeights) { $this.AdaptiveWeights = @{} }
+        $weights = @{}
+        foreach ($engine in $baseWeights.Keys) {
+            $base = $baseWeights[$engine]
+            $adaptive = if ($this.AdaptiveWeights.ContainsKey($engine)) { $this.AdaptiveWeights[$engine] } else { 1.0 }
+            # Adaptive range: 0.5x to 1.5x base weight (nie za ekstremalny)
+            $weights[$engine] = $base * [Math]::Min(1.5, [Math]::Max(0.5, $adaptive))
+        }
+        
+        # Dodaj Phase score do modelScores
+        if ($phase -and -not $modelScores.ContainsKey("Phase")) {
+            # v43.14: Jeśli AppIntel jest w modelScores i ma learned data,
+            # Phase score powinien respektować to co silniki nauczyły się o tej app
+            # Hardcoded wartości jako FALLBACK gdy brak learned data
+            $phaseScore = switch ($phase) {
+                "Loading"  { 80 }  # Potrzebuje mocy (uniwersalne)
+                "Gameplay" { 55 }  # v43.14: Obniżone z 62 - GPU-bound games NIE potrzebują CPU
+                "Active"   { 70 }  # CPU-intensive task
+                "Cutscene" { 30 }  # Stabilne, niskie wymagania CPU
+                "Menu"     { 25 }  # Minimalne wymagania
+                "Idle"     { 20 }  # Nic nie robi
+                "Paused"   { 15 }  # App spauzowana - minimum mocy
+                default    { 50 }
+            }
+            $modelScores["Phase"] = $phaseScore
+        }
+        
+        # Oblicz ważoną średnią score
+        $totalWeight = 0.0
+        $weightedScore = 0.0
+        foreach ($engine in $modelScores.Keys) {
+            $w = if ($weights.ContainsKey($engine)) { $weights[$engine] } else { 0.5 }
+            $score = $modelScores[$engine]
+            if ($score -ne $null -and $score -ge 0) {
+                $weightedScore += $score * $w
+                $totalWeight += $w
+            }
+        }
+        $finalScore = if ($totalWeight -gt 0) { $weightedScore / $totalWeight } else { 50 }
+        
+        # v43.14: CPUAgressiveness bias na finalScore
+        # 0=conservative (score obniżony → Silent częściej), 50=neutral, 100=aggressive (→Turbo częściej)
+        $aggrBias = 0.0
+        if ($null -ne $Script:CPUAgressiveness) {
+            $aggrBias = ($Script:CPUAgressiveness - 50) / 100.0  # -0.5 do +0.5
+            # Bias przesuwa score: aggressive +5..+15 punktów, conservative -5..-15
+            $finalScore += $aggrBias * 25.0
+        }
+        
+        # v43.14: User per-app Bias z AppCategories (ProcessAI.json)
+        # Jeśli user ustawił Bias per-app, wpływa na score
+        if ($Script:AppCategoryPreferences -and $foregroundApp) {
+            foreach ($key in $Script:AppCategoryPreferences.Keys) {
+                $keyLower = $key.ToLower() -replace '\.exe$', ''
+                $appLower = $foregroundApp.ToLower() -replace '\.exe$', ''
+                if ($keyLower -eq $appLower -or $appLower -like "*$keyLower*") {
+                    $pref = $Script:AppCategoryPreferences[$key]
+                    if (-not $pref.HardLock -and $null -ne $pref.Bias) {
+                        # Bias 0=Silent, 0.5=Balanced, 1.0=Turbo
+                        $userBias = ($pref.Bias - 0.5) * 30.0  # -15 do +15 punktów
+                        $finalScore += $userBias
+                    }
+                    break
+                }
+            }
+        }
+        
+        # Q-Learning override: jeśli Q-Learning ma mocne przekonanie, wzmocnij jego głos
+        if ($qAction) {
+            $qMode = $qAction
+            if ($qMode -eq "Silent" -and $finalScore -lt 45) {
+                $finalScore = $finalScore * 0.85
+            }
+            elseif ($qMode -eq "Turbo" -and $finalScore -gt 60) {
+                $finalScore = $finalScore * 1.1
+            }
+        }
+        
+        # Clamp
+        $finalScore = [Math]::Min(100, [Math]::Max(0, $finalScore))
+        
+        # Konwersja score → tryb z HYSTERESIS
+        # v43.14: Progi adaptowane do CPUAgressiveness
+        # aggressive=łatwiej Turbo (niższy próg), conservative=łatwiej Silent
+        $silentExitUp = 55 - ($aggrBias * 10)    # aggressive: 50, conservative: 60
+        $turboEntryDown = 65 - ($aggrBias * 10)   # aggressive: 60, conservative: 70
+        $turboExitDown = 58 - ($aggrBias * 8)     # aggressive: 54, conservative: 62
+        $silentEntryUp = 38 + ($aggrBias * 8)     # aggressive: 42, conservative: 34
+        
+        $newMode = "Balanced"
+        $reason = ""
+        
+        # Progi zależne od obecnego trybu (hysteresis zapobiega ping-pong)
+        if ($prevMode -eq "Silent") {
+            if ($finalScore -gt ($turboEntryDown + 7)) { $newMode = "Turbo"; $reason = "EXIT-SILENT→TURBO" }
+            elseif ($finalScore -gt $silentExitUp) { $newMode = "Balanced"; $reason = "EXIT-SILENT" }
+            else { $newMode = "Silent"; $reason = "HOLD-SILENT" }
+        }
+        elseif ($prevMode -eq "Turbo") {
+            if ($finalScore -lt ($silentEntryUp - 3)) { $newMode = "Silent"; $reason = "EXIT-TURBO→SILENT" }
+            elseif ($finalScore -lt $turboExitDown) { $newMode = "Balanced"; $reason = "EXIT-TURBO" }
+            else { $newMode = "Turbo"; $reason = "HOLD-TURBO" }
+        }
+        else {
+            if ($finalScore -gt $turboEntryDown) { $newMode = "Turbo"; $reason = "SCORE-HIGH" }
+            elseif ($finalScore -lt $silentEntryUp) { $newMode = "Silent"; $reason = "SCORE-LOW" }
+            else { $newMode = "Balanced"; $reason = "SCORE-MID" }
+        }
+        
+        # Aktualizuj statystyki
+        $engineUsed = "Coordinator"
+        $this.EngineDecisionCount[$this.ActiveEngine]++
+        
+        # v43.14: Adaptive weight learning
+        # Nagrodź silniki które głosowały ZGODNIE z finalną decyzją
+        # Karaj silniki które głosowały ODWROTNIE
+        if ($this.LastModelScores -and $this.LastDecidedMode) {
+            $lr = 0.02  # Powolne uczenie wag (stabilność)
+            $decidedScore = switch ($this.LastDecidedMode) { "Silent" { 20 } "Balanced" { 50 } "Turbo" { 80 } default { 50 } }
+            foreach ($engine in $this.LastModelScores.Keys) {
+                $engineScore = $this.LastModelScores[$engine]
+                if ($null -eq $engineScore) { continue }
+                # Dystans od "poprawnej" odpowiedzi (mniejszy = lepiej)
+                $error = [Math]::Abs($engineScore - $decidedScore) / 100.0
+                $accuracy = 1.0 - $error  # 0=zły, 1=idealny
+                # Update adaptive weight: EMA
+                if (-not $this.AdaptiveWeights) { $this.AdaptiveWeights = @{} }
+                $current = if ($this.AdaptiveWeights.ContainsKey($engine)) { $this.AdaptiveWeights[$engine] } else { 1.0 }
+                $this.AdaptiveWeights[$engine] = $current * (1.0 - $lr) + $accuracy * $lr
+            }
+        }
+        $this.LastModelScores = $modelScores.Clone()
+        $this.LastDecidedMode = $newMode
+        
+        return @{
+            Mode = $newMode
+            Score = [Math]::Round($finalScore, 1)
+            Reason = "AI-COORD($reason): score=$([Math]::Round($finalScore,1)) app=$foregroundApp Q=$qAction P=$phase"
+        }
+    }
+}
+class MultiArmedBandit {
+    [hashtable] $Arms          # Turbo, Balanced, Silent
+    [hashtable] $Successes     # Alpha (successes)
+    [hashtable] $Failures      # Beta (failures)
+    [string] $LastArm
+    [int] $TotalPulls
+    [hashtable] $EngineWeights        # Wagi zaufania dla silnikow AI
+    [hashtable] $EngineSuccessRate    # Success rate per engine per context
+    [hashtable] $SpikeResponseTime    # Jak szybko engine reagowal na spike
+    [System.Collections.Generic.List[hashtable]] $ContextHistory  # Historia kontekstow
+    [bool] $PassiveAdvisorMode        # Tryb obserwacji (gdy Ensemble OFF)
+    [hashtable] $AdvisoryLog          # Co bysmy wybrali w trybie passive
+    [datetime] $LastSpikeTime
+    [string] $LastBestEngine
+    [int] $TurboFocusCounter          # Licznik priorytetow Turbo Focus
+    MultiArmedBandit() {
+        $this.Arms = @{ "Turbo" = 0.15; "Balanced" = 0.50; "Silent" = 0.35 }
+        # - Turbo ma niski prior (duzo porazek), Balanced wysoki (duzo sukcesow)
+        $this.Successes = @{ "Turbo" = 1.0; "Balanced" = 10.0; "Silent" = 5.0 }
+        $this.Failures = @{ "Turbo" = 10.0; "Balanced" = 1.0; "Silent" = 2.0 }
+        $this.LastArm = "Balanced"
+        $this.TotalPulls = 0
+        $this.EngineWeights = @{
+            "Brain" = 0.25
+            "QLearning" = 0.40
+            "Patterns" = 0.15
+            "Prophet" = 0.20
+        }
+        $this.EngineSuccessRate = @{
+            "Brain" = @{ "Spike" = 0.5; "Linear" = 0.5; "Exponential" = 0.5; "Decel" = 0.5 }
+            "QLearning" = @{ "Spike" = 0.5; "Linear" = 0.5; "Exponential" = 0.5; "Decel" = 0.5 }
+            "Patterns" = @{ "Spike" = 0.5; "Linear" = 0.5; "Exponential" = 0.5; "Decel" = 0.5 }
+            "Prophet" = @{ "Spike" = 0.5; "Linear" = 0.5; "Exponential" = 0.5; "Decel" = 0.5 }
+        }
+        $this.SpikeResponseTime = @{
+            "Brain" = 999.0
+            "QLearning" = 999.0
+            "Patterns" = 999.0
+            "Prophet" = 999.0
+        }
+        $this.ContextHistory = New-Object System.Collections.Generic.List[hashtable]
+        $this.PassiveAdvisorMode = $false
+        $this.AdvisoryLog = @{}
+        $this.LastSpikeTime = [datetime]::MinValue
+        $this.LastBestEngine = "QLearning"
+        $this.TurboFocusCounter = 0
+    }
+    # #
+    # #
+    [hashtable] GetBestEngineCandidate([hashtable]$ramInfo, [hashtable]$availableEngines, [string]$currentThreshold) {
+        $acceleration = if ($ramInfo -and $ramInfo.Acceleration) { $ramInfo.Acceleration } else { 0.0 }
+        $trendType = if ($ramInfo -and $ramInfo.TrendType) { $ramInfo.TrendType } else { "NONE" }
+        $delta = if ($ramInfo -and $ramInfo.Delta) { $ramInfo.Delta } else { 0.0 }
+        $spike = if ($ramInfo -and $ramInfo.Spike) { $ramInfo.Spike } else { $false }
+        # Spike Detection: >5.8% delta = CRITICAL SPIKE
+        $isCriticalSpike = ($delta -gt 5.8)
+        # Context scoring
+        $scores = @{}
+        foreach ($engine in $availableEngines.Keys) {
+            if (-not $availableEngines[$engine]) { continue }  # Skip disabled engines
+            $score = 0.0
+            # Base weight
+            $score += $this.EngineWeights[$engine] * 100
+            #  RAM Intelligence Boost
+            if ($acceleration -gt 2.0) {
+                # Wysokie przyspieszenie -> preferuj Brain lub QLearning
+                if ($engine -eq "Brain") { $score += 30 }
+                if ($engine -eq "QLearning") { $score += 25 }
+            }
+            #  Trend Type Specialization
+            switch ($trendType) {
+                "LINEAR" {
+                    # LINEAR -> lekki silnik wystarczy
+                    if ($engine -eq "Patterns") { $score += 20 }
+                    if ($engine -eq "QLearning") { $score += 15 }
+                }
+                "EXPONENTIAL" {
+                    # EXPONENTIAL -> ciezki kaliber
+                    if ($engine -eq "Brain") { $score += 35 }
+                    if ($engine -eq "QLearning") { $score += 20 }
+                }
+                "DECEL" {
+                    # DECEL -> konserwatywny
+                    if ($engine -eq "Prophet") { $score += 20 }
+                    if ($engine -eq "Patterns") { $score += 15 }
+                }
+            }
+            #  CRITICAL SPIKE -> Turbo Focus Mode
+            if ($isCriticalSpike) {
+                # 100% zaufanie dla najszybszego respondenta
+                $fastestResponseTime = 999.0
+                $fastestEngine = $engine
+                foreach ($e in $this.SpikeResponseTime.Keys) {
+                    if ($availableEngines[$e] -and $this.SpikeResponseTime[$e] -lt $fastestResponseTime) {
+                        $fastestResponseTime = $this.SpikeResponseTime[$e]
+                        $fastestEngine = $e
+                    }
+                }
+                if ($engine -eq $fastestEngine) {
+                    $score = 1000  # Force selection
+                    $this.TurboFocusCounter++
+                } else {
+                    $score = 0  # Suppress others
+                }
+            }
+            #  Dynamic Threshold Adjustment
+            # COOL threshold (4%) -> agresywny przy malym ruchu
+            if ($currentThreshold -eq "COOL" -and $delta -gt 1.0) {
+                if ($engine -eq "Brain" -or $engine -eq "QLearning") {
+                    $score += 15
+                }
+            }
+            #  Success Rate Context Boost
+            if ($this.EngineSuccessRate.ContainsKey($engine)) {
+                $contextKey = if ($spike) { "Spike" } else { $trendType }
+                if ($this.EngineSuccessRate[$engine].ContainsKey($contextKey)) {
+                    $successRate = $this.EngineSuccessRate[$engine][$contextKey]
+                    $score += $successRate * 50  # 0.5 = +25, 1.0 = +50
+                }
+            }
+            $scores[$engine] = $score
+        }
+        # Find best
+        $bestEngine = "QLearning"  # fallback
+        $bestScore = 0
+        foreach ($engine in $scores.Keys) {
+            if ($scores[$engine] -gt $bestScore) {
+                $bestScore = $scores[$engine]
+                $bestEngine = $engine
+            }
+        }
+        $this.LastBestEngine = $bestEngine
+        return @{
+            BestEngine = $bestEngine
+            Scores = $scores
+            Confidence = [Math]::Min(100, [int]($bestScore / 10))
+            TurboFocus = $isCriticalSpike
+            Context = @{
+                Acceleration = $acceleration
+                TrendType = $trendType
+                Delta = $delta
+                Threshold = $currentThreshold
+            }
+        }
+    }
+    # #
+    # #
+    [void] UpdateEnginePerformance([string]$engine, [string]$context, [bool]$success, [double]$responseTime) {
+        if (-not $this.EngineSuccessRate.ContainsKey($engine)) { return }
+        # Update success rate (exponential moving average)
+        $currentRate = $this.EngineSuccessRate[$engine][$context]
+        $newRate = if ($success) { 
+            $currentRate * 0.9 + 0.1 * 1.0  # Success
+        } else {
+            $currentRate * 0.9 + 0.1 * 0.0  # Failure
+        }
+        $this.EngineSuccessRate[$engine][$context] = $newRate
+        # Update response time for spike detection
+        if ($context -eq "Spike" -and $responseTime -lt $this.SpikeResponseTime[$engine]) {
+            $this.SpikeResponseTime[$engine] = $responseTime
+        }
+        # Update engine weight (global trust)
+        if ($success) {
+            $this.EngineWeights[$engine] = [Math]::Min(1.0, $this.EngineWeights[$engine] + 0.01)
+        } else {
+            $this.EngineWeights[$engine] = [Math]::Max(0.05, $this.EngineWeights[$engine] - 0.005)
+        }
+        # Normalize weights
+        $totalWeight = 0.0
+        foreach ($e in $this.EngineWeights.Keys) { $totalWeight += $this.EngineWeights[$e] }
+        if ($totalWeight -gt 0) {
+            $engineKeys = @($this.EngineWeights.Keys)
+            foreach ($e in $engineKeys) {
+                $this.EngineWeights[$e] /= $totalWeight
+            }
+        }
+    }
+    # #
+    # #
+    [void] RecordAdvisoryDecision([hashtable]$ramInfo, [hashtable]$availableEngines, [string]$actualEngine, [bool]$success) {
+        if (-not $this.PassiveAdvisorMode) { return }
+        # Zapisz co bysmy wybrali
+        $recommendation = $this.GetBestEngineCandidate($ramInfo, $availableEngines, "NORMAL")
+        $advisoryEntry = @{
+            Timestamp = [datetime]::Now
+            Recommended = $recommendation.BestEngine
+            Actual = $actualEngine
+            Success = $success
+            Context = $recommendation.Context
+        }
+        # Store in log
+        $key = [datetime]::Now.ToString("yyyy-MM-dd-HH-mm-ss")
+        $this.AdvisoryLog[$key] = $advisoryEntry
+        # Keep only last 100 entries
+        if ($this.AdvisoryLog.Count -gt 100) {
+            $oldest = ($this.AdvisoryLog.Keys | Sort-Object)[0]
+            $this.AdvisoryLog.Remove($oldest)
+        }
+        # Continue learning even in passive mode
+        $context = if ($ramInfo.Spike) { "Spike" } else { $ramInfo.TrendType }
+        $this.UpdateEnginePerformance($actualEngine, $context, $success, 0.5)
+    }
+    # #
+    # Original methods (preserved)
+    # #
+    # Thompson Sampling - probkowanie z rozkladu Beta
+    [string] SelectArm() {
+        $samples = @{}
+        foreach ($arm in $this.Arms.Keys) {
+            # Symulacja rozkladu Beta przez przyblizenie
+            $alpha = $this.Successes[$arm]
+            $beta = $this.Failures[$arm]
+            # Uzywamy sredniej + szum zamiast pelnego rozkladu Beta
+            $mean = $alpha / ($alpha + $beta)
+            $variance = ($alpha * $beta) / (($alpha + $beta) * ($alpha + $beta) * ($alpha + $beta + 1))
+            $noise = (Get-Random -Minimum -100 -Maximum 100) / 100.0 * [Math]::Sqrt($variance) * 2
+            $samples[$arm] = [Math]::Max(0, [Math]::Min(1, $mean + $noise))
+        }
+        # Wybierz arm z najwyzsza probka
+        $bestArm = "Balanced"
+        $bestSample = 0
+        foreach ($arm in $samples.Keys) {
+            if ($samples[$arm] -gt $bestSample) {
+                $bestSample = $samples[$arm]
+                $bestArm = $arm
+            }
+        }
+        $this.LastArm = $bestArm
+        $this.TotalPulls++
+        return $bestArm
+    }
+    # Aktualizuj na podstawie nagrody (0-1)
+    [void] Update([string]$arm, [bool]$success) {
+        if (-not $this.Successes.ContainsKey($arm)) { return }
+        if ($success) {
+            $this.Successes[$arm] += 1.0
+        } else {
+            $this.Failures[$arm] += 1.0
+        }
+        # Decay stare obserwacje (zapominanie)
+        if ($this.TotalPulls % 100 -eq 0) {
+            $armKeys = @($this.Successes.Keys)
+            foreach ($a in $armKeys) {
+                $this.Successes[$a] = [Math]::Max(1, $this.Successes[$a] * 0.95)
+                $this.Failures[$a] = [Math]::Max(1, $this.Failures[$a] * 0.95)
+            }
+        }
+    }
+    [double] GetArmProbability([string]$arm) {
+        if (-not $this.Successes.ContainsKey($arm)) { return 0.33 }
+        $alpha = $this.Successes[$arm]
+        $beta = $this.Failures[$arm]
+        return [Math]::Round($alpha / ($alpha + $beta), 3)
+    }
+    [string] GetStatus() {
+        $t = $this.GetArmProbability("Turbo")
+        $b = $this.GetArmProbability("Balanced")
+        $s = $this.GetArmProbability("Silent")
+        return "T:$([Math]::Round($t*100))% B:$([Math]::Round($b*100))% S:$([Math]::Round($s*100))%"
+    }
+    [string] GetEngineStatus() {
+        $status = "Engines: "
+        foreach ($engine in $this.EngineWeights.Keys) {
+            $weight = [Math]::Round($this.EngineWeights[$engine] * 100)
+            $status += "$engine=$weight% "
+        }
+        if ($this.PassiveAdvisorMode) {
+            $status += "| PASSIVE ADVISOR"
+        }
+        if ($this.TurboFocusCounter -gt 0) {
+            $status += "| TurboFocus=$($this.TurboFocusCounter)"
+        }
+        return $status.Trim()
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $path = Join-Path $dir "Bandit.json"
+            $data = @{
+                Successes = $this.Successes
+                Failures = $this.Failures
+                TotalPulls = $this.TotalPulls
+                EngineWeights = $this.EngineWeights
+                EngineSuccessRate = $this.EngineSuccessRate
+                SpikeResponseTime = $this.SpikeResponseTime
+                TurboFocusCounter = $this.TurboFocusCounter
+            }
+            [System.IO.File]::WriteAllText($path, ($data | ConvertTo-Json -Depth 8 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "Bandit.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.Successes) { 
+                    $data.Successes.PSObject.Properties | ForEach-Object { $this.Successes[$_.Name] = [double]$_.Value }
+                }
+                if ($data.Failures) {
+                    $data.Failures.PSObject.Properties | ForEach-Object { $this.Failures[$_.Name] = [double]$_.Value }
+                }
+                if ($data.TotalPulls) { $this.TotalPulls = $data.TotalPulls }
+                if ($data.EngineWeights) {
+                    $data.EngineWeights.PSObject.Properties | ForEach-Object {
+                        $this.EngineWeights[$_.Name] = [double]$_.Value
+                    }
+                }
+                if ($data.EngineSuccessRate) {
+                    foreach ($engine in $data.EngineSuccessRate.PSObject.Properties) {
+                        $engineName = $engine.Name  # v39 FIX
+                        if (-not $this.EngineSuccessRate.ContainsKey($engineName)) {
+                            $this.EngineSuccessRate[$engineName] = @{}
+                        }
+                        $engine.Value.PSObject.Properties | ForEach-Object {
+                            $modeName = $_.Name  # v39 FIX
+                            $this.EngineSuccessRate[$engineName][$modeName] = [double]$_.Value
+                        }
+                    }
+                }
+                if ($data.SpikeResponseTime) {
+                    $data.SpikeResponseTime.PSObject.Properties | ForEach-Object {
+                        $this.SpikeResponseTime[$_.Name] = [double]$_.Value
+                    }
+                }
+                if ($data.TurboFocusCounter) { $this.TurboFocusCounter = $data.TurboFocusCounter }
+            }
+        } catch { }
+    }
+}
+class GeneticOptimizer {
+    [System.Collections.Generic.List[hashtable]] $Population
+    [int] $PopulationSize
+    [int] $Generation
+    [double] $MutationRate
+    [double] $BestFitness
+    [double] $LastFitnessImprovement  # V37.8.5: Ostatnia poprawa fitness (do wyswietlania w Configurator)
+    [hashtable] $BestGenome
+    [hashtable] $CurrentGenome
+    GeneticOptimizer() {
+        $this.PopulationSize = 8
+        $this.Generation = 0
+        $this.MutationRate = 0.15
+        $this.BestFitness = 0
+        $this.LastFitnessImprovement = 0.0
+        $this.Population = [System.Collections.Generic.List[hashtable]]::new()
+        # Inicjalizuj populacje
+        for ($i = 0; $i -lt $this.PopulationSize; $i++) {
+            $this.Population.Add($this.CreateRandomGenome())
+        }
+        $this.BestGenome = $this.Population[0].Clone()
+        $this.CurrentGenome = $this.Population[0].Clone()
+    }
+    [hashtable] CreateRandomGenome() {
+        return @{
+            TurboThreshold = Get-Random -Minimum 70 -Maximum 85
+            BalancedThreshold = Get-Random -Minimum 30 -Maximum 55
+            SilentAggression = [Math]::Round((Get-Random -Minimum 30 -Maximum 80) / 100.0, 2)
+            ThermalWeight = [Math]::Round((Get-Random -Minimum 10 -Maximum 40) / 100.0, 2)
+            ActivityWeight = [Math]::Round((Get-Random -Minimum 20 -Maximum 50) / 100.0, 2)
+            PredictionWeight = [Math]::Round((Get-Random -Minimum 10 -Maximum 30) / 100.0, 2)
+            BoostDuration = Get-Random -Minimum 3 -Maximum 10
+            Fitness = 0.0
+        }
+    }
+    [hashtable] Crossover([hashtable]$parent1, [hashtable]$parent2) {
+        $child = @{}
+        foreach ($key in $parent1.Keys) {
+            if ($key -eq "Fitness") { $child[$key] = 0.0; continue }
+            # 50/50 od kazdego rodzica
+            if ((Get-Random -Maximum 2) -eq 0) {
+                $child[$key] = $parent1[$key]
+            } else {
+                $child[$key] = $parent2[$key]
+            }
+        }
+        return $child
+    }
+    [void] Mutate([hashtable]$genome) {
+        if ((Get-Random -Minimum 0.0 -Maximum 1.0) -gt $this.MutationRate) { return }
+        $keys = @("TurboThreshold", "BalancedThreshold", "SilentAggression", "ThermalWeight", "ActivityWeight")
+        $key = $keys[(Get-Random -Maximum $keys.Count)]
+        switch ($key) {
+            "TurboThreshold" { $genome[$key] = [Math]::Max(50, [Math]::Min(85, $genome[$key] + (Get-Random -Minimum -10 -Maximum 10))) }
+            "BalancedThreshold" { $genome[$key] = [Math]::Max(20, [Math]::Min(60, $genome[$key] + (Get-Random -Minimum -10 -Maximum 10))) }
+            "SilentAggression" { $genome[$key] = [Math]::Max(0.2, [Math]::Min(0.9, $genome[$key] + (Get-Random -Minimum -20 -Maximum 20) / 100.0)) }
+            "ThermalWeight" { $genome[$key] = [Math]::Max(0.05, [Math]::Min(0.5, $genome[$key] + (Get-Random -Minimum -10 -Maximum 10) / 100.0)) }
+            "ActivityWeight" { $genome[$key] = [Math]::Max(0.1, [Math]::Min(0.6, $genome[$key] + (Get-Random -Minimum -10 -Maximum 10) / 100.0)) }
+        }
+    }
+    [void] EvaluateFitness([int]$genomeIndex, [double]$performance, [double]$efficiency, [double]$thermal) {
+        if ($genomeIndex -lt 0 -or $genomeIndex -ge $this.Population.Count) { return }
+        # Fitness = weighted sum
+        $fitness = ($performance * 0.4) + ($efficiency * 0.35) + ($thermal * 0.25)
+        $this.Population[$genomeIndex].Fitness = $fitness
+        if ($fitness -gt $this.BestFitness) {
+            $this.LastFitnessImprovement = $fitness - $this.BestFitness  # v39: Zapisz poprawe
+            $this.BestFitness = $fitness
+            $this.BestGenome = $this.Population[$genomeIndex].Clone()
+        } else {
+            $this.LastFitnessImprovement = 0.0
+        }
+    }
+    [void] Evolve() {
+        # Sortuj po fitness (malejaco)
+        $sorted = $this.Population | Sort-Object { $_.Fitness } -Descending
+        # Elityzm: zachowaj top 2
+        $newPop = [System.Collections.Generic.List[hashtable]]::new()
+        $newPop.Add($sorted[0].Clone())
+        $newPop.Add($sorted[1].Clone())
+        # Reszta przez crossover + mutation
+        while ($newPop.Count -lt $this.PopulationSize) {
+            $p1 = $sorted[(Get-Random -Maximum ([Math]::Min(4, $sorted.Count)))]
+            $p2 = $sorted[(Get-Random -Maximum ([Math]::Min(4, $sorted.Count)))]
+            $child = $this.Crossover($p1, $p2)
+            $this.Mutate($child)
+            $newPop.Add($child)
+        }
+        $this.Population = $newPop
+        $this.Generation++
+        $this.CurrentGenome = $this.BestGenome.Clone()
+    }
+    [hashtable] GetCurrentParams() {
+        return $this.CurrentGenome
+    }
+    [string] GetStatus() {
+        return "Gen:$($this.Generation) Fit:$([Math]::Round($this.BestFitness * 100))%"
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $path = Join-Path $dir "Genetic.json"
+            $data = @{
+                Generation = $this.Generation
+                BestFitness = $this.BestFitness
+                BestGenome = $this.BestGenome
+                MutationRate = $this.MutationRate
+            }
+            [System.IO.File]::WriteAllText($path, ($data | ConvertTo-Json -Depth 3 -Compress), [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "Genetic.json"
+            if (Test-Path $path) {
+                $data = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+                if ($data.Generation) { $this.Generation = $data.Generation }
+                if ($data.BestFitness) { $this.BestFitness = $data.BestFitness }
+                if ($data.BestGenome) {
+                    $this.BestGenome = @{}
+                    $data.BestGenome.PSObject.Properties | ForEach-Object { $this.BestGenome[$_.Name] = $_.Value }
+                    $this.CurrentGenome = $this.BestGenome.Clone()
+                }
+            }
+        } catch { }
+    }
+}
+#  ULTRA: DECISION EXPLAINER - Wyjasnia decyzje AI
+class DecisionExplainer {
+    [System.Collections.Generic.List[hashtable]] $RecentDecisions
+    [int] $MaxHistory
+    [hashtable] $LastMetrics
+    [string] $LastMode
+    [System.Collections.Generic.List[string]] $CurrentReasons
+    DecisionExplainer() {
+        $this.RecentDecisions = [System.Collections.Generic.List[hashtable]]::new()
+        $this.MaxHistory = 50
+        $this.LastMetrics = @{}
+        $this.LastMode = ""
+        $this.CurrentReasons = [System.Collections.Generic.List[string]]::new()
+    }
+    [void] Analyze([hashtable]$metrics, [string]$decision, [hashtable]$context) {
+        $this.CurrentReasons.Clear()
+        $cpu = if ($metrics.CPU) { $metrics.CPU } else { 0 }
+        $temp = if ($metrics.Temp) { $metrics.Temp } else { 0 }
+        $gpuLoad = if ($metrics.GPU -and $metrics.GPU.Load) { $metrics.GPU.Load } else { 0 }
+        $gpuTemp = if ($metrics.GPU -and $metrics.GPU.Temp) { $metrics.GPU.Temp } else { 0 }
+        $vrmTemp = if ($metrics.VRM -and $metrics.VRM.Temp) { $metrics.VRM.Temp } else { 0 }
+        $ram = if ($metrics.RAMUsage) { $metrics.RAMUsage } else { 0 }
+        $power = if ($metrics.CPUPower) { $metrics.CPUPower } else { 0 }
+        $hour = (Get-Date).Hour
+        # Analizuj powody decyzji
+        switch ($decision) {
+            "Silent" {
+                if ($cpu -lt 20) { $this.CurrentReasons.Add("CPU niskie ($cpu%)") }
+                if ($temp -lt 50) { $this.CurrentReasons.Add("Temp OK (${temp}C)") }
+                if ($gpuLoad -lt 10) { $this.CurrentReasons.Add("GPU idle ($gpuLoad%)") }
+                if ($hour -ge 22 -or $hour -lt 7) { $this.CurrentReasons.Add("Godziny nocne") }
+                if ($context.Activity -eq "Idle") { $this.CurrentReasons.Add("Brak aktywnosci") }
+                if ($context.Context -match "Light|Browse") { $this.CurrentReasons.Add("Lekka praca") }
+            }
+            "Balanced" {
+                if ($cpu -ge 20 -and $cpu -lt 70) { $this.CurrentReasons.Add("Srednie CPU ($cpu%)") }
+                if ($temp -ge 50 -and $temp -lt 75) { $this.CurrentReasons.Add("Srednia temp (${temp}C)") }
+                if ($context.Context -match "Office|Browser") { $this.CurrentReasons.Add("Praca biurowa") }
+                if ($gpuLoad -ge 10 -and $gpuLoad -lt 50) { $this.CurrentReasons.Add("GPU w uzyciu ($gpuLoad%)") }
+            }
+            "Turbo" {
+                if ($cpu -ge 70) { $this.CurrentReasons.Add("Wysokie CPU ($cpu%)") }
+                if ($gpuLoad -ge 50) { $this.CurrentReasons.Add("GPU obciazony ($gpuLoad%)") }
+                if ($context.Context -match "Gaming|Heavy|Video") { $this.CurrentReasons.Add("Ciezka praca ($($context.Context))") }
+                if ($context.Activity -match "Game|Render|Compile") { $this.CurrentReasons.Add("Aplikacja: $($context.Activity)") }
+                if ($temp -lt 80) { $this.CurrentReasons.Add("Zapas termiczny (${temp}C < 80)") }
+            }
+        }
+        # Ostrzezenia termiczne
+        if ($temp -ge 85) { $this.CurrentReasons.Add("[WARN] UWAGA: CPU ${temp}C!") }
+        if ($gpuTemp -ge 85) { $this.CurrentReasons.Add("[WARN] UWAGA: GPU ${gpuTemp}C!") }
+        if ($vrmTemp -ge 90) { $this.CurrentReasons.Add("[WARN] UWAGA: VRM ${vrmTemp}C!") }
+        # Zapisz decyzje
+        if ($this.RecentDecisions.Count -ge $this.MaxHistory) {
+            $this.RecentDecisions.RemoveAt(0)
+        }
+        $this.RecentDecisions.Add(@{
+            Time = Get-Date
+            Decision = $decision
+            CPU = $cpu
+            Temp = $temp
+            GPU = $gpuLoad
+            Reasons = [string[]]$this.CurrentReasons.ToArray()
+        })
+        $this.LastMetrics = $metrics
+        $this.LastMode = $decision
+    }
+    [string] GetExplanation() {
+        if ($this.CurrentReasons.Count -eq 0) {
+            return "Brak danych"
+        }
+        return $this.CurrentReasons -join " | "
+    }
+    [string] GetShortExplanation() {
+        if ($this.CurrentReasons.Count -eq 0) { return "" }
+        $topReasons = @($this.CurrentReasons | Select-Object -First 2)
+        return $topReasons -join ", "
+    }
+    [hashtable[]] GetHistory([int]$count) {
+        $start = [Math]::Max(0, $this.RecentDecisions.Count - $count)
+        return $this.RecentDecisions.GetRange($start, [Math]::Min($count, $this.RecentDecisions.Count)).ToArray()
+    }
+    [hashtable] GetStats() {
+        $total = $this.RecentDecisions.Count
+        if ($total -eq 0) { return @{ Silent = 0; Balanced = 0; Turbo = 0; Total = 0 } }
+        $silent = ($this.RecentDecisions | Where-Object { $_.Decision -eq "Silent" }).Count
+        $balanced = ($this.RecentDecisions | Where-Object { $_.Decision -eq "Balanced" }).Count
+        $turbo = ($this.RecentDecisions | Where-Object { $_.Decision -eq "Turbo" }).Count
+        return @{
+            Silent = [Math]::Round(($silent / $total) * 100)
+            Balanced = [Math]::Round(($balanced / $total) * 100)
+            Turbo = [Math]::Round(($turbo / $total) * 100)
+            Total = $total
+        }
+    }
+    [string] GetStatus() {
+        $stats = $this.GetStats()
+        return "S:$($stats.Silent)% B:$($stats.Balanced)% T:$($stats.Turbo)%"
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $stats = $this.GetStats()
+            # Zapisz statystyki i ostatnie 20 decyzji
+            $recentToSave = @()
+            $startIdx = [Math]::Max(0, $this.RecentDecisions.Count - 20)
+            for ($i = $startIdx; $i -lt $this.RecentDecisions.Count; $i++) {
+                $recentToSave += $this.RecentDecisions[$i]
+            }
+            $data = @{
+                TotalDecisions = $this.RecentDecisions.Count
+                Stats = $stats
+                RecentDecisions = $recentToSave
+                LastMode = $this.LastMode
+            }
+            $path = Join-Path $dir "DecisionExplainer.json"
+            $data | ConvertTo-Json -Depth 5 | Set-Content $path -Encoding UTF8
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "DecisionExplainer.json"
+            if (Test-Path $path) {
+                $data = Get-Content $path -Raw | ConvertFrom-Json
+                if ($data.RecentDecisions) {
+                    foreach ($dec in $data.RecentDecisions) {
+                        $this.RecentDecisions.Add(@{
+                            Time = $dec.Time
+                            Decision = $dec.Decision
+                            Reasons = @($dec.Reasons)
+                            CPU = $dec.CPU
+                            GPU = $dec.GPU
+                        })
+                    }
+                }
+                if ($data.LastMode) { $this.LastMode = $data.LastMode }
+            }
+        } catch { }
+    }
+}
+class ThermalGuardian {
+    [double] $CPULimit
+    [double] $GPULimit
+    [double] $VRMLimit
+    [bool] $ThrottleActive
+    [string] $ThrottleReason
+    [int] $ThrottleCount
+    [datetime] $LastThrottle
+    [System.Collections.Generic.List[double]] $TempHistory
+    ThermalGuardian() {
+        $this.CPULimit = 90      # CPU max temp
+        $this.GPULimit = 85      # GPU max temp
+        $this.VRMLimit = 95      # VRM max temp (mini PC often higher)
+        $this.ThrottleActive = $false
+        $this.ThrottleReason = ""
+        $this.ThrottleCount = 0
+        $this.LastThrottle = [datetime]::MinValue
+        $this.TempHistory = [System.Collections.Generic.List[double]]::new()
+    }
+    [hashtable] Check([hashtable]$metrics) {
+        $result = @{
+            Throttle = $false
+            Reason = ""
+            Severity = 0  # 0=OK, 1=Warning, 2=Critical
+            Recommendation = "Normal"
+        }
+        $cpuTemp = if ($metrics.Temp) { $metrics.Temp } else { 0 }
+        $gpuTemp = if ($metrics.GPU -and $metrics.GPU.Temp) { $metrics.GPU.Temp } else { 0 }
+        $vrmTemp = if ($metrics.VRM -and $metrics.VRM.Temp) { $metrics.VRM.Temp } else { 0 }
+        # Track history
+        if ($this.TempHistory.Count -ge 60) { $this.TempHistory.RemoveAt(0) }
+        $this.TempHistory.Add($cpuTemp)
+        # Check CPU
+        if ($cpuTemp -ge $this.CPULimit) {
+            $result.Throttle = $true
+            $result.Reason = "CPU ${cpuTemp}C >= $($this.CPULimit)C"
+            $result.Severity = 2
+            $result.Recommendation = "ForceSilent"
+        } elseif ($cpuTemp -ge ($this.CPULimit - 10)) {
+            $result.Severity = 1
+            $result.Reason = "CPU ${cpuTemp}C blisko limitu"
+            $result.Recommendation = "AvoidTurbo"
+        }
+        # Check GPU
+        if ($gpuTemp -ge $this.GPULimit) {
+            $result.Throttle = $true
+            $result.Reason += " | GPU ${gpuTemp}C >= $($this.GPULimit)C"
+            $result.Severity = 2
+            $result.Recommendation = "ForceSilent"
+        } elseif ($gpuTemp -ge ($this.GPULimit - 10)) {
+            if ($result.Severity -lt 1) { $result.Severity = 1 }
+            $result.Reason += " | GPU ${gpuTemp}C blisko limitu"
+            if ($result.Recommendation -eq "Normal") { $result.Recommendation = "AvoidTurbo" }
+        }
+        # Check VRM (critical for mini PC!)
+        if ($vrmTemp -ge $this.VRMLimit) {
+            $result.Throttle = $true
+            $result.Reason += " | VRM ${vrmTemp}C >= $($this.VRMLimit)C!"
+            $result.Severity = 2
+            $result.Recommendation = "ForceSilent"
+        } elseif ($vrmTemp -ge ($this.VRMLimit - 10)) {
+            if ($result.Severity -lt 1) { $result.Severity = 1 }
+            $result.Reason += " | VRM ${vrmTemp}C blisko limitu"
+            if ($result.Recommendation -eq "Normal") { $result.Recommendation = "AvoidTurbo" }
+        }
+        # Update state
+        if ($result.Throttle) {
+            $this.ThrottleActive = $true
+            $this.ThrottleReason = $result.Reason
+            $this.ThrottleCount++
+            $this.LastThrottle = Get-Date
+        } else {
+            $this.ThrottleActive = $false
+            $this.ThrottleReason = ""
+        }
+        return $result
+    }
+    [double] GetTrend() {
+        if ($this.TempHistory.Count -lt 10) { return 0 }
+        $recent = $this.TempHistory | Select-Object -Last 10
+        $old = $this.TempHistory | Select-Object -First 10
+        return ($recent | Measure-Object -Average).Average - ($old | Measure-Object -Average).Average
+    }
+    [string] GetStatus() {
+        $trend = $this.GetTrend()
+        $trendStr = if ($trend -gt 1) { "?" } elseif ($trend -lt -1) { "?" } else { "->" }
+        return "Throttle:$($this.ThrottleCount) Trend:$trendStr"
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $data = @{
+                CPULimit = $this.CPULimit
+                GPULimit = $this.GPULimit
+                VRMLimit = $this.VRMLimit
+                ThrottleCount = $this.ThrottleCount
+                LastThrottle = $this.LastThrottle.ToString("o")
+                # Zapisz ostatnie 30 temperatur do analizy trendu
+                TempHistory = @($this.TempHistory | Select-Object -Last 30)
+            }
+            $path = Join-Path $dir "ThermalGuardian.json"
+            $data | ConvertTo-Json -Depth 3 | Set-Content $path -Encoding UTF8
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "ThermalGuardian.json"
+            if (Test-Path $path) {
+                $data = Get-Content $path -Raw | ConvertFrom-Json
+                if ($data.CPULimit) { $this.CPULimit = $data.CPULimit }
+                if ($data.GPULimit) { $this.GPULimit = $data.GPULimit }
+                if ($data.VRMLimit) { $this.VRMLimit = $data.VRMLimit }
+                if ($data.ThrottleCount) { $this.ThrottleCount = $data.ThrottleCount }
+                if ($data.LastThrottle) { 
+                    try { $this.LastThrottle = [datetime]::Parse($data.LastThrottle) } catch { }
+                }
+                if ($data.TempHistory) {
+                    foreach ($t in $data.TempHistory) {
+                        $this.TempHistory.Add([double]$t)
+                    }
+                }
+            }
+        } catch { }
+    }
+    [void] AdjustLimits([double]$cpuLimit, [double]$gpuLimit, [double]$vrmLimit) {
+        # Pozwala dostosowac limity na podstawie doswiadczenia
+        if ($cpuLimit -gt 70 -and $cpuLimit -lt 100) { $this.CPULimit = $cpuLimit }
+        if ($gpuLimit -gt 60 -and $gpuLimit -lt 95) { $this.GPULimit = $gpuLimit }
+        if ($vrmLimit -gt 80 -and $vrmLimit -lt 110) { $this.VRMLimit = $vrmLimit }
+    }
+}
+# V40: PROCESSAI - Inteligentna optymalizacja procesów systemowych
+class ProcessAI {
+    [hashtable] $ProcessProfiles       # procName -> {AvgCPU, AvgRAM, Priority, CanThrottle, Sessions}
+    [hashtable] $ThrottleHistory       # procName -> {ThrottleCount, RestoreCount, LastThrottle}
+    [hashtable] $SafeToThrottle        # Procesy, które można bezpiecznie throttlować
+    [hashtable] $HighPriorityApps      # Procesy wymagające wysokiego priorytetu
+    [hashtable] $SystemProcesses       # Procesy systemowe - NIGDY nie throttle
+    [int] $TotalLearnings = 0
+    [int] $TotalThrottles = 0
+    [datetime] $LastLearnTime
+    
+    ProcessAI() {
+        $this.ProcessProfiles = @{}
+        $this.ThrottleHistory = @{}
+        $this.SafeToThrottle = @{}
+        $this.HighPriorityApps = @{}
+        $this.SystemProcesses = @{}
+        $this.LastLearnTime = [DateTime]::Now
+        
+        # - V40: Procesy systemowe Windows - OCHRONA (nigdy nie throttle)
+        $this.SystemProcesses = @{
+            # Core Windows System
+            "system" = $true
+            "idle" = $true
+            "registry" = $true
+            "smss" = $true
+            "csrss" = $true
+            "wininit" = $true
+            "services" = $true
+            "lsass" = $true
+            "winlogon" = $true
+            # Windows Subsystem
+            "svchost" = $true
+            "runtimebroker" = $true
+            "dwm" = $true                      # Desktop Window Manager
+            "explorer" = $true                 # File Explorer
+            "shellexperiencehost" = $true      # Start Menu
+            "searchhost" = $true
+            "startmenuexperiencehost" = $true
+            # Security & Updates
+            "msmpeng" = $true                  # Windows Defender
+            "securityhealthservice" = $true
+            "trustedinstaller" = $true
+            "wuauclt" = $true
+            "usoclient" = $true
+            # Audio & Drivers
+            "audiodg" = $true
+            "ctfmon" = $true
+            # Network
+            "dns" = $true
+            "bits" = $true
+            # Self-protection
+            "cpumanager" = $true
+            "powershell" = $true
+            "pwsh" = $true
+        }
+        
+        # Wbudowana wiedza - procesy, które ZAWSZE można throttlować
+        $this.SafeToThrottle = @{
+            "chrome" = @{ Confidence = 0.8; Reason = "Browser background" }
+            "firefox" = @{ Confidence = 0.8; Reason = "Browser background" }
+            "msedge" = @{ Confidence = 0.8; Reason = "Browser background" }
+            "discord" = @{ Confidence = 0.7; Reason = "Chat app" }
+            "spotify" = @{ Confidence = 0.9; Reason = "Music streaming" }
+            "teams" = @{ Confidence = 0.6; Reason = "Communication" }
+            "onedrive" = @{ Confidence = 0.9; Reason = "Cloud sync" }
+            "dropbox" = @{ Confidence = 0.9; Reason = "Cloud sync" }
+            "steamwebhelper" = @{ Confidence = 0.8; Reason = "Steam helper" }
+        }
+        
+        # Procesy wymagające wysokiego priorytetu
+        $this.HighPriorityApps = @{
+            "valorant" = "Gaming"
+            "csgo" = "Gaming"
+            "cs2" = "Gaming"
+            "dota2" = "Gaming"
+            "obs64" = "Streaming"
+            "obs" = "Streaming"
+            "davinci resolve" = "Rendering"
+            "premiere" = "Rendering"
+            "blender" = "Rendering"
+        }
+    }
+    
+    # Główna metoda uczenia - analizuje procesy i ich zachowanie
+    [void] Learn([string]$currentApp, [double]$cpu, [double]$ram) {
+        if ([string]::IsNullOrWhiteSpace($currentApp)) { return }
+        
+        $appLower = $currentApp.ToLower()
+        
+        # Aktualizuj profil procesu
+        if (-not $this.ProcessProfiles.ContainsKey($appLower)) {
+            $this.ProcessProfiles[$appLower] = @{
+                AvgCPU = $cpu
+                MaxCPU = $cpu
+                AvgRAM = $ram
+                MaxRAM = $ram
+                Priority = "Normal"
+                CanThrottle = $null  # null = nie wiemy jeszcze
+                Sessions = 1
+                LastSeen = [DateTime]::Now
+                Category = "Unknown"
+            }
+        } else {
+            $profile = $this.ProcessProfiles[$appLower]
+            $sessions = $profile.Sessions + 1
+            $alpha = 1.0 / [Math]::Min(50, $sessions)
+            
+            # Średnie kroczące
+            $profile.AvgCPU = ($profile.AvgCPU * (1 - $alpha)) + ($cpu * $alpha)
+            $profile.AvgRAM = ($profile.AvgRAM * (1 - $alpha)) + ($ram * $alpha)
+            
+            # Maksima
+            if ($cpu -gt $profile.MaxCPU) { $profile.MaxCPU = $cpu }
+            if ($ram -gt $profile.MaxRAM) { $profile.MaxRAM = $ram }
+            
+            $profile.Sessions = $sessions
+            $profile.LastSeen = [DateTime]::Now
+            
+            # Klasyfikacja po zebraniu danych
+            if ($sessions -gt 10) {
+                $profile.Category = $this.ClassifyProcess($profile)
+                $profile.CanThrottle = $this.CanSafelyThrottle($profile)
+                
+                # Ustal priorytet
+                if ($profile.CanThrottle) {
+                    $profile.Priority = "BelowNormal"
+                } elseif ($profile.Category -eq "Gaming" -or $profile.Category -eq "Rendering") {
+                    $profile.Priority = "AboveNormal"
+                } else {
+                    $profile.Priority = "Normal"
+                }
+            }
+        }
+        
+        $this.TotalLearnings++
+        $this.LastLearnTime = [DateTime]::Now
+    }
+    
+    # Klasyfikacja procesu na podstawie użycia zasobów
+    [string] ClassifyProcess([hashtable]$profile) {
+        $avgCPU = $profile.AvgCPU
+        $maxCPU = $profile.MaxCPU
+        $avgRAM = $profile.AvgRAM
+        
+        # Wysokie CPU i RAM = Rendering/Gaming
+        if ($avgCPU -gt 50 -and $avgRAM -gt 2000) {
+            return "Rendering"
+        }
+        # Wysokie CPU, niskie RAM = Gaming
+        elseif ($avgCPU -gt 40 -and $avgRAM -lt 2000) {
+            return "Gaming"
+        }
+        # Niskie CPU, wysokie RAM = Browser/Communication
+        elseif ($avgCPU -lt 20 -and $avgRAM -gt 500) {
+            return "Browser"
+        }
+        # Średnie użycie = Work
+        elseif ($avgCPU -gt 10 -and $avgCPU -lt 40) {
+            return "Work"
+        }
+        # Niskie użycie = Background
+        else {
+            return "Background"
+        }
+    }
+    
+    # Czy można bezpiecznie throttlować proces?
+    [bool] CanSafelyThrottle([hashtable]$profile) {
+        # Background procesy można throttlować
+        if ($profile.Category -eq "Background") { return $true }
+        
+        # Browser można throttlować gdy nie jest w foreground
+        if ($profile.Category -eq "Browser" -and $profile.AvgCPU -lt 30) { return $true }
+        
+        # Gaming/Rendering NIGDY nie throttluj
+        if ($profile.Category -eq "Gaming" -or $profile.Category -eq "Rendering") { return $false }
+        
+        # Średnie CPU można throttlować jeśli nie w foreground
+        if ($profile.AvgCPU -lt 40) { return $true }
+        
+        return $false
+    }
+    
+    # Rekomendacje dla ProBalance
+    [hashtable] GetThrottleRecommendations([string]$currentForeground) {
+        $recommendations = @{
+            SafeToThrottle = @()
+            HighPriority = @()
+            SystemProtected = @()
+            Confidence = 0.0
+        }
+        
+        $foregroundLower = if ($currentForeground) { $currentForeground.ToLower() } else { "" }
+        
+        # Procesy bezpieczne do throttlowania
+        foreach ($proc in $this.ProcessProfiles.Keys) {
+            $profile = $this.ProcessProfiles[$proc]
+            
+            # - V40: OCHRONA SYSTEM PROCESSES - NIGDY NIE THROTTLE!
+            if ($this.SystemProcesses.ContainsKey($proc)) {
+                $recommendations.SystemProtected += $proc
+                continue
+            }
+            
+            # Nie throttluj aktywnej aplikacji
+            if ($proc -eq $foregroundLower) { continue }
+            
+            # Sprawdź czy można throttlować
+            if ($profile.CanThrottle -eq $true -or $this.SafeToThrottle.ContainsKey($proc)) {
+                $recommendations.SafeToThrottle += $proc
+            }
+        }
+        
+        # Procesy wysokiego priorytetu
+        foreach ($proc in $this.HighPriorityApps.Keys) {
+            if ($foregroundLower -eq $proc.ToLower()) {
+                $recommendations.HighPriority += $proc
+            }
+        }
+        
+        # Confidence based on learned data
+        $learnedCount = ($this.ProcessProfiles.Values | Where-Object { $_.Sessions -gt 10 }).Count
+        $recommendations.Confidence = [Math]::Min(0.9, $learnedCount / 20.0)
+        
+        return $recommendations
+    }
+    
+    [string] GetStatus() {
+        $learned = ($this.ProcessProfiles.Values | Where-Object { $_.Sessions -gt 10 }).Count
+        $total = $this.ProcessProfiles.Count
+        return "Learned:$learned/$total Throttles:$($this.TotalThrottles)"
+    }
+    
+    [void] SaveState([string]$dir) {
+        try {
+            $state = @{
+                ProcessProfiles = @{}
+                ThrottleHistory = @{}
+                TotalLearnings = $this.TotalLearnings
+                TotalThrottles = $this.TotalThrottles
+                LastSaved = (Get-Date).ToString("o")
+            }
+            
+            foreach ($key in $this.ProcessProfiles.Keys) {
+                $state.ProcessProfiles[$key] = $this.ProcessProfiles[$key]
+            }
+            foreach ($key in $this.ThrottleHistory.Keys) {
+                $state.ThrottleHistory[$key] = $this.ThrottleHistory[$key]
+            }
+            
+            $path = Join-Path $dir "ProcessAI.json"
+            $json = $state | ConvertTo-Json -Depth 5
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+        } catch {
+            try { "$((Get-Date).ToString('o')) - ProcessAI.SaveState ERROR: $_" | Out-File -FilePath 'C:\CPUManager\ErrorLog.txt' -Append -Encoding utf8 } catch { }
+        }
+    }
+    
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "ProcessAI.json"
+            if (Test-Path $path) {
+                $state = Get-Content $path -Raw | ConvertFrom-Json
+                
+                if ($state.ProcessProfiles) {
+                    $state.ProcessProfiles.PSObject.Properties | ForEach-Object {
+                        $this.ProcessProfiles[$_.Name] = @{
+                            AvgCPU = $_.Value.AvgCPU
+                            MaxCPU = $_.Value.MaxCPU
+                            AvgRAM = $_.Value.AvgRAM
+                            MaxRAM = $_.Value.MaxRAM
+                            Priority = $_.Value.Priority
+                            CanThrottle = $_.Value.CanThrottle
+                            Sessions = $_.Value.Sessions
+                            Category = $_.Value.Category
+                        }
+                    }
+                }
+                
+                if ($state.TotalLearnings) { $this.TotalLearnings = $state.TotalLearnings }
+                if ($state.TotalThrottles) { $this.TotalThrottles = $state.TotalThrottles }
+            }
+        } catch { }
+    }
+}
+# V40.2: GPUAI - Inteligentne zarządzanie GPU (iGPU/dGPU switching + power control)
+# Obsługuje: Intel iGPU, AMD APU (Vega/RDNA), NVIDIA dGPU, AMD dGPU (RX), konfiguracje hybrid
+# V40.4: DODANO Q-LEARNING dla decyzji GPU (nie tylko EMA!)
+class GPUAI {
+    [bool] $HasiGPU = $false
+    [bool] $HasdGPU = $false
+    [string] $iGPUName = ""
+    [string] $dGPUName = ""
+    [string] $dGPUVendor = ""  # NVIDIA/AMD
+    [string] $iGPUVendor = ""  # Intel/AMD (APU)
+    [string] $CurrentMode = "Auto"  # Auto/iGPU-Only/dGPU-Only
+    [int] $TotalSwitches = 0
+    [int] $TotalLearnings = 0
+    [datetime] $LastSwitch
+    [datetime] $LastLearning
+    [hashtable] $AppGPUProfiles = @{}  # app -> GPU profile z uczeniem
+    [hashtable] $GPULoadHistory = @{}  # Ostatnie pomiary dla uczenia
+    [string] $SystemType = "Unknown"   # SingleGPU/Hybrid/DedicatedOnly/IntegratedOnly
+    
+    # === Q-LEARNING dla GPU ===
+    [hashtable] $QTable = @{}           # State -> { Turbo, Balanced, Silent } Q-values
+    [double] $LearningRate = 0.15       # Alpha - szybkość uczenia
+    [double] $DiscountFactor = 0.9      # Gamma - waga przyszłych nagród
+    [double] $ExplorationRate = 0.10    # Epsilon - eksploracja vs eksploatacja
+    [string] $LastState = ""
+    [string] $LastAction = ""
+    [double] $LastReward = 0.0
+    [double] $CumulativeReward = 0.0
+    [int] $TotalQUpdates = 0
+    
+    GPUAI([bool]$hasiGPU, [bool]$hasdGPU, [string]$iGPUName, [string]$dGPUName, [string]$dGPUVendor) {
+        $this.HasiGPU = $hasiGPU
+        $this.HasdGPU = $hasdGPU
+        $this.iGPUName = $iGPUName
+        $this.dGPUName = $dGPUName
+        $this.dGPUVendor = $dGPUVendor
+        $this.LastSwitch = [DateTime]::Now
+        $this.LastLearning = [DateTime]::Now
+        $this.AppGPUProfiles = @{}
+        $this.GPULoadHistory = @{}
+        
+        # === Q-LEARNING INIT ===
+        $this.QTable = @{}
+        $this.LastState = ""
+        $this.LastAction = ""
+        $this.LastReward = 0.0
+        $this.CumulativeReward = 0.0
+        $this.TotalQUpdates = 0
+        
+        # Wykryj typ iGPU vendor
+        if ($iGPUName -match "Intel") { $this.iGPUVendor = "Intel" }
+        elseif ($iGPUName -match "AMD|Radeon|Vega") { $this.iGPUVendor = "AMD" }
+        
+        # Określ typ systemu
+        if ($hasiGPU -and $hasdGPU) { $this.SystemType = "Hybrid" }
+        elseif ($hasdGPU -and -not $hasiGPU) { $this.SystemType = "DedicatedOnly" }
+        elseif ($hasiGPU -and -not $hasdGPU) { $this.SystemType = "IntegratedOnly" }
+        else { $this.SystemType = "Unknown" }
+        
+        # V40 FIX: Usunieto LoadState z konstruktora - wywoływany jest później w Main()
+        # $this.LoadState($Script:ConfigDir) - powodowało podwójne ładowanie
+    }
+    
+    # === Q-LEARNING METHODS ===
+    
+    # Dyskretyzacja stanu GPU dla Q-Learning
+    [string] DiscretizeGPUState([double]$gpuLoad, [string]$activeGPU, [double]$cpuLoad, [double]$temp, [string]$appCategory) {
+        # GPU Load bins: 0-20=L, 20-50=M, 50-80=H, 80+=X
+        $gpuBin = if ($gpuLoad -lt 20) { "L" } elseif ($gpuLoad -lt 50) { "M" } elseif ($gpuLoad -lt 80) { "H" } else { "X" }
+        # Active GPU: i=iGPU, d=dGPU, a=Auto
+        $gpuType = switch ($activeGPU) { "iGPU" { "i" } "dGPU" { "d" } default { "a" } }
+        # CPU Load bins: 0-30=L, 30-60=M, 60+=H
+        $cpuBin = if ($cpuLoad -lt 30) { "L" } elseif ($cpuLoad -lt 60) { "M" } else { "H" }
+        # Temp bins: <60=C, 60-80=W, 80+=H
+        $tempBin = if ($temp -lt 60) { "C" } elseif ($temp -lt 80) { "W" } else { "H" }
+        # App category: G=Gaming/Heavy, W=Work, I=Idle/Light
+        $catBin = switch ($appCategory) { "Heavy" { "G" } "Gaming" { "G" } "Rendering" { "G" } "Light" { "I" } default { "W" } }
+        
+        return "G$gpuBin-$gpuType-C$cpuBin-T$tempBin-$catBin"
+    }
+    
+    # Inicjalizuj stan w QTable jeśli nie istnieje
+    [void] InitQState([string]$state) {
+        if (-not $this.QTable.ContainsKey($state)) {
+            $this.QTable[$state] = @{ "Turbo" = 0.0; "Balanced" = 0.0; "Silent" = 0.0 }
+        }
+    }
+    
+    # Wybierz akcję na podstawie Q-Table (epsilon-greedy)
+    [string] SelectQAction([string]$state) {
+        $this.InitQState($state)
+        
+        # Eksploracja - losowa akcja
+        if ((Get-Random -Minimum 0.0 -Maximum 1.0) -lt $this.ExplorationRate) {
+            return @("Turbo", "Balanced", "Silent")[(Get-Random -Maximum 3)]
+        }
+        
+        # Eksploatacja - najlepsza akcja z Q-Table
+        # ZMIANA: Przy równych Q-values preferuj niższy tryb (efektywność energetyczna)
+        $q = $this.QTable[$state]
+        $best = "Silent"
+        $bestV = $q["Silent"]
+        if ($q["Balanced"] -gt $bestV) { $best = "Balanced"; $bestV = $q["Balanced"] }
+        if ($q["Turbo"] -gt $bestV) { $best = "Turbo" }
+        return $best
+    }
+    
+    # Oblicz reward dla GPU (iGPU/dGPU aware)
+    [double] CalcGPUReward([string]$action, [double]$gpuLoad, [string]$activeGPU, [double]$cpuLoad, [double]$temp, [bool]$isHeavyApp) {
+        $reward = 0.0
+        
+        # === HIGH GPU LOAD (>60%) - bazuj na AKTUALNYM load, nie profilu ===
+        if ($gpuLoad -gt 60) {
+            switch ($action) {
+                "Turbo" { 
+                    $reward += 3.0
+                    if ($activeGPU -eq "dGPU") { $reward += 1.5 }
+                }
+                "Balanced" { $reward += 0.5 }
+                "Silent" { $reward -= 3.0 }
+            }
+        }
+        # === LOW GPU LOAD (<20%) - preferuj Silent ===
+        elseif ($gpuLoad -lt 20 -and $cpuLoad -lt 30) {
+            switch ($action) {
+                "Silent" { 
+                    $reward += 3.0
+                    if ($activeGPU -eq "iGPU") { $reward += 1.5 }
+                }
+                "Balanced" { $reward += 1.5 }
+                "Turbo" { $reward -= 2.0 }
+            }
+        }
+        # === MEDIUM GPU LOAD (20-60%) ===
+        else {
+            switch ($action) {
+                "Balanced" { $reward += 2.0 }
+                "Turbo" { if ($gpuLoad -gt 40) { $reward += 1.0 } else { $reward -= 0.5 } }
+                "Silent" { if ($gpuLoad -lt 30) { $reward += 1.0 } else { $reward -= 1.0 } }
+            }
+        }
+        
+        # === THERMAL PENALTY ===
+        if ($temp -gt 85) {
+            switch ($action) {
+                "Turbo" { $reward -= 2.0 }
+                "Silent" { $reward += 1.0 }
+            }
+        } elseif ($temp -lt 55) {
+            if ($action -eq "Turbo" -and $gpuLoad -gt 30) { $reward += 0.5 }
+        }
+        
+        # === HYBRID SYSTEM BONUS ===
+        if ($this.SystemType -eq "Hybrid") {
+            if ($activeGPU -eq "dGPU" -and $gpuLoad -gt 50 -and $action -eq "Turbo") {
+                $reward += 1.0
+            }
+            if ($activeGPU -eq "iGPU" -and $gpuLoad -lt 25 -and $action -eq "Silent") {
+                $reward += 1.0
+            }
+        }
+        
+        return $reward
+    }
+    
+    # Aktualizuj Q-Table (Bellman equation)
+    [void] UpdateQ([string]$state, [string]$action, [double]$reward, [string]$nextState) {
+        $this.InitQState($state)
+        $this.InitQState($nextState)
+        
+        # Q(s,a) = Q(s,a) + α * (reward + γ * max(Q(s',a')) - Q(s,a))
+        $currentQ = $this.QTable[$state][$action]
+        $maxNextQ = [Math]::Max([Math]::Max($this.QTable[$nextState]["Turbo"], $this.QTable[$nextState]["Balanced"]), $this.QTable[$nextState]["Silent"])
+        
+        $newQ = $currentQ + $this.LearningRate * ($reward + $this.DiscountFactor * $maxNextQ - $currentQ)
+        $this.QTable[$state][$action] = $newQ
+        
+        $this.TotalQUpdates++
+        $this.CumulativeReward += $reward
+        $this.LastReward = $reward
+        
+        # Decay exploration rate (z czasem mniej eksploracji)
+        $this.ExplorationRate = [Math]::Max(0.02, $this.ExplorationRate * 0.9995)
+        
+        $this.LastState = $state
+        $this.LastAction = $action
+    }
+    
+    # Rekomendacja GPU na podstawie trybu AI
+    [hashtable] GetGPURecommendation([string]$mode, [string]$currentApp, [double]$cpuLoad) {
+        $recommendation = @{
+            PreferredGPU = "Auto"
+            Reason = ""
+            PowerLimit = 100
+            ShouldSwitch = $false
+            GPUType = $this.SystemType
+        }
+        
+        # System z jednym GPU - brak wyboru, ale nadal ucz się zachowań
+        if ($this.SystemType -eq "DedicatedOnly") {
+            $recommendation.PreferredGPU = "dGPU"
+            $recommendation.Reason = "Single GPU: $($this.dGPUName)"
+            # Dostosuj PowerLimit na podstawie trybu
+            $recommendation.PowerLimit = switch ($mode) {
+                "Silent" { 70 }
+                "Turbo" { 100 }
+                default { 85 }
+            }
+            return $recommendation
+        }
+        if ($this.SystemType -eq "IntegratedOnly") {
+            $recommendation.PreferredGPU = "iGPU"
+            $recommendation.Reason = "Single GPU: $($this.iGPUName)"
+            $recommendation.PowerLimit = 100  # iGPU zawsze na max
+            return $recommendation
+        }
+        
+        # HYBRID: Sprawdź najpierw nauczone preferencje aplikacji
+        $appLower = if ($currentApp) { $currentApp.ToLower() } else { "" }
+        if ($appLower -and $this.AppGPUProfiles.ContainsKey($appLower)) {
+            $appPref = $this.AppGPUProfiles[$appLower]
+            # Użyj nauczonych preferencji jeśli mamy wystarczająco danych
+            if ($appPref.Sessions -ge 3 -and $appPref.PreferredGPU -ne "Auto") {
+                $recommendation.PreferredGPU = $appPref.PreferredGPU
+                $recommendation.Reason = "AI Learned: $currentApp -> $($appPref.PreferredGPU) (avg:$([Math]::Round($appPref.AvgGPULoad))% max:$([Math]::Round($appPref.MaxGPULoad))%)"
+                $recommendation.PowerLimit = if ($appPref.PreferredGPU -eq "dGPU") { 100 } else { 80 }
+                return $recommendation
+            }
+        }
+        
+        # Domyślna logika na podstawie trybu AI
+        switch ($mode) {
+            "Silent" {
+                $recommendation.PreferredGPU = "iGPU"
+                $recommendation.PowerLimit = 60
+                $recommendation.Reason = "Silent: prefer iGPU (battery/quiet)"
+                $recommendation.ShouldSwitch = ($this.CurrentMode -ne "iGPU-Only")
+            }
+            "Turbo" {
+                $recommendation.PreferredGPU = "dGPU"
+                $recommendation.PowerLimit = 100
+                $recommendation.Reason = "Turbo: force dGPU (max performance)"
+                $recommendation.ShouldSwitch = ($this.CurrentMode -ne "dGPU-Only")
+            }
+            default {
+                $recommendation.PreferredGPU = "Auto"
+                $recommendation.PowerLimit = 80
+                $recommendation.Reason = "Balanced: Windows Hybrid Graphics"
+                $recommendation.ShouldSwitch = ($this.CurrentMode -ne "Auto")
+            }
+        }
+        
+        return $recommendation
+    }
+    
+    # V40.2: Rozszerzone uczenie się GPU - działa dla WSZYSTKICH konfiguracji
+    [void] Learn([string]$app, [double]$gpuLoad, [string]$activeGPU, [double]$cpuLoad, [double]$temp) {
+        if ([string]::IsNullOrWhiteSpace($app)) { return }
+        if ($gpuLoad -lt 1) { return }  # Ignoruj zerowe obciążenie
+        
+        $appLower = $app.ToLower()
+        $now = [DateTime]::Now
+        
+        # Inicjalizuj profil jeśli nowy
+        if (-not $this.AppGPUProfiles.ContainsKey($appLower)) {
+            $this.AppGPUProfiles[$appLower] = @{
+                PreferredGPU = "Auto"
+                AvgGPULoad = $gpuLoad
+                MaxGPULoad = $gpuLoad
+                MinGPULoad = $gpuLoad
+                AvgCPULoad = $cpuLoad
+                AvgTemp = $temp
+                Sessions = 1
+                Samples = 1
+                LastSeen = $now
+                FirstSeen = $now
+                ActiveGPUHistory = @{ "dGPU" = 0; "iGPU" = 0; "Auto" = 0; "Unknown" = 0 }
+                GPULoadBuckets = @{ "Low" = 0; "Medium" = 0; "High" = 0; "Extreme" = 0 }
+                NeedsHighPerf = $false
+                IsLightApp = $false
+            }
+        }
+        
+        $profile = $this.AppGPUProfiles[$appLower]
+        
+        # Aktualizuj statystyki
+        $alpha = 0.15  # Współczynnik uczenia
+        $profile.AvgGPULoad = ($profile.AvgGPULoad * (1 - $alpha)) + ($gpuLoad * $alpha)
+        $profile.MaxGPULoad = [Math]::Max($profile.MaxGPULoad, $gpuLoad)
+        $profile.MinGPULoad = [Math]::Min($profile.MinGPULoad, $gpuLoad)
+        $profile.AvgCPULoad = ($profile.AvgCPULoad * (1 - $alpha)) + ($cpuLoad * $alpha)
+        $profile.AvgTemp = ($profile.AvgTemp * (1 - $alpha)) + ($temp * $alpha)
+        $profile.Samples++
+        $profile.LastSeen = $now
+        
+        # Śledź który GPU był aktywny
+        if ($profile.ActiveGPUHistory.ContainsKey($activeGPU)) {
+            $profile.ActiveGPUHistory[$activeGPU]++
+        }
+        
+        # Kategoryzuj obciążenie GPU
+        if ($gpuLoad -lt 20) { $profile.GPULoadBuckets["Low"]++ }
+        elseif ($gpuLoad -lt 50) { $profile.GPULoadBuckets["Medium"]++ }
+        elseif ($gpuLoad -lt 80) { $profile.GPULoadBuckets["High"]++ }
+        else { $profile.GPULoadBuckets["Extreme"]++ }
+        
+        # Nowa sesja jeśli minęło >5 min od ostatniego widzenia
+        if (($now - $profile.LastSeen).TotalMinutes -gt 5) {
+            $profile.Sessions++
+        }
+        
+        # UCZENIE: Klasyfikuj aplikację po zebraniu wystarczającej ilości danych
+        if ($profile.Samples -ge 10) {
+            $totalBuckets = $profile.GPULoadBuckets["Low"] + $profile.GPULoadBuckets["Medium"] + $profile.GPULoadBuckets["High"] + $profile.GPULoadBuckets["Extreme"]
+            
+            if ($totalBuckets -gt 0) {
+                $highPercent = (($profile.GPULoadBuckets["High"] + $profile.GPULoadBuckets["Extreme"]) / $totalBuckets) * 100
+                $lowPercent = ($profile.GPULoadBuckets["Low"] / $totalBuckets) * 100
+                
+                # Aplikacja potrzebuje wysokiej wydajności GPU
+                if ($highPercent -gt 40 -or $profile.MaxGPULoad -gt 70 -or $profile.AvgGPULoad -gt 45) {
+                    $profile.NeedsHighPerf = $true
+                    $profile.IsLightApp = $false
+                    # Dla systemu Hybrid: preferuj dGPU
+                    if ($this.SystemType -eq "Hybrid") {
+                        $profile.PreferredGPU = "dGPU"
+                    }
+                }
+                # Lekka aplikacja - wystarczy iGPU
+                elseif ($lowPercent -gt 70 -and $profile.AvgGPULoad -lt 15 -and $profile.MaxGPULoad -lt 30) {
+                    $profile.IsLightApp = $true
+                    $profile.NeedsHighPerf = $false
+                    # Dla systemu Hybrid: preferuj iGPU
+                    if ($this.SystemType -eq "Hybrid") {
+                        $profile.PreferredGPU = "iGPU"
+                    }
+                }
+                # Średnie użycie - Auto
+                else {
+                    $profile.PreferredGPU = "Auto"
+                }
+            }
+        }
+        
+        # === V40.4: Q-LEARNING UPDATE ===
+        # Określ kategorię aplikacji na podstawie AKTUALNEGO GPU load
+        $appCategory = if ($gpuLoad -gt 60) { "Heavy" } elseif ($gpuLoad -lt 20) { "Light" } else { "Work" }
+        
+        # Dyskretyzuj obecny stan
+        $currentState = $this.DiscretizeGPUState($gpuLoad, $activeGPU, $cpuLoad, $temp, $appCategory)
+        
+        # Jeśli mamy poprzedni stan - aktualizuj Q-Table
+        if ($this.LastState -and $this.LastAction) {
+            $isHeavyApp = ($gpuLoad -gt 60)  # Bazuj tylko na AKTUALNYM GPU load
+            $reward = $this.CalcGPUReward($this.LastAction, $gpuLoad, $activeGPU, $cpuLoad, $temp, $isHeavyApp)
+            $this.UpdateQ($this.LastState, $this.LastAction, $reward, $currentState)
+        }
+        
+        # Wybierz akcję dla obecnego stanu (do następnej iteracji)
+        $this.LastAction = $this.SelectQAction($currentState)
+        $this.LastState = $currentState
+        
+        $this.TotalLearnings++
+        $this.LastLearning = $now
+    }
+    
+    # Kompatybilność wsteczna - stara sygnatura
+    [void] Learn([string]$app, [double]$gpuLoad, [string]$activeGPU) {
+        $this.Learn($app, $gpuLoad, $activeGPU, 0, 50)
+    }
+    
+    # V40.4: Pobierz rekomendowany tryb AI na podstawie Q-LEARNING + nauczonych danych GPU
+    [string] GetRecommendedMode([string]$app, [double]$currentGPULoad) {
+        if ([string]::IsNullOrWhiteSpace($app)) { return "Balanced" }
+        
+        # Określ kategorię na podstawie AKTUALNEGO GPU load
+        $appCategory = if ($currentGPULoad -gt 60) { "Heavy" } elseif ($currentGPULoad -lt 20) { "Light" } else { "Work" }
+        
+        # Dyskretyzuj AKTUALNY stan (nie używaj starego LastState!)
+        # Użyj uproszczonej wersji stanu bo nie mamy wszystkich parametrów
+        $gpuBin = if ($currentGPULoad -lt 20) { "L" } elseif ($currentGPULoad -lt 50) { "M" } elseif ($currentGPULoad -lt 80) { "H" } else { "X" }
+        $catBin = switch ($appCategory) { "Heavy" { "G" } "Light" { "I" } default { "W" } }
+        
+        # Szukaj pasującego stanu w Q-Table (z dowolnym GPU type i temp)
+        $matchingStates = $this.QTable.Keys | Where-Object { $_ -match "^G$gpuBin-.*-$catBin$" }
+        
+        if ($matchingStates) {
+            # Znajdź stan z najlepszymi Q-values
+            $bestAction = "Silent"
+            $bestQ = -999.0
+            
+            foreach ($state in $matchingStates) {
+                $qValues = $this.QTable[$state]
+                $maxQ = [Math]::Max([Math]::Max($qValues["Turbo"], $qValues["Balanced"]), $qValues["Silent"])
+                
+                if ($maxQ -gt $bestQ -and [Math]::Abs($maxQ) -gt 0.5) {
+                    $bestQ = $maxQ
+                    # Wybierz akcję z najwyższym Q dla tego stanu
+                    if ($qValues["Silent"] -ge $qValues["Balanced"] -and $qValues["Silent"] -ge $qValues["Turbo"]) {
+                        $bestAction = "Silent"
+                    } elseif ($qValues["Balanced"] -ge $qValues["Turbo"]) {
+                        $bestAction = "Balanced"
+                    } else {
+                        $bestAction = "Turbo"
+                    }
+                }
+            }
+            
+            if ($bestQ -gt -999.0) {
+                return $bestAction
+            }
+        }
+        
+        # === FALLBACK: Decyzja na podstawie AKTUALNEGO GPU load ===
+        if ($currentGPULoad -gt 60) {
+            return "Turbo"
+        }
+        if ($currentGPULoad -lt 20) {
+            return "Silent"
+        }
+        return "Balanced"
+    }
+    
+    [string] GetStatus() {
+        $appsLearned = $this.AppGPUProfiles.Count
+        $highPerfApps = ($this.AppGPUProfiles.Values | Where-Object { $_.NeedsHighPerf -eq $true }).Count
+        $lightApps = ($this.AppGPUProfiles.Values | Where-Object { $_.IsLightApp -eq $true }).Count
+        $qStates = $this.QTable.Count
+        return "Type:$($this.SystemType) Apps:$appsLearned (Heavy:$highPerfApps Light:$lightApps) Q:$qStates Learns:$($this.TotalLearnings)"
+    }
+    
+    [hashtable] GetLearningStats() {
+        return @{
+            SystemType = $this.SystemType
+            HasiGPU = $this.HasiGPU
+            HasdGPU = $this.HasdGPU
+            iGPUName = $this.iGPUName
+            iGPUVendor = $this.iGPUVendor
+            dGPUName = $this.dGPUName
+            dGPUVendor = $this.dGPUVendor
+            TotalAppsLearned = $this.AppGPUProfiles.Count
+            TotalLearnings = $this.TotalLearnings
+            TotalQUpdates = $this.TotalQUpdates
+            QTableStates = $this.QTable.Count
+            LastReward = $this.LastReward
+            CumulativeReward = $this.CumulativeReward
+            ExplorationRate = $this.ExplorationRate
+            HighPerfApps = ($this.AppGPUProfiles.Values | Where-Object { $_.NeedsHighPerf -eq $true }).Count
+            LightApps = ($this.AppGPUProfiles.Values | Where-Object { $_.IsLightApp -eq $true }).Count
+            LastLearning = $this.LastLearning
+        }
+    }
+    
+    [void] SaveState([string]$dir) {
+        try {
+            $state = @{
+                AppGPUProfiles = $this.AppGPUProfiles
+                TotalSwitches = $this.TotalSwitches
+                TotalLearnings = $this.TotalLearnings
+                CurrentMode = $this.CurrentMode
+                SystemType = $this.SystemType
+                # Hardware detection info - for CONFIGURATOR display
+                HasiGPU = $this.HasiGPU
+                HasdGPU = $this.HasdGPU
+                iGPUName = $this.iGPUName
+                iGPUVendor = $this.iGPUVendor
+                dGPUName = $this.dGPUName
+                dGPUVendor = $this.dGPUVendor
+                PrimaryGPU = if ($this.HasdGPU) { "dGPU" } elseif ($this.HasiGPU) { "iGPU" } else { "None" }
+                LastSaved = (Get-Date).ToString("o")
+                LastLearning = $this.LastLearning.ToString("o")
+                # V40.4: Q-Learning data
+                QTable = $this.QTable
+                TotalQUpdates = $this.TotalQUpdates
+                CumulativeReward = $this.CumulativeReward
+                LastReward = $this.LastReward
+                ExplorationRate = $this.ExplorationRate
+                LastState = $this.LastState
+                LastAction = $this.LastAction
+            }
+            
+            $path = Join-Path $dir "GPUAI.json"
+            $json = $state | ConvertTo-Json -Depth 6
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+        } catch { }
+    }
+    
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "GPUAI.json"
+            if (Test-Path $path) {
+                $state = Get-Content $path -Raw | ConvertFrom-Json
+                
+                if ($state.AppGPUProfiles) {
+                    foreach ($app in $state.AppGPUProfiles.PSObject.Properties) {
+                        $v = $app.Value
+                        $this.AppGPUProfiles[$app.Name] = @{
+                            PreferredGPU = if ($v.PreferredGPU) { $v.PreferredGPU } else { "Auto" }
+                            AvgGPULoad = if ($v.AvgGPULoad) { $v.AvgGPULoad } else { 0 }
+                            MaxGPULoad = if ($v.MaxGPULoad) { $v.MaxGPULoad } else { 0 }
+                            MinGPULoad = if ($v.MinGPULoad) { $v.MinGPULoad } else { 0 }
+                            AvgCPULoad = if ($v.AvgCPULoad) { $v.AvgCPULoad } else { 0 }
+                            AvgTemp = if ($v.AvgTemp) { $v.AvgTemp } else { 50 }
+                            Sessions = if ($v.Sessions) { $v.Sessions } else { 1 }
+                            Samples = if ($v.Samples) { $v.Samples } else { 1 }
+                            LastSeen = if ($v.LastSeen) { $v.LastSeen } else { [DateTime]::Now }
+                            FirstSeen = if ($v.FirstSeen) { $v.FirstSeen } else { [DateTime]::Now }
+                            ActiveGPUHistory = if ($v.ActiveGPUHistory) { 
+                                @{ 
+                                    "dGPU" = if ($v.ActiveGPUHistory.dGPU) { $v.ActiveGPUHistory.dGPU } else { 0 }
+                                    "iGPU" = if ($v.ActiveGPUHistory.iGPU) { $v.ActiveGPUHistory.iGPU } else { 0 }
+                                    "Auto" = if ($v.ActiveGPUHistory.Auto) { $v.ActiveGPUHistory.Auto } else { 0 }
+                                    "Unknown" = if ($v.ActiveGPUHistory.Unknown) { $v.ActiveGPUHistory.Unknown } else { 0 }
+                                }
+                            } else { @{ "dGPU" = 0; "iGPU" = 0; "Auto" = 0; "Unknown" = 0 } }
+                            GPULoadBuckets = if ($v.GPULoadBuckets) {
+                                @{
+                                    "Low" = if ($v.GPULoadBuckets.Low) { $v.GPULoadBuckets.Low } else { 0 }
+                                    "Medium" = if ($v.GPULoadBuckets.Medium) { $v.GPULoadBuckets.Medium } else { 0 }
+                                    "High" = if ($v.GPULoadBuckets.High) { $v.GPULoadBuckets.High } else { 0 }
+                                    "Extreme" = if ($v.GPULoadBuckets.Extreme) { $v.GPULoadBuckets.Extreme } else { 0 }
+                                }
+                            } else { @{ "Low" = 0; "Medium" = 0; "High" = 0; "Extreme" = 0 } }
+                            NeedsHighPerf = if ($null -ne $v.NeedsHighPerf) { $v.NeedsHighPerf } else { $false }
+                            IsLightApp = if ($null -ne $v.IsLightApp) { $v.IsLightApp } else { $false }
+                        }
+                    }
+                }
+                
+                if ($state.TotalSwitches) { $this.TotalSwitches = $state.TotalSwitches }
+                if ($state.TotalLearnings) { $this.TotalLearnings = $state.TotalLearnings }
+                if ($state.CurrentMode) { $this.CurrentMode = $state.CurrentMode }
+                
+                # V40.3: Załaduj info o GPU (z poprzedniej sesji)
+                if ($state.SystemType) { $this.SystemType = $state.SystemType }
+                if ($null -ne $state.HasiGPU) { $this.HasiGPU = $state.HasiGPU }
+                if ($null -ne $state.HasdGPU) { $this.HasdGPU = $state.HasdGPU }
+                if ($state.iGPUName) { $this.iGPUName = $state.iGPUName }
+                if ($state.iGPUVendor) { $this.iGPUVendor = $state.iGPUVendor }
+                if ($state.dGPUName) { $this.dGPUName = $state.dGPUName }
+                if ($state.dGPUVendor) { $this.dGPUVendor = $state.dGPUVendor }
+                if ($state.LastLearning) { 
+                    try { $this.LastLearning = [DateTime]::Parse($state.LastLearning) } catch { }
+                }
+                
+                # V40.4: Załaduj Q-Learning data
+                if ($state.QTable) {
+                    $this.QTable = @{}
+                    foreach ($s in $state.QTable.PSObject.Properties) {
+                        $this.QTable[$s.Name] = @{
+                            "Turbo" = if ($s.Value.Turbo) { [double]$s.Value.Turbo } else { 0.0 }
+                            "Balanced" = if ($s.Value.Balanced) { [double]$s.Value.Balanced } else { 0.0 }
+                            "Silent" = if ($s.Value.Silent) { [double]$s.Value.Silent } else { 0.0 }
+                        }
+                    }
+                }
+                if ($state.TotalQUpdates) { $this.TotalQUpdates = [int]$state.TotalQUpdates }
+                if ($state.CumulativeReward) { $this.CumulativeReward = [double]$state.CumulativeReward }
+                if ($state.LastReward) { $this.LastReward = [double]$state.LastReward }
+                if ($state.ExplorationRate) { $this.ExplorationRate = [double]$state.ExplorationRate }
+                if ($state.LastState) { $this.LastState = $state.LastState }
+                if ($state.LastAction) { $this.LastAction = $state.LastAction }
+            }
+        } catch { }
+    }
+}
+class NetworkOptimizer {
+    [bool] $Initialized = $false
+    [bool] $OptimizationsApplied = $false
+    [string] $ConfigDir
+    [string] $BackupFile
+    [hashtable] $OriginalSettings
+    [string] $CurrentMode = "Normal"  # Normal, Gaming, Browsing, Download
+    [datetime] $LastModeChange
+    [int] $TotalOptimizations = 0
+    # Progi wykrywania
+    [double] $HighDownloadThreshold = 5MB  # 5 MB/s = duzy download
+    [double] $GamingPingThreshold = 50     # ms - jesli ping > 50 to optymalizuj
+    # Status
+    [bool] $DNSOptimized = $false
+    [bool] $NagleDisabled = $false
+    [bool] $TCPOptimized = $false
+    [bool] $ThrottlingDisabled = $false
+    NetworkOptimizer([string]$configDir) {
+        $this.ConfigDir = $configDir
+        $this.BackupFile = Join-Path $configDir "NetworkBackup.json"
+        $this.OriginalSettings = @{}
+        $this.LastModeChange = [DateTime]::Now
+    }
+    # #
+    # JEDNORAZOWA INICJALIZACJA - Zapisuje backup i stosuje optymalizacje
+    # #
+    [void] Initialize() {
+        if ($this.Initialized) { return }
+        try {
+            # Sprawdz czy backup istnieje (= juz optymalizowane)
+            if (Test-Path $this.BackupFile) {
+                $this.LoadBackup()
+                $this.OptimizationsApplied = $true
+                $this.Initialized = $true
+                return
+            }
+            # Pierwsze uruchomienie - zapisz backup i zastosuj optymalizacje
+            $this.BackupCurrentSettings()
+            $this.ApplyOptimizations()
+            $this.Initialized = $true
+            $this.OptimizationsApplied = $true
+            $this.TotalOptimizations++
+        } catch {
+            # Blad - nie stosuj optymalizacji
+            $this.Initialized = $true
+            $this.OptimizationsApplied = $false
+        }
+    }
+    # #
+    # BACKUP ORYGINALNYCH USTAWIEN
+    # #
+    [void] BackupCurrentSettings() {
+        $backup = @{
+            Timestamp = (Get-Date).ToString("o")
+            DNS = @{}
+            Registry = @{}
+        }
+        # Backup DNS dla kazdego aktywnego adaptera
+        try {
+            $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }
+            foreach ($adapter in $adapters) {
+                try {
+                    $dns = Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                    if ($dns) {
+                        $backup.DNS[$adapter.Name] = @{
+                            InterfaceIndex = $adapter.ifIndex
+                            OriginalDNS = $dns.ServerAddresses
+                        }
+                    }
+                } catch { }
+            }
+        } catch { }
+        # Backup ustawien rejestru
+        try {
+            # Network Throttling Index
+            $throttlePath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+            if (Test-Path $throttlePath) {
+                $val = Get-ItemProperty -Path $throttlePath -Name "NetworkThrottlingIndex" -ErrorAction SilentlyContinue
+                if ($val) { $backup.Registry["NetworkThrottlingIndex"] = $val.NetworkThrottlingIndex }
+            }
+            # Nagle Algorithm (sprawdz wszystkie interfejsy)
+            $tcpipPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+            if (Test-Path $tcpipPath) {
+                $backup.Registry["NagleInterfaces"] = @{}
+                Get-ChildItem $tcpipPath | ForEach-Object {
+                    $ifPath = $_.PSPath
+                    $tcpNoDelay = Get-ItemProperty -Path $ifPath -Name "TcpNoDelay" -ErrorAction SilentlyContinue
+                    $tcpAck = Get-ItemProperty -Path $ifPath -Name "TcpAckFrequency" -ErrorAction SilentlyContinue
+                    $backup.Registry["NagleInterfaces"][$_.PSChildName] = @{
+                        TcpNoDelay = if ($tcpNoDelay) { $tcpNoDelay.TcpNoDelay } else { $null }
+                        TcpAckFrequency = if ($tcpAck) { $tcpAck.TcpAckFrequency } else { $null }
+                    }
+                }
+            }
+        } catch { }
+        $this.OriginalSettings = $backup
+        # Zapisz do pliku
+        try {
+            $backup | ConvertTo-Json -Depth 5 | Set-Content $this.BackupFile -Encoding UTF8 -Force
+        } catch { }
+    }
+    [void] LoadBackup() {
+        try {
+            if (Test-Path $this.BackupFile) {
+                $this.OriginalSettings = Get-Content $this.BackupFile -Raw | ConvertFrom-Json -AsHashtable
+            }
+        } catch { }
+    }
+    # #
+    # STOSOWANIE OPTYMALIZACJI
+    # #
+    [void] ApplyOptimizations() {
+        # Podstawowe optymalizacje (kontrolowane przez $Script zmienne)
+        if ($Script:NetworkOptimizeDNS) {
+            # 1. DNS - Cloudflare (najszybszy publiczny DNS)
+            $this.OptimizeDNS()
+        }
+        if ($Script:NetworkDisableNagle) {
+            # 2. Wylacz Nagle Algorithm (nizszy ping)
+            $this.DisableNagle()
+        }
+        if ($Script:NetworkOptimizeTCP) {
+            # 3. TCP ACK Frequency = 1 (szybsze ACK)
+            $this.OptimizeTCPAck()
+            # 4. Wylacz Network Throttling (pelna przepustowosc)
+            $this.DisableThrottling()
+        }
+        
+        # ULTRA optymalizacje (kontrolowane przez $Script zmienne)
+        if ($Script:NetworkMaximizeTCPBuffers) {
+            # 5. ULTRA: Maksymalne bufory TCP/IP
+            $this.MaximizeTCPBuffers()
+        }
+        if ($Script:NetworkEnableWindowScaling) {
+            # 6. ULTRA: Optymalizuj TCP Window Scaling
+            $this.OptimizeTCPWindowScaling()
+        }
+        if ($Script:NetworkEnableRSS) {
+            # 7. ULTRA: RSS (Receive Side Scaling) dla multi-core
+            $this.EnableRSS()
+        }
+        if ($Script:NetworkEnableLSO) {
+            # 8. ULTRA: Large Send Offload (LSO) dla duzych transferow
+            $this.EnableLSO()
+        }
+        if ($Script:NetworkDisableChimney) {
+            # 9. ULTRA: Wylacz TCP Chimney Offload (problematyczny)
+            $this.DisableTCPChimney()
+        }
+    }
+    [void] OptimizeDNS() {
+        try {
+            $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }
+            foreach ($adapter in $adapters) {
+                try {
+                    # Cloudflare Primary + Secondary
+                    Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @("1.1.1.1", "1.0.0.1") -ErrorAction SilentlyContinue
+                } catch { }
+            }
+            $this.DNSOptimized = $true
+            # Flush DNS cache
+            try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch { }
+        } catch { }
+    }
+    [void] DisableNagle() {
+        try {
+            $tcpipPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+            if (Test-Path $tcpipPath) {
+                Get-ChildItem $tcpipPath | ForEach-Object {
+                    try {
+                        # TcpNoDelay = 1 wylacza Nagle Algorithm
+                        Set-ItemProperty -Path $_.PSPath -Name "TcpNoDelay" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    } catch { }
+                }
+            }
+            $this.NagleDisabled = $true
+        } catch { }
+    }
+    [void] OptimizeTCPAck() {
+        try {
+            $tcpipPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+            if (Test-Path $tcpipPath) {
+                Get-ChildItem $tcpipPath | ForEach-Object {
+                    try {
+                        # TcpAckFrequency = 1 = natychmiastowe ACK (zamiast czekania na 2 pakiety)
+                        Set-ItemProperty -Path $_.PSPath -Name "TcpAckFrequency" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    } catch { }
+                }
+            }
+            $this.TCPOptimized = $true
+        } catch { }
+    }
+    [void] DisableThrottling() {
+        try {
+            $throttlePath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+            if (Test-Path $throttlePath) {
+                # NetworkThrottlingIndex = ffffffff (hex) = wylaczony throttling
+                Set-ItemProperty -Path $throttlePath -Name "NetworkThrottlingIndex" -Value 0xffffffff -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+            $this.ThrottlingDisabled = $true
+        } catch { }
+    }
+    # ULTRA: Maksymalne bufory TCP/IP dla przepustowości
+    [void] MaximizeTCPBuffers() {
+        try {
+            $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+            if (Test-Path $tcpParams) {
+                # TcpWindowSize = 65535 (64KB) - maksymalny rozmiar okna TCP bez scaling
+                Set-ItemProperty -Path $tcpParams -Name "TcpWindowSize" -Value 65535 -Type DWord -Force -ErrorAction SilentlyContinue
+                # Tcp1323Opts = 3 (enable window scaling + timestamps)
+                Set-ItemProperty -Path $tcpParams -Name "Tcp1323Opts" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+                # DefaultTTL = 64 (standardowy TTL dla Internetu)
+                Set-ItemProperty -Path $tcpParams -Name "DefaultTTL" -Value 64 -Type DWord -Force -ErrorAction SilentlyContinue
+                # EnablePMTUDiscovery = 1 (wykrywaj MTU dla unikniecia fragmentacji)
+                Set-ItemProperty -Path $tcpParams -Name "EnablePMTUDiscovery" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+    # ULTRA: TCP Window Scaling dla wysokich przepustowości
+    [void] OptimizeTCPWindowScaling() {
+        try {
+            $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+            if (Test-Path $tcpParams) {
+                # TcpWindowSize = 0 (auto-tuning - Windows 10/11 domyślnie dobre)
+                # GlobalMaxTcpWindowSize = 16777216 (16MB - dla gigabitowych połączeń)
+                Set-ItemProperty -Path $tcpParams -Name "GlobalMaxTcpWindowSize" -Value 16777216 -Type DWord -Force -ErrorAction SilentlyContinue
+                # Tcp1323Opts = 3 (włącz window scaling + timestamps dla wysokich przepustowości)
+                Set-ItemProperty -Path $tcpParams -Name "Tcp1323Opts" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+    # ULTRA: RSS (Receive Side Scaling) dla multi-core CPU
+    [void] EnableRSS() {
+        try {
+            # Włącz RSS dla wszystkich adapterów sieciowych
+            $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }
+            foreach ($adapter in $adapters) {
+                try {
+                    # Włącz RSS (Receive Side Scaling)
+                    Set-NetAdapterRss -Name $adapter.Name -Enabled $true -ErrorAction SilentlyContinue
+                    # Ustaw liczbę procesorów dla RSS (max dostępne)
+                    Set-NetAdapterRss -Name $adapter.Name -BaseProcessorNumber 0 -MaxProcessors ([Environment]::ProcessorCount) -ErrorAction SilentlyContinue
+                } catch { }
+            }
+        } catch { }
+    }
+    # ULTRA: LSO (Large Send Offload) dla dużych transferów
+    [void] EnableLSO() {
+        try {
+            $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }
+            foreach ($adapter in $adapters) {
+                try {
+                    # Włącz Large Send Offload v2 (IPv4)
+                    Set-NetAdapterLso -Name $adapter.Name -IPv4Enabled $true -ErrorAction SilentlyContinue
+                    # Włącz Large Send Offload v2 (IPv6)
+                    Set-NetAdapterLso -Name $adapter.Name -IPv6Enabled $true -ErrorAction SilentlyContinue
+                } catch { }
+            }
+        } catch { }
+    }
+    # ULTRA: Wyłącz TCP Chimney (może powodować problemy)
+    [void] DisableTCPChimney() {
+        try {
+            # Wyłącz TCP Chimney Offload (często powoduje problemy z połączeniami)
+            netsh int tcp set global chimney=disabled *> $null
+            # Wyłącz TCP Offloading (dla stabilności)
+            $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }
+            foreach ($adapter in $adapters) {
+                try {
+                    # Wyłącz TCP Offloading
+                    Disable-NetAdapterChecksumOffload -Name $adapter.Name -ErrorAction SilentlyContinue
+                } catch { }
+            }
+        } catch { }
+    }
+    # #
+    # DYNAMICZNA OPTYMALIZACJA - wywolywana co iteracje
+    # #
+    [string] Update([string]$context, [double]$downloadSpeed, [double]$uploadSpeed, [bool]$isGaming) {
+        if (-not $this.Initialized) { 
+            $this.Initialize() 
+        }
+        $newMode = "Normal"
+        # Wykryj tryb na podstawie kontekstu
+        if ($isGaming -or $context -eq "Gaming") {
+            $newMode = "Gaming"
+        } elseif ($context -eq "Browser" -or $context -eq "Browsing") {
+            $newMode = "Browsing"
+        } elseif ($downloadSpeed -gt $this.HighDownloadThreshold) {
+            $newMode = "Download"
+        }
+        # Zmien tryb jesli inny
+        if ($newMode -ne $this.CurrentMode) {
+            $this.SetMode($newMode)
+        }
+        return $this.CurrentMode
+    }
+    [void] SetMode([string]$mode) {
+        $oldMode = $this.CurrentMode
+        $this.CurrentMode = $mode
+        $this.LastModeChange = [DateTime]::Now
+        switch ($mode) {
+            "Gaming" {
+                # Maksymalna optymalizacja dla niskiego pingu
+                $this.SetProcessPriority("High")
+                $this.EnableQoSForGaming()
+                # V40: Dodatkowa optymalizacja TCP dla Gaming
+                $this.OptimizeForLowLatency()
+            }
+            "Browsing" {
+                # Priorytet dla DNS i HTTP
+                $this.SetProcessPriority("AboveNormal")
+            }
+            "Download" {
+                # Maksymalna przepustowosc
+                $this.SetProcessPriority("Normal")
+                # V40: Optymalizacja dla wysokiej przepustowości
+                $this.OptimizeForHighThroughput()
+            }
+            default {
+                # Normal - standardowe ustawienia
+                $this.SetProcessPriority("Normal")
+            }
+        }
+        if ($oldMode -ne $mode) {
+            $this.TotalOptimizations++
+            # Log zmiany trybu (tylko w debug mode)
+            if ($Global:DebugMode) {
+                try {
+                    $logEntry = "$(Get-Date -Format 'HH:mm:ss') - NetworkOptimizer: $oldMode -> $mode"
+                    $logEntry | Out-File -FilePath 'C:\CPUManager\NetworkOptimizer.log' -Append -Encoding utf8
+                } catch { }
+            }
+        }
+    }
+    # V40: Optymalizacja dla niskiego opóźnienia (Gaming)
+    [void] OptimizeForLowLatency() {
+        try {
+            # Priorytet dla małych pakietów (gaming packets są małe)
+            $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+            if (Test-Path $tcpParams) {
+                # DisableLargeMtu = 0 (pozwól na path MTU discovery)
+                Set-ItemProperty -Path $tcpParams -Name "DisableLargeMtu" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+    # V40: Optymalizacja dla wysokiej przepustowości (Download)
+    [void] OptimizeForHighThroughput() {
+        try {
+            # Zwiększ bufory dla dużych transferów
+            $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+            if (Test-Path $tcpParams) {
+                # TcpWindowSize = 65535 (maksymalny rozmiar dla nie-scaling)
+                # Już ustawione w MaximizeTCPBuffers, ale potwierdzamy
+            }
+        } catch { }
+    }
+    [void] SetProcessPriority([string]$priority) {
+        # Ustaw priorytet dla procesow sieciowych (przegladarki, gry)
+        try {
+            $netProcesses = @("chrome", "firefox", "msedge", "opera", "brave")
+            $priorityClass = switch ($priority) {
+                "High" { [System.Diagnostics.ProcessPriorityClass]::High }
+                "AboveNormal" { [System.Diagnostics.ProcessPriorityClass]::AboveNormal }
+                default { [System.Diagnostics.ProcessPriorityClass]::Normal }
+            }
+            foreach ($procName in $netProcesses) {
+                try {
+                    $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
+                    foreach ($p in $procs) {
+                        try { $p.PriorityClass = $priorityClass } catch { }
+                    }
+                } catch { }
+            }
+        } catch { }
+    }
+    [void] EnableQoSForGaming() {
+        # Dodatkowe optymalizacje dla gier
+        # Flush DNS cache dla swiezych lookupow
+        try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch { }
+    }
+    # #
+    # PRZYWRACANIE ORYGINALNYCH USTAWIEN
+    # #
+    [void] RestoreOriginalSettings() {
+        if (-not $this.OriginalSettings -or $this.OriginalSettings.Count -eq 0) {
+            $this.LoadBackup()
+        }
+        if (-not $this.OriginalSettings) { return }
+        try {
+            # Przywroc DNS
+            if ($this.OriginalSettings.DNS) {
+                foreach ($adapterName in $this.OriginalSettings.DNS.Keys) {
+                    try {
+                        $info = $this.OriginalSettings.DNS[$adapterName]
+                        if ($info.OriginalDNS -and $info.InterfaceIndex) {
+                            Set-DnsClientServerAddress -InterfaceIndex $info.InterfaceIndex -ServerAddresses $info.OriginalDNS -ErrorAction SilentlyContinue
+                        }
+                    } catch { }
+                }
+            }
+            # Przywroc rejestr
+            if ($this.OriginalSettings.Registry) {
+                # Network Throttling
+                if ($null -ne $this.OriginalSettings.Registry.NetworkThrottlingIndex) {
+                    $throttlePath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+                    Set-ItemProperty -Path $throttlePath -Name "NetworkThrottlingIndex" -Value $this.OriginalSettings.Registry.NetworkThrottlingIndex -Type DWord -Force -ErrorAction SilentlyContinue
+                }
+                # Nagle interfaces
+                if ($this.OriginalSettings.Registry.NagleInterfaces) {
+                    $tcpipPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+                    foreach ($ifName in $this.OriginalSettings.Registry.NagleInterfaces.Keys) {
+                        try {
+                            $ifPath = Join-Path $tcpipPath $ifName
+                            $settings = $this.OriginalSettings.Registry.NagleInterfaces[$ifName]
+                            if ($null -ne $settings.TcpNoDelay) {
+                                Set-ItemProperty -Path $ifPath -Name "TcpNoDelay" -Value $settings.TcpNoDelay -Type DWord -Force -ErrorAction SilentlyContinue
+                            }
+                            if ($null -ne $settings.TcpAckFrequency) {
+                                Set-ItemProperty -Path $ifPath -Name "TcpAckFrequency" -Value $settings.TcpAckFrequency -Type DWord -Force -ErrorAction SilentlyContinue
+                            }
+                        } catch { }
+                    }
+                }
+            }
+            $this.OptimizationsApplied = $false
+        } catch { }
+    }
+    [void] Restore() {
+        $this.RestoreOriginalSettings()
+    }
+    [void] RestoreDNS() {
+        if (-not $this.OriginalSettings -or $this.OriginalSettings.Count -eq 0) {
+            $this.LoadBackup()
+        }
+        if (-not $this.OriginalSettings) { return }
+        try {
+            if ($this.OriginalSettings.DNS) {
+                foreach ($adapterName in $this.OriginalSettings.DNS.Keys) {
+                    try {
+                        $info = $this.OriginalSettings.DNS[$adapterName]
+                        if ($info.OriginalDNS -and $info.InterfaceIndex) {
+                            Set-DnsClientServerAddress -InterfaceIndex $info.InterfaceIndex -ServerAddresses $info.OriginalDNS -ErrorAction SilentlyContinue
+                        }
+                    } catch { }
+                }
+            }
+            $this.DNSOptimized = $false
+        } catch { }
+    }
+    # #
+    # STATUS I ZAPIS
+    # #
+    [string] GetStatus() {
+        $dns = if ($this.DNSOptimized) { "?" } else { "?" }
+        $nagle = if ($this.NagleDisabled) { "?" } else { "?" }
+        $tcp = if ($this.TCPOptimized) { "?" } else { "?" }
+        $throttle = if ($this.ThrottlingDisabled) { "?" } else { "?" }
+        return "Mode:$($this.CurrentMode) DNS:$dns Nagle:$nagle TCP:$tcp Throttle:$throttle"
+    }
+    [hashtable] GetDetailedStatus() {
+        return @{
+            Initialized = $this.Initialized
+            OptimizationsApplied = $this.OptimizationsApplied
+            CurrentMode = $this.CurrentMode
+            DNSOptimized = $this.DNSOptimized
+            NagleDisabled = $this.NagleDisabled
+            TCPOptimized = $this.TCPOptimized
+            ThrottlingDisabled = $this.ThrottlingDisabled
+            TotalOptimizations = $this.TotalOptimizations
+            LastModeChange = $this.LastModeChange
+        }
+    }
+    [void] SaveState([string]$dir) {
+        try {
+            $state = @{
+                CurrentMode = $this.CurrentMode
+                TotalOptimizations = $this.TotalOptimizations
+                DNSOptimized = $this.DNSOptimized
+                NagleDisabled = $this.NagleDisabled
+                TCPOptimized = $this.TCPOptimized
+                ThrottlingDisabled = $this.ThrottlingDisabled
+                LastSaved = (Get-Date).ToString("o")
+            }
+            $path = Join-Path $dir "NetworkOptimizer.json"
+            $state | ConvertTo-Json -Depth 3 | Set-Content $path -Encoding UTF8 -Force
+        } catch { }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "NetworkOptimizer.json"
+            if (Test-Path $path) {
+                $state = Get-Content $path -Raw | ConvertFrom-Json
+                if ($state.TotalOptimizations) { $this.TotalOptimizations = $state.TotalOptimizations }
+                if ($state.DNSOptimized) { $this.DNSOptimized = $state.DNSOptimized }
+                if ($state.NagleDisabled) { $this.NagleDisabled = $state.NagleDisabled }
+                if ($state.TCPOptimized) { $this.TCPOptimized = $state.TCPOptimized }
+                if ($state.ThrottlingDisabled) { $this.ThrottlingDisabled = $state.ThrottlingDisabled }
+            }
+        } catch { }
+    }
+}
+#  NETWORK AI - Uczenie sie wzorcow sieciowych
+class NetworkAI {
+    # Wzorce aplikacji sieciowych
+    [hashtable] $AppNetworkProfiles      # app -> {Type, AvgDownload, AvgUpload, NeedsLowPing, Sessions}
+    [hashtable] $HourlyNetworkPatterns   # hour -> {AvgDownload, AvgUpload, DominantType, Samples}
+    [hashtable] $DayNetworkPatterns      # dayOfWeek -> {PeakHours, DominantType, Samples}
+    # Q-Learning dla sieci
+    [hashtable] $NetworkQTable           # state -> {action -> qValue}
+    [double] $NetworkLearningRate = 0.15
+    [double] $NetworkDiscountFactor = 0.9
+    [double] $NetworkExploration = 0.2
+    # Metryki skutecznosci
+    [int] $TotalPredictions = 0
+    [int] $CorrectPredictions = 0
+    [int] $TotalOptimizations = 0
+    [double] $AvgPingImprovement = 0
+    [double] $AvgSpeedImprovement = 0
+    # Historia do uczenia
+    [System.Collections.Generic.List[hashtable]] $RecentNetworkSamples
+    [int] $MaxSamples = 100
+    # Ostatnie wartosci
+    [string] $LastApp = ""
+    [string] $LastPredictedMode = "Normal"
+    [double] $LastDownloadSpeed = 0
+    [double] $LastUploadSpeed = 0
+    [double] $LastPing = 0
+    [datetime] $LastUpdate
+    # Kategorie aplikacji sieciowych (poczatkowa wiedza)
+    [hashtable] $KnownNetworkApps
+    NetworkAI() {
+        $this.AppNetworkProfiles = @{}
+        $this.HourlyNetworkPatterns = @{}
+        $this.DayNetworkPatterns = @{}
+        $this.NetworkQTable = @{}
+        $this.RecentNetworkSamples = [System.Collections.Generic.List[hashtable]]::new()
+        $this.LastUpdate = [DateTime]::Now
+        # Inicjalizacja wzorcow godzinowych (0-23)
+        for ($h = 0; $h -lt 24; $h++) {
+            $this.HourlyNetworkPatterns[$h] = @{
+                AvgDownload = 0.0
+                AvgUpload = 0.0
+                DominantType = "Normal"
+                GamingProbability = 0.0
+                DownloadProbability = 0.0
+                Samples = 0
+            }
+        }
+        # Inicjalizacja wzorcow dni tygodnia (0=Niedziela, 6=Sobota)
+        for ($d = 0; $d -lt 7; $d++) {
+            $this.DayNetworkPatterns[$d] = @{
+                PeakDownloadHours = @()
+                PeakGamingHours = @()
+                DominantType = "Normal"
+                Samples = 0
+            }
+        }
+        # Wbudowana wiedza o aplikacjach sieciowych
+        $this.KnownNetworkApps = @{
+            #  Gry online - potrzebuja niskiego pingu
+            "valorant" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "csgo" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "cs2" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "dota2" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "leagueclient" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "league of legends" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "fortnite" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "apex" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "r5apex" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "overwatch" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "cod" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "warzone" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "pubg" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "rocketleague" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "minecraft" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "Normal" }
+            "gta5" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "gtav" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "battlefield" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "rainbow six" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "r6" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "wow" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "Normal" }
+            "worldofwarcraft" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "Normal" }
+            "ffxiv" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "Normal" }
+            "destiny2" = @{ Type = "Gaming"; NeedsLowPing = $true; Priority = "High" }
+            "steam" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Normal" }
+            "steamwebhelper" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Normal" }
+            "epicgameslauncher" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Normal" }
+            "origin" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Normal" }
+            "battle.net" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Normal" }
+            # - Streaming - potrzebuje przepustowosci
+            "spotify" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "Normal" }
+            "netflix" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "Normal" }
+            "vlc" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "Normal" }
+            "obs64" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "High" }
+            "obs" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "High" }
+            "streamlabs" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "High" }
+            "twitch" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "Normal" }
+            # - Przegladarki - rozne potrzeby
+            "chrome" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
+            "firefox" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
+            "msedge" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
+            "opera" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
+            "brave" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
+            # - Komunikatory - potrzebuja niskiego pingu dla glosu
+            "discord" = @{ Type = "VoIP"; NeedsLowPing = $true; Priority = "High" }
+            "teams" = @{ Type = "VoIP"; NeedsLowPing = $true; Priority = "High" }
+            "zoom" = @{ Type = "VoIP"; NeedsLowPing = $true; Priority = "High" }
+            "skype" = @{ Type = "VoIP"; NeedsLowPing = $true; Priority = "High" }
+            "slack" = @{ Type = "VoIP"; NeedsLowPing = $true; Priority = "Normal" }
+            "telegram" = @{ Type = "Messaging"; NeedsLowPing = $false; Priority = "Normal" }
+            "whatsapp" = @{ Type = "Messaging"; NeedsLowPing = $false; Priority = "Normal" }
+            # - Download managers
+            "qbittorrent" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Low" }
+            "utorrent" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Low" }
+            "bittorrent" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Low" }
+            "jdownloader" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Normal" }
+            "idm" = @{ Type = "Download"; NeedsLowPing = $false; Priority = "Normal" }
+        }
+    }
+    # #
+    # GLOWNA METODA UPDATE - wywolywana co iteracje
+    # #
+    [hashtable] Update([string]$currentApp, [double]$downloadSpeed, [double]$uploadSpeed, [string]$currentContext, [bool]$isGaming) {
+        $now = [DateTime]::Now
+        $hour = $now.Hour
+        $dayOfWeek = [int]$now.DayOfWeek
+        $appLower = if ($currentApp) { $currentApp.ToLower() } else { "" }
+        # Okresl typ aktywnosci sieciowej
+        $networkType = $this.DetermineNetworkType($appLower, $downloadSpeed, $uploadSpeed, $isGaming)
+        # Zaktualizuj wzorce aplikacji
+        if (-not [string]::IsNullOrWhiteSpace($appLower)) {
+            $this.UpdateAppProfile($appLower, $networkType, $downloadSpeed, $uploadSpeed)
+        }
+        # Zaktualizuj wzorce czasowe
+        $this.UpdateTimePatterns($hour, $dayOfWeek, $networkType, $downloadSpeed, $uploadSpeed)
+        # Q-Learning update
+        $this.UpdateQLearning($networkType, $downloadSpeed, $uploadSpeed)
+        # Zapisz sample do historii
+        $this.RecordSample($appLower, $networkType, $downloadSpeed, $uploadSpeed, $hour, $dayOfWeek)
+        # Przewiduj optymalny tryb sieci
+        $predictedMode = $this.PredictOptimalMode($appLower, $hour, $dayOfWeek, $downloadSpeed, $isGaming)
+        # Sprawdz skutecznosc poprzedniej predykcji
+        if ($this.LastPredictedMode -ne "Normal" -and $this.LastApp -eq $appLower) {
+            $this.EvaluatePrediction($predictedMode, $networkType)
+        }
+        $this.LastApp = $appLower
+        $this.LastPredictedMode = $predictedMode
+        $this.LastDownloadSpeed = $downloadSpeed
+        $this.LastUploadSpeed = $uploadSpeed
+        $this.LastUpdate = $now
+        return @{
+            PredictedMode = $predictedMode
+            NetworkType = $networkType
+            NeedsLowPing = ($networkType -eq "Gaming" -or $networkType -eq "VoIP")
+            NeedsHighBandwidth = ($networkType -eq "Download" -or $networkType -eq "Streaming")
+            Confidence = $this.GetPredictionConfidence($appLower, $hour)
+            AppCategory = $this.GetAppCategory($appLower)
+        }
+    }
+    # #
+    # OKRESLANIE TYPU AKTYWNOSCI SIECIOWEJ
+    # #
+    [string] DetermineNetworkType([string]$app, [double]$download, [double]$upload, [bool]$isGaming) {
+        # 1. Sprawdz wbudowana wiedze
+        if ($this.KnownNetworkApps.ContainsKey($app)) {
+            return $this.KnownNetworkApps[$app].Type
+        }
+        # 2. Sprawdz nauczone profile
+        if ($this.AppNetworkProfiles.ContainsKey($app)) {
+            $profile = $this.AppNetworkProfiles[$app]
+            if ($profile.Sessions -gt 5) {
+                return $profile.Type
+            }
+        }
+        # 3. Sprawdz AppCategoryPreferences (uzytkownik lub system przypisal kategorie)
+        if ($Script:AppCategoryPreferences -and $Script:AppCategoryPreferences.Count -gt 0) {
+            foreach ($key in $Script:AppCategoryPreferences.Keys) {
+                $keyLower = $key.ToLower() -replace '\.exe$', ''
+                if ($keyLower -eq $app -or $app -like "*$keyLower*" -or $keyLower -like "*$app*") {
+                    $pref = $Script:AppCategoryPreferences[$key]
+                    if ($pref.Bias -ge 0.8) { return "Gaming" }
+                    break
+                }
+            }
+        }
+        # 4. Wnioskuj z kontekstu
+        if ($isGaming) { return "Gaming" }
+        # 5. Wnioskuj z predkosci
+        $downloadMB = $download / 1MB
+        $uploadMB = $upload / 1MB
+        if ($downloadMB -gt 5) { return "Download" }
+        if ($uploadMB -gt 2) { return "Streaming" }  # Prawdopodobnie upload streamera
+        if ($downloadMB -gt 1 -or $uploadMB -gt 0.5) { return "Active" }
+        return "Normal"
+    }
+    # #
+    # AKTUALIZACJA PROFILU APLIKACJI
+    # #
+    [void] UpdateAppProfile([string]$app, [string]$networkType, [double]$download, [double]$upload) {
+        if ([string]::IsNullOrWhiteSpace($app)) { return }
+        if (-not $this.AppNetworkProfiles.ContainsKey($app)) {
+            $this.AppNetworkProfiles[$app] = @{
+                Type = $networkType
+                AvgDownload = $download
+                AvgUpload = $upload
+                MaxDownload = $download
+                MaxUpload = $upload
+                NeedsLowPing = ($networkType -eq "Gaming" -or $networkType -eq "VoIP")
+                Sessions = 1
+                LastSeen = [DateTime]::Now
+            }
+        } else {
+            $profile = $this.AppNetworkProfiles[$app]
+            $sessions = $profile.Sessions + 1
+            # Srednia kroczaca
+            $alpha = 1.0 / [Math]::Min(50, $sessions)
+            $profile.AvgDownload = ($profile.AvgDownload * (1 - $alpha)) + ($download * $alpha)
+            $profile.AvgUpload = ($profile.AvgUpload * (1 - $alpha)) + ($upload * $alpha)
+            # Maksima
+            if ($download -gt $profile.MaxDownload) { $profile.MaxDownload = $download }
+            if ($upload -gt $profile.MaxUpload) { $profile.MaxUpload = $upload }
+            # Aktualizuj typ jesli mamy duzo danych
+            if ($sessions -gt 10 -and $networkType -ne "Normal") {
+                $profile.Type = $networkType
+                $profile.NeedsLowPing = ($networkType -eq "Gaming" -or $networkType -eq "VoIP")
+            }
+            $profile.Sessions = $sessions
+            $profile.LastSeen = [DateTime]::Now
+        }
+    }
+    # #
+    # AKTUALIZACJA WZORCOW CZASOWYCH
+    # #
+    [void] UpdateTimePatterns([int]$hour, [int]$dayOfWeek, [string]$networkType, [double]$download, [double]$upload) {
+        # Wzorce godzinowe
+        $hourPattern = $this.HourlyNetworkPatterns[$hour]
+        $samples = $hourPattern.Samples + 1
+        $alpha = 1.0 / [Math]::Min(100, $samples)
+        $hourPattern.AvgDownload = ($hourPattern.AvgDownload * (1 - $alpha)) + ($download * $alpha)
+        $hourPattern.AvgUpload = ($hourPattern.AvgUpload * (1 - $alpha)) + ($upload * $alpha)
+        # Aktualizuj prawdopodobienstwa
+        if ($networkType -eq "Gaming") {
+            $hourPattern.GamingProbability = ($hourPattern.GamingProbability * 0.95) + 0.05
+        } else {
+            $hourPattern.GamingProbability = $hourPattern.GamingProbability * 0.99
+        }
+        if ($networkType -eq "Download") {
+            $hourPattern.DownloadProbability = ($hourPattern.DownloadProbability * 0.95) + 0.05
+        } else {
+            $hourPattern.DownloadProbability = $hourPattern.DownloadProbability * 0.99
+        }
+        if ($samples -gt 20) {
+            if ($hourPattern.GamingProbability -gt 0.3) {
+                $hourPattern.DominantType = "Gaming"
+            } elseif ($hourPattern.DownloadProbability -gt 0.3) {
+                $hourPattern.DominantType = "Download"
+            } elseif ($hourPattern.AvgDownload -gt 1MB) {
+                $hourPattern.DominantType = "Active"
+            } else {
+                $hourPattern.DominantType = "Normal"
+            }
+        }
+        $hourPattern.Samples = $samples
+        # Wzorce dnia tygodnia
+        $dayPattern = $this.DayNetworkPatterns[$dayOfWeek]
+        $dayPattern.Samples++
+        # Sledz godziny szczytowe
+        if ($download -gt 5MB -and $hour -notin $dayPattern.PeakDownloadHours) {
+            $dayPattern.PeakDownloadHours += $hour
+            $dayPattern.PeakDownloadHours = @($dayPattern.PeakDownloadHours | Select-Object -Unique | Sort-Object)
+        }
+        if ($networkType -eq "Gaming" -and $hour -notin $dayPattern.PeakGamingHours) {
+            $dayPattern.PeakGamingHours += $hour
+            $dayPattern.PeakGamingHours = @($dayPattern.PeakGamingHours | Select-Object -Unique | Sort-Object)
+        }
+    }
+    # #
+    # Q-LEARNING DLA OPTYMALIZACJI SIECI
+    # #
+    [void] UpdateQLearning([string]$networkType, [double]$download, [double]$upload) {
+        # Stan: kombinacja typu i predkosci
+        $downloadLevel = if ($download -gt 5MB) { "High" } elseif ($download -gt 1MB) { "Med" } else { "Low" }
+        $state = "$networkType-$downloadLevel"
+        # Akcje mozliwe
+        $actions = @("Normal", "Gaming", "Download", "Streaming")
+        # Inicjalizuj Q-wartosci jesli nowe
+        if (-not $this.NetworkQTable.ContainsKey($state)) {
+            $this.NetworkQTable[$state] = @{}
+            foreach ($a in $actions) {
+                $this.NetworkQTable[$state][$a] = 0.0
+            }
+        }
+        # Oblicz nagrode na podstawie dopasowania
+        $reward = 0.0
+        $bestAction = $networkType
+        if ($bestAction -eq "Active") { $bestAction = "Normal" }
+        if ($bestAction -notin $actions) { $bestAction = "Normal" }
+        # Nagroda za poprawne dopasowanie
+        $currentAction = $this.LastPredictedMode
+        if ($currentAction -eq $bestAction) {
+            $reward = 1.0
+        } elseif ($networkType -eq "Gaming" -and $currentAction -eq "Gaming") {
+            $reward = 1.0  # Bonus za wykrycie gamingu
+        } elseif ($networkType -eq "Download" -and $currentAction -eq "Download") {
+            $reward = 0.8
+        } else {
+            $reward = -0.2
+        }
+        # Q-Learning update
+        if ($this.NetworkQTable.ContainsKey($state) -and $this.NetworkQTable[$state].ContainsKey($currentAction)) {
+            $oldQ = $this.NetworkQTable[$state][$currentAction]
+            $maxNextQ = ($this.NetworkQTable[$state].Values | Measure-Object -Maximum).Maximum
+            if (-not $maxNextQ) { $maxNextQ = 0 }
+            $newQ = $oldQ + $this.NetworkLearningRate * ($reward + $this.NetworkDiscountFactor * $maxNextQ - $oldQ)
+            $this.NetworkQTable[$state][$currentAction] = $newQ
+        }
+    }
+    # #
+    # PREDYKCJA OPTYMALNEGO TRYBU
+    # #
+    [string] PredictOptimalMode([string]$app, [int]$hour, [int]$dayOfWeek, [double]$currentDownload, [bool]$isGaming) {
+        $this.TotalPredictions++
+        # 1. Priorytet: wbudowana wiedza o aplikacji
+        if ($this.KnownNetworkApps.ContainsKey($app)) {
+            $knownType = $this.KnownNetworkApps[$app].Type
+            if ($knownType -eq "Gaming" -or $knownType -eq "VoIP") {
+                return "Gaming"
+            } elseif ($knownType -eq "Download" -or $knownType -eq "Streaming") {
+                return "Download"
+            }
+        }
+        # 2. Nauczone profile aplikacji
+        if ($this.AppNetworkProfiles.ContainsKey($app)) {
+            $profile = $this.AppNetworkProfiles[$app]
+            if ($profile.Sessions -gt 10 -and $profile.NeedsLowPing) {
+                return "Gaming"
+            } elseif ($profile.Sessions -gt 10 -and $profile.MaxDownload -gt 5MB) {
+                return "Download"
+            }
+        }
+        # 3. Kontekst gamingowy
+        if ($isGaming) {
+            return "Gaming"
+        }
+        # 4. Wzorce czasowe
+        $hourPattern = $this.HourlyNetworkPatterns[$hour]
+        if ($hourPattern.Samples -gt 30) {
+            if ($hourPattern.GamingProbability -gt 0.4) {
+                return "Gaming"
+            } elseif ($hourPattern.DownloadProbability -gt 0.4) {
+                return "Download"
+            }
+        }
+        # 5. Aktualna predkosc
+        if ($currentDownload -gt 5MB) {
+            return "Download"
+        }
+        # 6. Q-Learning decision
+        $downloadLevel = if ($currentDownload -gt 5MB) { "High" } elseif ($currentDownload -gt 1MB) { "Med" } else { "Low" }
+        $state = "Normal-$downloadLevel"
+        if ($this.NetworkQTable.ContainsKey($state)) {
+            $qValues = $this.NetworkQTable[$state]
+            $bestAction = "Normal"
+            $bestQ = -999
+            foreach ($action in $qValues.Keys) {
+                if ($qValues[$action] -gt $bestQ) {
+                    $bestQ = $qValues[$action]
+                    $bestAction = $action
+                }
+            }
+            if ($bestQ -gt 0.5) {
+                return $bestAction
+            }
+        }
+        return "Normal"
+    }
+    # #
+    # POMOCNICZE
+    # #
+    [void] RecordSample([string]$app, [string]$type, [double]$download, [double]$upload, [int]$hour, [int]$day) {
+        $sample = @{
+            App = $app
+            Type = $type
+            Download = $download
+            Upload = $upload
+            Hour = $hour
+            DayOfWeek = $day
+            Timestamp = [DateTime]::Now
+        }
+        $this.RecentNetworkSamples.Add($sample)
+        while ($this.RecentNetworkSamples.Count -gt $this.MaxSamples) {
+            $this.RecentNetworkSamples.RemoveAt(0)
+        }
+    }
+    [void] EvaluatePrediction([string]$predicted, [string]$actual) {
+        if ($predicted -eq $actual -or 
+            ($predicted -eq "Gaming" -and $actual -eq "VoIP") -or
+            ($predicted -eq "Download" -and $actual -eq "Streaming")) {
+            $this.CorrectPredictions++
+        }
+    }
+    [double] GetPredictionConfidence([string]$app, [int]$hour) {
+        $confidence = 0.5
+        # Bonus za znana aplikacje
+        if ($this.KnownNetworkApps.ContainsKey($app)) {
+            $confidence += 0.3
+        } elseif ($this.AppNetworkProfiles.ContainsKey($app)) {
+            $sessions = $this.AppNetworkProfiles[$app].Sessions
+            $confidence += [Math]::Min(0.25, $sessions / 100.0)
+        }
+        # Bonus za wzorce czasowe
+        $hourPattern = $this.HourlyNetworkPatterns[$hour]
+        if ($hourPattern.Samples -gt 50) {
+            $confidence += 0.15
+        }
+        return [Math]::Min(0.95, $confidence)
+    }
+    [string] GetAppCategory([string]$app) {
+        if ($this.KnownNetworkApps.ContainsKey($app)) {
+            return $this.KnownNetworkApps[$app].Type
+        }
+        if ($this.AppNetworkProfiles.ContainsKey($app)) {
+            return $this.AppNetworkProfiles[$app].Type
+        }
+        return "Unknown"
+    }
+    # #
+    # TRAIN - Glowna metoda uczenia sie wzorcow z historii (wywolywana periodycznie)
+    # #
+    [void] Train() {
+        # Ucz sie wzorcow z ostatnich sampli (co 60s)
+        if ($this.RecentNetworkSamples.Count -lt 10) { return }
+        
+        # 1. Analiza wzorcow aplikacji - ktorе aplikacje wymagaja niskiego pingu
+        $this.LearnAppPatterns()
+        
+        # 2. Analiza wzorcow czasowych - kiedy uzytkownik gra/pobiera/streamuje
+        $this.LearnTimePatterns()
+        
+        # 3. Optymalizacja Q-Table - ucz sie optymalnych akcji dla stanow
+        $this.OptimizeQTable()
+        
+        # 4. Cleanup starych sampli
+        while ($this.RecentNetworkSamples.Count -gt $this.MaxSamples) {
+            $this.RecentNetworkSamples.RemoveAt(0)
+        }
+    }
+    [void] LearnAppPatterns() {
+        # Ucz sie, ktore aplikacje potrzebuja optymalizacji sieci
+        foreach ($app in $this.AppNetworkProfiles.Keys) {
+            $profile = $this.AppNetworkProfiles[$app]
+            
+            # Jesli aplikacja ma duzo sesji, klasyfikuj ja
+            if ($profile.Sessions -gt 10) {
+                $avgDownloadMB = $profile.AvgDownload / 1MB
+                $avgUploadMB = $profile.AvgUpload / 1MB
+                
+                # Heurystyki klasyfikacji
+                if ($avgDownloadMB -gt 5 -and $avgUploadMB -lt 1) {
+                    # Duzy download, maly upload = Download/Streaming
+                    $profile.Type = if ($avgDownloadMB -gt 10) { "Download" } else { "Streaming" }
+                    $profile.NeedsLowPing = $false
+                }
+                elseif ($avgUploadMB -gt 2) {
+                    # Duzy upload = prawdopodobnie streaming wideo
+                    $profile.Type = "Streaming"
+                    $profile.NeedsLowPing = $false
+                }
+                elseif ($avgDownloadMB -lt 1 -and $avgUploadMB -lt 0.5) {
+                    # Maly ruch = Gaming/VoIP/Browser
+                    # Sprawdz czy to znana gra/VoIP
+                    if ($this.KnownNetworkApps.ContainsKey($app)) {
+                        $profile.Type = $this.KnownNetworkApps[$app].Type
+                        $profile.NeedsLowPing = $this.KnownNetworkApps[$app].NeedsLowPing
+                    }
+                    else {
+                        $profile.Type = "Browser"
+                        $profile.NeedsLowPing = $false
+                    }
+                }
+            }
+        }
+    }
+    [void] LearnTimePatterns() {
+        # Ucz sie, kiedy uzytkownik typowo gra, pobiera, streamuje
+        $now = [DateTime]::Now
+        
+        # Analiza ostatnich sampli (ostatnie 5 minut)
+        $recentSamples = $this.RecentNetworkSamples | Where-Object { 
+            ($now - $_.Timestamp).TotalMinutes -lt 5 
+        }
+        
+        if ($recentSamples.Count -lt 5) { return }
+        
+        # Statystyki aktywnosci
+        $gamingSamples = @($recentSamples | Where-Object { $_.Type -eq "Gaming" -or $_.Type -eq "VoIP" })
+        $downloadSamples = @($recentSamples | Where-Object { $_.Type -eq "Download" -or $_.Type -eq "Streaming" })
+        
+        $hour = $now.Hour
+        $hourPattern = $this.HourlyNetworkPatterns[$hour]
+        
+        # Aktualizuj prawdopodobienstwa na podstawie aktywnosci
+        if ($gamingSamples.Count -gt ($recentSamples.Count * 0.5)) {
+            # Ponad polowa sampli to gaming - zwieksz prawdopodobienstwo
+            $hourPattern.GamingProbability = [Math]::Min(0.9, $hourPattern.GamingProbability + 0.1)
+        }
+        if ($downloadSamples.Count -gt ($recentSamples.Count * 0.5)) {
+            # Ponad polowa sampli to download - zwieksz prawdopodobienstwo
+            $hourPattern.DownloadProbability = [Math]::Min(0.9, $hourPattern.DownloadProbability + 0.1)
+        }
+    }
+    [void] OptimizeQTable() {
+        # Regularyzacja Q-Table - zmniejsz wartosci, ktore nie sa uzywane
+        $decay = 0.99
+        
+        foreach ($state in $this.NetworkQTable.Keys) {
+            foreach ($action in $this.NetworkQTable[$state].Keys) {
+                # Decay niewykorzystanych akcji
+                $this.NetworkQTable[$state][$action] *= $decay
+            }
+        }
+        
+        # Ogranicz rozmiar Q-Table (jesli za duza)
+        if ($this.NetworkQTable.Count -gt 100) {
+            # Usun stany z najnizszymi wartosciami
+            $sortedStates = $this.NetworkQTable.Keys | Sort-Object {
+                ($this.NetworkQTable[$_].Values | Measure-Object -Maximum).Maximum
+            }
+            
+            # Usun 20% najslabszych stanow
+            $toRemove = [Math]::Floor($sortedStates.Count * 0.2)
+            for ($i = 0; $i -lt $toRemove; $i++) {
+                $this.NetworkQTable.Remove($sortedStates[$i])
+            }
+        }
+    }
+    [string] GetStatus() {
+        $accuracy = if ($this.TotalPredictions -gt 0) { 
+            [Math]::Round(($this.CorrectPredictions / $this.TotalPredictions) * 100, 1) 
+        } else { 0 }
+        $apps = $this.AppNetworkProfiles.Count
+        return "Apps:$apps Acc:$accuracy% Pred:$($this.TotalPredictions)"
+    }
+    [hashtable] GetDetailedStatus() {
+        return @{
+            LearnedApps = $this.AppNetworkProfiles.Count
+            TotalPredictions = $this.TotalPredictions
+            CorrectPredictions = $this.CorrectPredictions
+            Accuracy = if ($this.TotalPredictions -gt 0) { 
+                [Math]::Round(($this.CorrectPredictions / $this.TotalPredictions) * 100, 1) 
+            } else { 0 }
+            QTableStates = $this.NetworkQTable.Count
+            LastPredictedMode = $this.LastPredictedMode
+        }
+    }
+    # #
+    # ZAPIS I ODCZYT STANU
+    # #
+    [void] SaveState([string]$dir) {
+        try {
+            $state = @{
+                AppNetworkProfiles = @{}
+                HourlyNetworkPatterns = @{}
+                DayNetworkPatterns = @{}
+                NetworkQTable = @{}
+                TotalPredictions = $this.TotalPredictions
+                CorrectPredictions = $this.CorrectPredictions
+                TotalOptimizations = $this.TotalOptimizations
+                LastSaved = (Get-Date).ToString("o")
+            }
+            # Konwertuj hashtable na format serializowalny
+            foreach ($key in $this.AppNetworkProfiles.Keys) {
+                $state.AppNetworkProfiles[$key] = $this.AppNetworkProfiles[$key]
+            }
+            foreach ($key in $this.HourlyNetworkPatterns.Keys) {
+                $state.HourlyNetworkPatterns[$key.ToString()] = $this.HourlyNetworkPatterns[$key]
+            }
+            foreach ($key in $this.DayNetworkPatterns.Keys) {
+                $state.DayNetworkPatterns[$key.ToString()] = $this.DayNetworkPatterns[$key]
+            }
+            foreach ($key in $this.NetworkQTable.Keys) {
+                $state.NetworkQTable[$key] = $this.NetworkQTable[$key]
+            }
+            $path = Join-Path $dir "NetworkAI.json"
+            $json = $state | ConvertTo-Json -Depth 6
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+        } catch {
+            try { "$((Get-Date).ToString('o')) - NetworkAI.SaveState ERROR: $_" | Out-File -FilePath 'C:\CPUManager\ErrorLog.txt' -Append -Encoding utf8 } catch { }
+        }
+    }
+    [void] LoadState([string]$dir) {
+        try {
+            $path = Join-Path $dir "NetworkAI.json"
+            if (Test-Path $path) {
+                $state = Get-Content $path -Raw | ConvertFrom-Json
+                # Odtworz profile aplikacji
+                if ($state.AppNetworkProfiles) {
+                    $state.AppNetworkProfiles.PSObject.Properties | ForEach-Object {
+                        $this.AppNetworkProfiles[$_.Name] = @{
+                            Type = $_.Value.Type
+                            AvgDownload = $_.Value.AvgDownload
+                            AvgUpload = $_.Value.AvgUpload
+                            MaxDownload = $_.Value.MaxDownload
+                            MaxUpload = $_.Value.MaxUpload
+                            NeedsLowPing = $_.Value.NeedsLowPing
+                            Sessions = $_.Value.Sessions
+                        }
+                    }
+                }
+                # Odtworz wzorce godzinowe
+                if ($state.HourlyNetworkPatterns) {
+                    for ($h = 0; $h -lt 24; $h++) {
+                        $key = $h.ToString()
+                        if ($state.HourlyNetworkPatterns.$key) {
+                            $this.HourlyNetworkPatterns[$h] = @{
+                                AvgDownload = $state.HourlyNetworkPatterns.$key.AvgDownload
+                                AvgUpload = $state.HourlyNetworkPatterns.$key.AvgUpload
+                                DominantType = $state.HourlyNetworkPatterns.$key.DominantType
+                                GamingProbability = $state.HourlyNetworkPatterns.$key.GamingProbability
+                                DownloadProbability = $state.HourlyNetworkPatterns.$key.DownloadProbability
+                                Samples = $state.HourlyNetworkPatterns.$key.Samples
+                            }
+                        }
+                    }
+                }
+                # Odtworz Q-Table
+                if ($state.NetworkQTable) {
+                    $state.NetworkQTable.PSObject.Properties | ForEach-Object {
+                        $stateName = $_.Name  # v39 FIX
+                        $this.NetworkQTable[$stateName] = @{}
+                        $_.Value.PSObject.Properties | ForEach-Object {
+                            $actionName = $_.Name  # v39 FIX
+                            $this.NetworkQTable[$stateName][$actionName] = [double]$_.Value
+                        }
+                    }
+                }
+                if ($state.TotalPredictions) { $this.TotalPredictions = $state.TotalPredictions }
+                if ($state.CorrectPredictions) { $this.CorrectPredictions = $state.CorrectPredictions }
+                if ($state.TotalOptimizations) { $this.TotalOptimizations = $state.TotalOptimizations }
+            }
+        } catch { }
+    }
+}
+class DesktopWidget {
+    [string] $DataFile
+    [bool] $Running
+    DesktopWidget() {
+        $this.DataFile = "C:\CPUManager\WidgetData.json"
+        $this.Running = $false
+    }
+    [void] UpdateData([hashtable]$metrics) {
+        # Sprawdz tryb storage
+        if ($Script:UseRAMStorage -and $Script:SharedRAM) {
+            # Tryb RAM - zapisz do RAMManager
+            try {
+                $Script:SharedRAM.Write("WidgetData", $metrics)
+            } catch {
+                try { "$((Get-Date).ToString('o')) - DesktopWidget.UpdateData [RAM] ERROR: $_" | Out-File -FilePath 'C:\CPUManager\ErrorLog.txt' -Append -Encoding utf8 } catch { }
+            }
+        } else {
+            # Tryb JSON - zapisz do pliku
+            try {
+                $json = $metrics | ConvertTo-Json -Depth 10 -Compress
+                $fs = New-Object System.IO.FileStream($this.DataFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+                $writer = New-Object System.IO.StreamWriter($fs, [System.Text.Encoding]::UTF8)
+                $writer.Write($json)
+                $writer.Flush()
+                $writer.Dispose()
+                $fs.Dispose()
+            } catch {
+                try { "$((Get-Date).ToString('o')) - DesktopWidget.UpdateData [JSON] ERROR: $_" | Out-File -FilePath 'C:\CPUManager\ErrorLog.txt' -Append -Encoding utf8 } catch { }
+            }
+        }
+    }
+    [void] Start() {
+        $this.Running = $true
+        # Mozna dodac logike uruchamiania procesu widgetu, jesli nie dziala
+    }
+    [void] Stop() {
+        $this.Running = $false
+        # Mozna dodac logike zamykania procesu widgetu
+    }
+    [void] Toggle() {
+        if ($this.Running) {
+            $this.Stop()
+        } else {
+            $this.Start()
+        }
+    }
+    [bool] IsRunning() {
+        return $this.Running
+    }
+}
+class WebDashboard {
+    [object] $Runspace
+    [object] $PowerShell
+    [int] $Port
+    [bool] $Running
+    [string] $DataFile
+    WebDashboard([int]$port) {
+        $this.Port = $port
+        $this.Running = $false
+        $this.DataFile = "C:\CPUManager\DashboardData.json"
+    }
+    [void] Start() {
+        try {
+            $serverPort = $this.Port
+            $dataFilePath = $this.DataFile
+            # Create runspace for background HTTP server
+            $this.Runspace = [runspacefactory]::CreateRunspace()
+            $this.Runspace.Open()
+            $this.PowerShell = New-TrackedPowerShell 'WebDashboard'
+            $this.PowerShell.Runspace = $this.Runspace
+            $this.PowerShell.AddScript({
+                param($Port, $DataFile)
+                $listener = New-Object System.Net.HttpListener
+                $listener.Prefixes.Add("http://localhost:$Port/")
+                try {
+                    $listener.Start()
+                    while ($listener.IsListening) {
+                        try {
+                            $context = $listener.GetContext()
+                            $response = $context.Response
+                            # Read data from file
+                            $d = @{ CPU=0; Temp=50; Mode="Balanced"; Activity="Idle"; Context="Idle"; Iteration=0; CPUHistory=@(0); TempHistory=@(50); Brain="0w"; QLearning=""; Bandit=""; Genetic=""; Ensemble=""; Energy=""; RAM=0; DiskIO=0; NetDL=0; NetUL=0; CpuMHz=0; AI="ON"; CPUType="Unknown"; CPUName="Unknown" }
+                            if (Test-Path $DataFile) {
+                                try {
+                                    $json = [System.IO.File]::ReadAllText($DataFile)
+                                    $loaded = $json | ConvertFrom-Json
+                                    $d.CPU = $loaded.CPU
+                                    $d.Temp = $loaded.Temp
+                                    $d.Mode = $loaded.Mode
+                                    $d.Activity = $loaded.Activity
+                                    $d.Context = $loaded.Context
+                                    $d.Iteration = $loaded.Iteration
+                                    $d.CPUHistory = @($loaded.CPUHistory)
+                                    $d.TempHistory = @($loaded.TempHistory)
+                                    $d.Brain = $loaded.Brain
+                                    $d.QLearning = $loaded.QLearning
+                                    $d.Bandit = $loaded.Bandit
+                                    $d.Genetic = $loaded.Genetic
+                                    $d.Ensemble = $loaded.Ensemble
+                                    $d.Energy = $loaded.Energy
+                                    if ($loaded.RAM) { $d.RAM = $loaded.RAM }
+                                    if ($loaded.DiskIO) { $d.DiskIO = $loaded.DiskIO }
+                                    if ($loaded.NetDL) { $d.NetDL = $loaded.NetDL }
+                                    if ($loaded.NetUL) { $d.NetUL = $loaded.NetUL }
+                                    if ($loaded.CpuMHz) { $d.CpuMHz = $loaded.CpuMHz }
+                                    if ($loaded.AI) { $d.AI = $loaded.AI }
+                                    if ($loaded.CPUType) { $d.CPUType = $loaded.CPUType } else { $d.CPUType = "Unknown" }
+                                    if ($loaded.CPUName) { $d.CPUName = $loaded.CPUName } else { $d.CPUName = "Unknown" }
+                                } catch { }
+                            }
+                            $cpuJson = "[$($d.CPUHistory -join ',')]"
+                            $tempJson = "[$($d.TempHistory -join ',')]"
+                            $modeClass = $d.Mode.ToLower()
+                            $cpuGHz = if ($d.CpuMHz -gt 0) { "{0:N2}" -f ($d.CpuMHz/1000) } else { "-.--" }
+                            $netDLFmt = if ($d.NetDL -ge 1048576) { "{0:N1} MB/s" -f ($d.NetDL/1048576) } elseif ($d.NetDL -ge 1024) { "{0:N0} KB/s" -f ($d.NetDL/1024) } else { "{0:N0} B/s" -f $d.NetDL }
+                            $netULFmt = if ($d.NetUL -ge 1048576) { "{0:N1} MB/s" -f ($d.NetUL/1048576) } elseif ($d.NetUL -ge 1024) { "{0:N0} KB/s" -f ($d.NetUL/1024) } else { "{0:N0} B/s" -f $d.NetUL }
+                            $html = @"
+<!DOCTYPE html><html><head><title>CPU Manager AI</title><meta charset="UTF-8"><meta http-equiv="refresh" content="2">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;min-height:100vh;padding:20px}.header{text-align:center;padding:20px;background:rgba(255,255,255,0.1);border-radius:15px;margin-bottom:20px}.header h1{color:#00d9ff;font-size:2em}.status{color:#0f0;font-size:1.2em;margin-top:10px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}.card{background:rgba(255,255,255,0.05);border-radius:15px;padding:20px;border:1px solid rgba(255,255,255,0.1)}.card h2{color:#00d9ff;margin-bottom:15px}.metric{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.1)}.metric:last-child{border-bottom:none}.label{color:#aaa}.value{font-weight:bold}.turbo{color:#ff6b6b}.balanced{color:#ffd93d}.silent{color:#6bcb77}.chart-container{height:200px;margin-top:15px}.ai-status{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:10px}.ai-item{background:rgba(0,217,255,0.1);padding:10px;border-radius:8px;text-align:center}.ai-item .name{font-size:0.8em;color:#aaa}.ai-item .val{font-size:1.1em;font-weight:bold;color:#00d9ff}.hw-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:15px;margin-top:10px}.hw-item{background:rgba(255,255,255,0.05);padding:12px;border-radius:10px;text-align:center}.hw-item .hw-val{font-size:1.4em;font-weight:bold;color:#00d9ff}.hw-item .hw-lbl{font-size:0.8em;color:#888;margin-top:4px}</style></head>
+<body><div class="header"><h1> CPU Manager AI</h1><div class="status">AI: $($d.AI) | Mode: <span class="$modeClass">$($d.Mode)</span> | CPU: $($d.CPUType) | Iteration: $($d.Iteration)</div></div>
+<div class="grid">
+<div class="card"><h2>- Processor</h2><div class="metric"><span class="label">Model</span><span class="value" style="font-size:0.9em">$($d.CPUName)</span></div><div class="metric"><span class="label">Type</span><span class="value">$($d.CPUType)</span></div><div class="metric"><span class="label">Current Speed</span><span class="value">$cpuGHz GHz</span></div></div>
+<div class="card"><h2> System Metrics</h2>
+<div class="hw-grid">
+<div class="hw-item"><div class="hw-val">$($d.CPU)%</div><div class="hw-lbl">CPU Usage</div></div>
+<div class="hw-item"><div class="hw-val">$($d.Temp)°C</div><div class="hw-lbl">Temperature</div></div>
+<div class="hw-item"><div class="hw-val">$cpuGHz GHz</div><div class="hw-lbl">CPU Speed</div></div>
+<div class="hw-item"><div class="hw-val">$($d.RAM)%</div><div class="hw-lbl">RAM Usage</div></div>
+<div class="hw-item"><div class="hw-val">$($d.DiskIO) MB/s</div><div class="hw-lbl">Disk I/O</div></div>
+<div class="hw-item"><div class="hw-val $modeClass">$($d.Mode)</div><div class="hw-lbl">Power Mode</div></div>
+</div>
+<div class="metric" style="margin-top:15px"><span class="label">Activity</span><span class="value">$($d.Activity)</span></div>
+<div class="metric"><span class="label">Context</span><span class="value">$($d.Context)</span></div>
+<div class="metric"><span class="label">Network DL</span><span class="value">$netDLFmt</span></div>
+<div class="metric"><span class="label">Network UL</span><span class="value">$netULFmt</span></div>
+</div>
+<div class="card"><h2> AI Learning & Status</h2><div class="metric"><span class="label"> Mode Switches</span><span class="value">$($d.ModeSwitches)</span></div><div class="metric"><span class="label">- Active Apps</span><span class="value">$($d.AppsDetected)</span></div><div class="metric"><span class="label"> Runtime</span><span class="value">$($d.Runtime) min</span></div><h3 style="color:#00d9ff;margin:15px 0 10px 0;font-size:0.9em">AI Components:</h3><div class="ai-status">
+<div class="ai-item"><div class="name">Brain</div><div class="val">$($d.Brain)</div></div>
+<div class="ai-item"><div class="name">Q-Learning</div><div class="val">$($d.QLearning)</div></div>
+<div class="ai-item"><div class="name">Bandit</div><div class="val">$($d.Bandit)</div></div>
+<div class="ai-item"><div class="name">Genetic</div><div class="val">$($d.Genetic)</div></div>
+<div class="ai-item"><div class="name">Ensemble</div><div class="val">$($d.Ensemble)</div></div>
+<div class="ai-item"><div class="name">Energy</div><div class="val">$($d.Energy)</div></div></div></div>
+<div class="card"><h2> CPU History (last 60)</h2><div class="chart-container"><canvas id="cpuChart"></canvas></div></div>
+<div class="card"><h2>- Temp History</h2><div class="chart-container"><canvas id="tempChart"></canvas></div></div></div>
+<script>const cpuData=$cpuJson;const tempData=$tempJson;const labels=Array.from({length:Math.max(cpuData.length,1)},(_,i)=>i);
+new Chart(document.getElementById('cpuChart'),{type:'line',data:{labels:labels,datasets:[{data:cpuData,borderColor:'#00d9ff',backgroundColor:'rgba(0,217,255,0.1)',fill:true,tension:0.3,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{min:0,max:100,grid:{color:'rgba(255,255,255,0.1)'}},x:{display:false}}}});
+new Chart(document.getElementById('tempChart'),{type:'line',data:{labels:labels,datasets:[{data:tempData,borderColor:'#ff6b6b',backgroundColor:'rgba(255,107,107,0.1)',fill:true,tension:0.3,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{min:30,max:100,grid:{color:'rgba(255,255,255,0.1)'}},x:{display:false}}}});</script></body></html>
+"@
+                            $buffer = [System.Text.Encoding]::UTF8.GetBytes($html)
+                            $response.ContentType = "text/html; charset=utf-8"
+                            $response.ContentLength64 = $buffer.Length
+                            $response.OutputStream.Write($buffer, 0, $buffer.Length)
+                            $response.OutputStream.Close()
+                        } catch { Start-Sleep -Milliseconds 50 }
+                    }
+                } catch { } finally {
+                    try { $listener.Stop(); $listener.Close() } catch { }
+                }
+            }).AddArgument($serverPort).AddArgument($dataFilePath)
+            $this.PowerShell.BeginInvoke() | Out-Null
+            $null = $this.PowerShell
+            $this.Running = $true
+        } catch {
+            $this.Running = $false
+        }
+    }
+    [void] UpdateData([hashtable]$data) {
+        try {
+            $json = $data | ConvertTo-Json -Depth 10 -Compress
+            $tmp = "$($this.DataFile).tmp"
+            [System.IO.File]::WriteAllText($tmp, $json, [System.Text.Encoding]::UTF8)
+            try { Move-Item -Path $tmp -Destination $this.DataFile -Force -ErrorAction Stop } catch { Copy-Item -Path $tmp -Destination $this.DataFile -Force; Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+        } catch { 
+            try { "$((Get-Date).ToString('o')) - DesktopWidget.UpdateData ERROR: $_" | Out-File -FilePath $Script:ErrorLogPath -Append -Encoding utf8 } catch { }
+        }
+    }
+    [void] Stop() {
+        try {
+            $this.Running = $false
+            if ($this.PowerShell) { $this.PowerShell.Stop(); $this.PowerShell.Dispose() }
+            if ($this.Runspace) { $this.Runspace.Close(); $this.Runspace.Dispose() }
+        } catch { }
+    }
+}
+function Register-CPUManagerTask {
+    param(
+        [string]$ScriptPath = $MyInvocation.MyCommand.Path,
+        [switch]$Remove
+    )
+    $taskName = "CPUManagerAI_AutoStart"
+    if ($Remove) {
+        try {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Host " Task removed: $taskName" -ForegroundColor Green
+            return $true
+        } catch {
+            Write-Host "- Failed to remove task: $_" -ForegroundColor Red
+            return $false
+        }
+    }
+    try {
+        # Usun istniejace zadanie
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        # Utworz nowe zadanie
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`""
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+        Write-Host " Auto-start registered: $taskName" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "- Failed to register task: $_" -ForegroundColor Red
+        return $false
+    }
+}
+function Test-CPUManagerTaskExists {
+    try {
+        $task = Get-ScheduledTask -TaskName "CPUManagerAI_AutoStart" -ErrorAction SilentlyContinue
+        return ($task -ne $null)
+    } catch {
+        return $false
+    }
+}
+# POWER CONTROL - Dynamic scaling
+$Script:LastPowerMode = ""
+$Script:LastPowerMax = -1
+$Script:PowerPlanGUID = $null
+# PRZYWRACANIE DOMYSLNYCH PLANOW ZASILANIA WINDOWS
+function Restore-DefaultPowerPlans {
+    <#
+    .SYNOPSIS
+    Przywraca domyslne plany zasilania Windows przy zamykaniu programu.
+    Resetuje Min/Max CPU do domyslnych wartosci i ustawia plan Balanced.
+    #>
+    try {
+        Write-Host "   Przywracanie domyslnych ustawien zasilania..." -ForegroundColor Yellow
+        # Domyslne GUIDy planow Windows
+        $balancedGUID = "381b4222-f694-41f0-9685-ff5bb260df2e"
+        $powerSaverGUID = "a1841308-3541-4fab-bc81-f71556f20b4a"
+        $highPerfGUID = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+        # Subgroup i settings dla CPU
+        $cpuSubgroup = "54533251-82be-4824-96c1-47b60b740d00"
+        $minCpuSetting = "893dee8e-2bef-41e0-89c6-b55d0929964c"
+        $maxCpuSetting = "bc5038f7-23e0-4960-96da-33abaf5935ec"
+        # Domyslne wartosci Windows
+        $defaultMin = 5    # 5% minimum
+        $defaultMax = 100  # 100% maximum
+        # Przywroc domyslne wartosci dla planu Balanced
+        $null = powercfg /setacvalueindex $balancedGUID $cpuSubgroup $minCpuSetting $defaultMin 2>$null
+        $null = powercfg /setacvalueindex $balancedGUID $cpuSubgroup $maxCpuSetting $defaultMax 2>$null
+        $null = powercfg /setdcvalueindex $balancedGUID $cpuSubgroup $minCpuSetting $defaultMin 2>$null
+        $null = powercfg /setdcvalueindex $balancedGUID $cpuSubgroup $maxCpuSetting $defaultMax 2>$null
+        # Przywroc domyslne wartosci dla planu Power Saver (jesli istnieje)
+        $null = powercfg /setacvalueindex $powerSaverGUID $cpuSubgroup $minCpuSetting 5 2>$null
+        $null = powercfg /setacvalueindex $powerSaverGUID $cpuSubgroup $maxCpuSetting 100 2>$null
+        $null = powercfg /setdcvalueindex $powerSaverGUID $cpuSubgroup $minCpuSetting 5 2>$null
+        $null = powercfg /setdcvalueindex $powerSaverGUID $cpuSubgroup $maxCpuSetting 100 2>$null
+        # Przywroc domyslne wartosci dla planu High Performance (jesli istnieje)
+        $null = powercfg /setacvalueindex $highPerfGUID $cpuSubgroup $minCpuSetting 100 2>$null
+        $null = powercfg /setacvalueindex $highPerfGUID $cpuSubgroup $maxCpuSetting 100 2>$null
+        $null = powercfg /setdcvalueindex $highPerfGUID $cpuSubgroup $minCpuSetting 100 2>$null
+        $null = powercfg /setdcvalueindex $highPerfGUID $cpuSubgroup $maxCpuSetting 100 2>$null
+        # Aktywuj plan Balanced
+        $null = powercfg /setactive $balancedGUID 2>$null
+        # Jesli byl uzyty inny plan (np. utworzony przez skrypt), tez go zresetuj
+        if ($Script:PowerPlanGUID -and $Script:PowerPlanGUID -ne $balancedGUID) {
+            $null = powercfg /setacvalueindex $Script:PowerPlanGUID $cpuSubgroup $minCpuSetting $defaultMin 2>$null
+            $null = powercfg /setacvalueindex $Script:PowerPlanGUID $cpuSubgroup $maxCpuSetting $defaultMax 2>$null
+            $null = powercfg /setdcvalueindex $Script:PowerPlanGUID $cpuSubgroup $minCpuSetting $defaultMin 2>$null
+            $null = powercfg /setdcvalueindex $Script:PowerPlanGUID $cpuSubgroup $maxCpuSetting $defaultMax 2>$null
+        }
+        Write-Host "   Plan zasilania 'Balanced' przywrocony (CPU: 5-100%)" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "  [WARN] Nie udalo sie przywrocic planow zasilania: $_" -ForegroundColor Red
+        return $false
+    }
+}
+function Set-PowerMode {
+    param(
+        [string]$Mode,
+        [int]$CurrentCPU = 50,
+        [switch]$HardLock
+    )
+    if ([string]::IsNullOrWhiteSpace($Mode)) { return }
+    # - RyzenADJ - Ustaw TDP (AMD Ryzen)
+    if ($Script:RyzenAdjAvailable -and $Script:CPUType -eq "AMD") {
+        Set-RyzenAdjMode $Mode | Out-Null
+    }
+    # Uzyj odpowiednich stanow dla wykrytego procesora
+    $powerStates = Get-PowerStates
+    $state = $powerStates[$Mode]
+    if (-not $state) { return }
+    $minValue = $state.Min
+    $maxValue = $state.Max
+    # v43.14: Usunięte dynamiczne skalowanie Silent - powodowało feedback loop:
+    # CPU rośnie → max state rośnie → procesor boostuje → CPU rośnie dalej
+    # Teraz Silent = ZAWSZE strict Min/Max z config (dla AMD i Intel)
+    # Balanced/Turbo/Extreme = strict Min/Max z config (bez modyfikacji)
+    #  FIXED: Balanced i Turbo uzywaja wartosci z RyzenStates bez modyfikacji
+    if ($Script:LastPowerMode -eq $Mode -and $Script:LastPowerMax -eq $maxValue) { return }
+    try {
+        if (-not $Script:PowerPlanGUID) {
+            $output = powercfg /getactivescheme 2>$null
+            if ($output -match '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})') {
+                $Script:PowerPlanGUID = $matches[1]
+            }
+        }
+        if ($Script:PowerPlanGUID) {
+            $guid = $Script:PowerPlanGUID
+            $subgroup = "54533251-82be-4824-96c1-47b60b740d00"
+            # Processor Min/Max state
+            powercfg /setacvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $minValue 2>$null
+            powercfg /setacvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxValue 2>$null
+            # - Intel Speed Shift EPP (Energy Performance Preference)
+            # 0=Performance, 50=Balanced, 100=Power Saving
+            if ($Script:CPUType -eq "Intel") {
+                $eppValue = switch ($Mode) {
+                    "Silent"   { 60  }  # Max power saving (zlagodzone z 100 -> 60, by uniknac ekstremalnego throttlingu)
+                    "Balanced" { 50  }  # Balanced
+                    "Turbo"    { 0   }  # Max performance
+                    "Extreme"  { 0   }  # Max performance
+                    default    { 50  }
+                }
+                # EPP setting GUID: 36687f9e-e3a5-4dbf-b1dc-15eb381c6863
+                powercfg /setacvalueindex $guid $subgroup "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $eppValue 2>$null
+                # Processor performance boost mode (0=Disabled, 1=Enabled, 2=Aggressive, 4=Efficient Aggressive)
+                $boostMode = switch ($Mode) {
+                    "Silent"   { 0 }  # Disabled
+                    "Balanced" { 1 }  # Enabled
+                    "Turbo"    { 2 }  # Aggressive
+                    "Extreme"  { 2 }  # Aggressive
+                    default    { 1 }
+                }
+                powercfg /setacvalueindex $guid $subgroup "be337238-0d82-4146-a960-4f3749d470c7" $boostMode 2>$null
+            }
+            # Logowanie zastosowanych ustawien Intel (EPP + BoostMode)
+            if ($Script:CPUType -eq "Intel") {
+                Write-Log "Intel POWER APPLIED: Mode=$Mode Min=$minValue Max=$maxValue EPP=$eppValue BoostMode=$boostMode" "POWER"
+            }
+            powercfg /setactive $guid 2>$null
+            # ??- SLEDZENIE ZMIAN TRYBU (bez logowania do ActivityLog) ???
+            if ($Global:LastLoggedMode -ne $Mode -or $lastLoggedFreq -ne "$minValue-$maxValue") {
+                # Tylko debug do konsoli (nie do ActivityLog)
+                if ($Global:DebugMode) {
+                    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] MODE: $($Global:LastLoggedMode) -> $Mode | $minValue%-$maxValue% | CPU:$CurrentCPU%" -ForegroundColor Gray
+                }
+                $Global:LastLoggedMode = $Mode
+                $Global:lastLoggedFreq = "$minValue-$maxValue"
+                $Global:ModeChangeCount++
+            }
+            $Script:LastPowerMode = $Mode
+            $Script:LastPowerMax = $maxValue
+            if ($Global:DebugMode) {
+                Add-Log "POWER: $Mode Min=$minValue Max=$maxValue (CPU=$CurrentCPU%)" -Debug
+            }
+        }
+    } catch { }
+}
+# FILE OPERATIONS - FIXED z obsluga bledow
+function Save-State {
+    param(
+        [NeuralBrain]$Brain, 
+        [ProphetMemory]$Prophet
+    )
+    if ($null -eq $Brain -or $null -eq $Prophet) { return $false }
+    $success = $true
+    # Powod: Dane Brain moga istniec z poprzedniej sesji - nie tracimy ich
+    try {
+        $brainData = @{
+            Weights = $Brain.Weights
+            AggressionBias = $Brain.AggressionBias
+            ReactivityBias = $Brain.ReactivityBias
+            LastLearned = $Brain.LastLearned
+            LastLearnTime = $Brain.LastLearnTime    # v39 FIX: Dodano brakujace pole
+            TotalDecisions = $Brain.TotalDecisions
+            RAMWeight = $Brain.RAMWeight            # v39 FIX: Dodano brakujace pole
+        }
+        $json = $brainData | ConvertTo-Json -Depth 3 -Compress
+        [System.IO.File]::WriteAllText($Script:BrainPath, $json, [System.Text.Encoding]::UTF8)
+    } catch { $success = $false }
+    try {
+        $prophetData = @{
+            Apps = @{}
+            LastActiveApp = $Prophet.LastActiveApp
+            TotalSessions = $Prophet.TotalSessions
+            HourlyActivity = $Prophet.HourlyActivity
+            MinSamplesForConfidence = $Prophet.MinSamplesForConfidence
+        }
+        $cacheLimit = if ($Script:ProphetCacheLimit -gt 0) { $Script:ProphetCacheLimit } else { 50 }
+        $appList = $Prophet.Apps.Keys | ForEach-Object {
+            @{ Name = $_; LastSeen = $Prophet.Apps[$_].LastSeen; Launches = $Prophet.Apps[$_].Launches }
+        }
+        # Sort by LastSeen (newest first), then by Launches
+        $sortedApps = $appList | Sort-Object { $_.LastSeen } -Descending | Select-Object -First $cacheLimit
+        $keepApps = @{}
+        foreach ($a in $sortedApps) { $keepApps[$a.Name] = $true }
+        foreach ($appName in $Prophet.Apps.Keys) {
+            if (-not $keepApps.ContainsKey($appName)) { continue }
+            $app = $Prophet.Apps[$appName]
+            $prophetData.Apps[$appName] = @{
+                Name = $app.Name
+                ProcessName = $app.ProcessName
+                Launches = $app.Launches
+                AvgCPU = $app.AvgCPU
+                AvgIO = $app.AvgIO
+                MaxCPU = $app.MaxCPU
+                MaxIO = $app.MaxIO
+                Category = $app.Category
+                LastSeen = $app.LastSeen
+                HourHits = $app.HourHits
+                PrevApps = $app.PrevApps
+                IsHeavy = $app.IsHeavy
+                Samples = if ($app.ContainsKey('Samples')) { $app.Samples } else { 0 }
+                SessionRuntime = if ($app.ContainsKey('SessionRuntime')) { $app.SessionRuntime } else { 0.0 }
+            }
+        }
+        $json = $prophetData | ConvertTo-Json -Depth 5 -Compress
+        [System.IO.File]::WriteAllText($Script:ProphetPath, $json, [System.Text.Encoding]::UTF8)
+    } catch { $success = $false }
+    return [bool]$success
+}
+function Load-State {
+    $brain = [NeuralBrain]::new()
+    $prophet = [ProphetMemory]::new()
+    $gpuBound = [GPUBoundDetector]::new()  # v42.1: GPU-Bound Detector
+    # Powod: Dane Brain moga istniec z poprzedniej sesji - zachowujemy je
+    if (Test-Path $Script:BrainPath) {
+        try {
+            $json = [System.IO.File]::ReadAllText($Script:BrainPath, [System.Text.Encoding]::UTF8)
+            $data = $json | ConvertFrom-Json
+            if ($data.Weights) {
+                $data.Weights.PSObject.Properties | ForEach-Object {
+                    $brain.Weights[$_.Name] = [double]$_.Value
+                }
+            }
+            if ($null -ne $data.AggressionBias) { $brain.AggressionBias = [double]$data.AggressionBias }
+            if ($null -ne $data.ReactivityBias) { $brain.ReactivityBias = [double]$data.ReactivityBias }
+            if ($data.LastLearned) { $brain.LastLearned = $data.LastLearned }
+            if ($data.LastLearnTime) { $brain.LastLearnTime = $data.LastLearnTime }  # v39 FIX: Dodano
+            if ($null -ne $data.TotalDecisions) { $brain.TotalDecisions = [int]$data.TotalDecisions }
+            if ($null -ne $data.RAMWeight) { $brain.RAMWeight = [double]$data.RAMWeight }  # v39 FIX: Dodano
+        } catch { }
+    }
+    if (Test-Path $Script:ProphetPath) {
+        try {
+            $json = [System.IO.File]::ReadAllText($Script:ProphetPath, [System.Text.Encoding]::UTF8)
+            $data = $json | ConvertFrom-Json
+            if ($data.Apps) {
+                $loadedCount = 0
+                $data.Apps.PSObject.Properties | ForEach-Object {
+                    $appName = $_.Name  # v39 FIX: Zachowaj nazwe PRZED wewnetrzna petla
+                    $appData = $_.Value
+                    $app = @{
+                        Name = $appData.Name
+                        ProcessName = $appData.ProcessName
+                        Launches = [int]$appData.Launches
+                        AvgCPU = [double]$appData.AvgCPU
+                        AvgIO = [double]$appData.AvgIO
+                        MaxCPU = [double]$appData.MaxCPU
+                        MaxIO = [double]$appData.MaxIO
+                        Category = $appData.Category
+                        LastSeen = $appData.LastSeen
+                        HourHits = if ($appData.HourHits) { [int[]]$appData.HourHits } else { [int[]]::new(24) }
+                        PrevApps = @{}
+                        IsHeavy = [bool]$appData.IsHeavy
+                        Samples = if ($appData.Samples) { [int]$appData.Samples } else { 0 }
+                        SessionRuntime = if ($appData.SessionRuntime) { [double]$appData.SessionRuntime } else { 0.0 }
+                    }
+                    if ($appData.PrevApps) {
+                        $appData.PrevApps.PSObject.Properties | ForEach-Object {
+                            $prevName = $_.Name  # v39 FIX: Osobna zmienna dla wewnetrznej petli
+                            $app.PrevApps[$prevName] = [int]$_.Value
+                        }
+                    }
+                    $prophet.Apps[$appName] = $app  # v39 FIX: Uzywaj zachowanej nazwy
+                    $loadedCount++
+                }
+                Write-Host "  Prophet: Loaded $loadedCount apps from ProphetMemory.json" -ForegroundColor Green
+            } else {
+                Write-Host "  Prophet: Apps section empty or missing in ProphetMemory.json" -ForegroundColor Yellow
+            }
+            if ($data.LastActiveApp) { $prophet.LastActiveApp = $data.LastActiveApp }
+            if ($null -ne $data.TotalSessions) { $prophet.TotalSessions = [int]$data.TotalSessions }
+            if ($data.HourlyActivity) { $prophet.HourlyActivity = [int[]]$data.HourlyActivity }
+            if ($data.MinSamplesForConfidence) { $prophet.MinSamplesForConfidence = [int]$data.MinSamplesForConfidence }
+        } catch {
+            Write-Host "  Prophet: Load error - $_" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "  Prophet: ProphetMemory.json not found (new installation)" -ForegroundColor Yellow
+    }
+    return @{ Brain = $brain; Prophet = $prophet; GPUBound = $gpuBound }
+}
+# UI RENDERING
+function Draw-ProgressBar {
+    param([int]$Value, [int]$MaxValue = 100, [int]$Width = 20)
+    $Value = [Math]::Max(0, [Math]::Min($MaxValue, $Value))
+    $filled = [Math]::Min($Width, [Math]::Round(($Value / $MaxValue) * $Width))
+    $empty = $Width - $filled
+    $fillChar = [char]0x2588  # Full block
+    $emptyChar = [char]0x2591  # Light shade
+    return ($fillChar.ToString() * $filled + $emptyChar.ToString() * $empty)
+}
+function Render-UI {
+    param(
+        $Metrics, $State, $AIDecision, $Watcher, $Brain, $Prophet,
+        $TempSource, $PredictedLoad, $AnomalyAlert, $PriorityCount = 0,
+        $SelfTunerStatus = "", $ChainPrediction = "", $TurboThreshold = 75, $BalancedThreshold = 30,
+        $ActivityStatus = "Unknown", $ContextStatus = "Idle", $ThermalStatus = "", 
+        $UserPatternStatus = "", $TimerStatus = "2Hz",
+        $GPUInfo = $null, $VRMTemp = 0, $CPUPower = 0, $ExplainerReason = ""
+    )
+    # FIX: Zamiast Clear-Host używamy SetCursorPosition - eliminuje migotanie
+    try { [Console]::SetCursorPosition(0, 0) } catch { Clear-Host }
+    # Pobierz wymiary konsoli dla czyszczenia końcówek linii
+    $consoleWidth = try { [Console]::WindowWidth - 1 } catch { 120 }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $aiStatus = if ($Global:AI_Active) { "- AI ON" } else { "- MANUAL" }
+    $debugStatus = if ($Global:DebugMode) { " [DEBUG]" } else { "" }
+    $lines.Add(" [STATUS AI] $aiStatus$debugStatus | Sessions: $($Prophet.TotalSessions) | Time: $((Get-Date).ToString('HH:mm'))")
+    $lines.Add("")
+    $icon = switch($State) { "Turbo" { "" } "Balanced" { "?" } "Silent" { "?" } default { "?" } }
+    $powerInfo = if ($Script:LastPowerMax -gt 0) { " [Max:$($Script:LastPowerMax)%]" } else { "" }
+    $lines.Add(" [POWER STATE] $icon $State$powerInfo - $($AIDecision.Reason)")
+    $lines.Add("")
+    # - RyzenADJ TDP Info
+    if ($Script:RyzenAdjAvailable -and $Script:CurrentTDP.STAPM -gt 0) {
+        $lines.Add(" [TDP] STAPM=$($Script:CurrentTDP.STAPM)W Fast=$($Script:CurrentTDP.Fast)W Slow=$($Script:CurrentTDP.Slow)W Tctl=$($Script:CurrentTDP.Tctl)C")
+    }
+    # === CPU / GPU / SENSORS (single-line) ===
+    $cpuPowerStr = if ($CPUPower -gt 0) { " ${CPUPower}W" } else { "" }
+    $sensorsParts = @()
+    if ($null -eq $Metrics.CPU) {
+        $sensorsParts += ("CPU: N/A$cpuPowerStr (brak danych)")
+    } else {
+        $sensorsParts += ("CPU: $($Metrics.CPU)%$cpuPowerStr")
+    }
+    if ($GPUInfo -and $GPUInfo.Load -gt 0) {
+        $gpuTempStr = if ($GPUInfo.Temp -gt 0) { " ${GPUInfo.Temp}°C" } else { "" }
+        $gpuPowerStr = if ($GPUInfo.Power -gt 0) { " ${GPUInfo.Power}W" } else { "" }
+        $sensorsParts += ("GPU: $($GPUInfo.Load)%$gpuTempStr$gpuPowerStr")
+    } elseif ($GPUInfo -and $GPUInfo.Temp -gt 0) {
+        $sensorsParts += ("GPU: iGPU $($GPUInfo.Temp)°C")
+    }
+    $trendIcon = if ($AIDecision.Trend -gt 3) { '??' }
+                 elseif ($AIDecision.Trend -gt 0) { '?' }
+                 elseif ($AIDecision.Trend -lt -3) { '??' }
+                 elseif ($AIDecision.Trend -lt 0) { '?' }
+                 else { '->' }
+    $tempDisplay = if ($Metrics.Temp -gt 0) { "$($Metrics.Temp)°C" } else { "N/A" }
+    $tempSourceShort = switch ($TempSource) {
+        "LibreHardwareMonitor" { "LHM" }
+        "OpenHardwareMonitor" { "OHM" }
+        "WMI-ACPI" { "ACPI" }
+        default { "?" }
+    }
+    $vrmStr = if ($VRMTemp -gt 0) { " VRM: ${VRMTemp}°C" } else { "" }
+    $sensorsParts += ("I/O: $($Metrics.IO) MB/s")
+    $sensorsParts += ("Temp: $tempDisplay [$tempSourceShort]$vrmStr")
+    $sensorsParts += ("Trend: $trendIcon")
+    $lines.Add(" [SENSORS] " + ($sensorsParts -join ' | '))
+    $lines.Add("")
+    if ($Global:AI_Active) {
+        $pressureBar = Draw-ProgressBar -Value ([Math]::Min(100, $AIDecision.Score))
+        $lines.Add(" [AI ENGINE]")
+        $lines.Add("   Pressure: [$pressureBar] $($AIDecision.Score)")
+        #  FIX: Total Decisions = suma ze WSZYSTKICH silnikow AI (nie tylko Neural Brain)
+        $totalDecisions = $qLearning.TotalUpdates + $bandit.TotalPulls + $genetic.Generation + 
+                          $selfTuner.DecisionHistory.Count + $chainPredictor.TotalPredictions + 
+                          $Prophet.GetAppCount() + $Brain.TotalDecisions
+        # Bias: Jesli Neural Brain aktywny, pokaz jego bias, w przeciwnym razie "N/A"
+        $biasDisplay = if ($Brain.TotalDecisions -gt 0) { 
+            [Math]::Round($Brain.AggressionBias, 2) 
+        } else { 
+            "N/A" 
+        }
+        $lines.Add("   Bias: $biasDisplay | Decisions: $totalDecisions")
+        $lines.Add("")
+    }
+    $lines.Add(" [ADVANCED AI]")
+    $lines.Add("   - Ensemble: $($ensemble.TotalVotes) |  Neural Brain: $($Brain.GetCount())")
+    $lines.Add("")
+    $lines.Add(" [CORE AI]")
+    $qStates = if ($qLearning.QTable) { $qLearning.QTable.Count } else { 0 }
+    $qExplore = [Math]::Round($qLearning.ExplorationRate * 100)
+    $banditStatus = $bandit.GetStatus()
+    $energyEff = [Math]::Round($energyTracker.CurrentEfficiency * 100)
+    $selfTuneGood = $selfTuner.GoodDecisions
+    $selfTuneTotal = $selfTuner.TotalEvaluations
+    $chainCorrect = $chainPredictor.CorrectPredictions
+    $chainTotal = $chainPredictor.TotalPredictions
+    $lines.Add("   Prophet: $($Prophet.GetAppCount()) apps | QLearning: $qStates states Exp:$qExplore% | Bandit: $banditStatus | Genetic: Gen$($genetic.Generation) | Energy: Eff:$energyEff% | SelfTuner: $selfTuneGood/$selfTuneTotal good | Chain: $chainCorrect/$chainTotal correct")
+    $lines.Add("   - Bandit Meta: $($bandit.GetEngineStatus())")  #  v39: RAM-Driven Meta-Selector
+    $predBar = Draw-ProgressBar -Value ([Math]::Min(100, $PredictedLoad)) -Width 10
+    $anomalyStatus = if ([string]::IsNullOrWhiteSpace($AnomalyAlert)) { "- OK" } else { "[WARN] $AnomalyAlert" }
+    $lines.Add("    Load Pred: [$predBar] $([Math]::Round($PredictedLoad))% | - Anomaly: $anomalyStatus")
+    # Self-Tuner info
+    $lines.Add("   - Self-Tune: T>$([Math]::Round($TurboThreshold)) B>$([Math]::Round($BalancedThreshold))")
+    # Chain Predictor info
+    $chainDisplay = if ([string]::IsNullOrWhiteSpace($ChainPrediction)) { "Learning..." } else { $ChainPrediction }
+    $lines.Add("   - Next App: $chainDisplay")
+    # Context & Thermal
+    $lines.Add("    Context: $ContextStatus | - $ThermalStatus")
+    # Activity & Timer
+    $activityIcon = if ($ActivityStatus -eq "Active") { "?" } else { "?" }
+    $lines.Add("   $activityIcon User: $ActivityStatus |  Rate: $TimerStatus |  Patterns: $UserPatternStatus")
+    # Explainer Reason
+    if (-not [string]::IsNullOrWhiteSpace($ExplainerReason)) {
+        $lines.Add("    Why: $ExplainerReason")
+    }
+    $lines.Add("")
+    $lines.Add(" [LEARNED]")
+    # Tutaj mozesz dodac wlasny komunikat, np.:
+    $lines.Add("    Learned applications are listed here.")
+    if ($Watcher.IsBoosting) {
+        $lines.Add("    BOOSTING: $($Watcher.BoostDisplayName) [$($Watcher.GetBoostRemainingSeconds())s]")
+        $lines.Add("      Peak: CPU=$([Math]::Round($Watcher.PeakCPU))% IO=$([Math]::Round($Watcher.PeakIO))")
+    } elseif (![string]::IsNullOrWhiteSpace($Brain.LastLearned)) {
+        $lines.Add("   - Last learned: $($Brain.LastLearned) @ $($Brain.LastLearnTime)")
+    } else {
+        $lines.Add("    Waiting for new applications...")
+    }
+    $lines.Add("")
+    $lines.Add(" [ACTIVITY]")
+    for ($i = 0; $i -lt 4; $i++) {
+        $entry = if ($i -lt $Script:ActivityLog.Count) { $Script:ActivityLog[$i] } else { "" }
+        if ($entry.Length -gt 72) { $entry = $entry.Substring(0, 69) + "..." }
+        $lines.Add("   $entry")
+    }
+    $lines.Add("")
+    if ($Global:DebugMode) {
+        $lines.Add(" [DEBUG LOG]")
+        for ($i = 0; $i -lt 5; $i++) {
+            $entry = if ($i -lt $Script:DebugLog.Count) { $Script:DebugLog[$i] } else { "" }
+            if ($entry.Length -gt 72) { $entry = $entry.Substring(0, 69) + "..." }
+            $lines.Add("   $entry")
+        }
+        $lines.Add("")
+    }
+    $lines.Add(" [CONTROLS]")
+    $lines.Add("   [1] Turbo  [2] Balanced  [3] Silent  [0] AUTO  [5] AI Toggle  [Q/Esc] Quit")
+    $lines.Add("   [S] Save  [I] Info  [L] Logs  [R] Reset Brain  [D] Debug  [H] Widget")
+    $lines.Add("   [W] Web  [G] Genetic  [B] Bandit  [9] AutoStart  [P] Predict  [A] Anomaly")
+    $lines.Add("   [T] Temp  [C] Chain  [E] Efficiency  [X] GPU/Thermal  [F12] Database")
+    $lines.Add("")
+    $lines.Add(" [HINT] Press key for action. [X] shows GPU & Thermal status.")
+    foreach ($line in $lines) { Write-Host $line.PadRight($consoleWidth) }
+}
+function Show-Database {
+    param([ProphetMemory]$Prophet)
+    Clear-Host
+    Write-Host ""
+    Write-Host "  #" -ForegroundColor Magenta
+    Write-Host "  -                     APPLICATION DATABASE                               ?" -ForegroundColor Magenta
+    Write-Host "  #" -ForegroundColor Magenta
+    Write-Host ""
+    if ($Prophet.Apps.Count -eq 0) {
+        Write-Host "     Database is empty." -ForegroundColor DarkGray
+    } else {
+        Write-Host ("     " + "NAME".PadRight(32) + "| RUNS | AVG% | MAX% | CLASS") -ForegroundColor Yellow
+        Write-Host "     --------------------------------+------+------+------+-------" -ForegroundColor DarkGray
+        $Prophet.Apps.Values | Sort-Object { $_.Launches } -Descending | Select-Object -First 20 | ForEach-Object {
+            $cat = $_.Category -replace "^LEARNING_", "[L] "
+            $line = "     " + $_.Name.PadRight(32) + "| " + $_.Launches.ToString().PadLeft(4) + " | " + ([Math]::Round($_.AvgCPU,0)).ToString().PadLeft(4) + " | " + $_.MaxCPU.ToString().PadLeft(4) + " | " + $cat
+            Write-Host $line -ForegroundColor Gray
+        }
+    }
+    Write-Host ""
+    Write-Host "  Press any key to return..." -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+# MAIN EXECUTION - FIXED z garbage collection i cleanup
+function Main {
+    Clear-Host
+    Write-Host "`n  #" -ForegroundColor Cyan
+    Write-Host "    CPU Manager v40 - STARTING" -ForegroundColor Yellow
+    Write-Host "  #" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Initializing CPU Manager AI ULTRA..." -ForegroundColor Cyan
+    Write-Host "  Config: $Script:ConfigDir" -ForegroundColor Gray
+    
+    # Initialize DEBUG logging
+    Initialize-DebugLog
+    Write-DebugLog "=== CPUManager ENGINE v42.6 FINAL Started ===" "INFO"
+    Write-DebugLog "Config directory: $Script:ConfigDir" "INFO"
+    
+    # CRITICAL: Sprawdź czy folder config istnieje (RAM dysk może nie być gotowy)
+    if (-not (Test-Path $Script:ConfigDir)) {
+        Write-Host ""
+        Write-Host "  [!] OSTRZEŻENIE: Folder $Script:ConfigDir nie istnieje!" -ForegroundColor Red
+        Write-Host "  [!] Tworzę folder..." -ForegroundColor Yellow
+        try {
+            $null = Ensure-DirectoryExists $Script:ConfigDir
+            if (Test-Path $Script:ConfigDir) {
+                Write-Host "  [OK] Folder utworzony pomyślnie" -ForegroundColor Green
+            } else {
+                Write-Host "  [!] BŁĄD: Nie można utworzyć folderu!" -ForegroundColor Red
+                Write-Host "  [!] Czy RAM dysk jest zamontowany?" -ForegroundColor Yellow
+                Write-Host "  [!] Sprawdź przekierowanie C:\CPUManager" -ForegroundColor Yellow
+                Start-Sleep -Seconds 3
+            }
+        } catch {
+            Write-Host "  [!] BŁĄD: $_" -ForegroundColor Red
+            Start-Sleep -Seconds 3
+        }
+    }
+    
+    # === LADOWANIE CONFIG.JSON (HOT-RELOAD) ===
+    Write-Host ""
+    Load-ExternalConfig | Out-Null
+    Apply-ConfiguratorSettings
+    Write-Host ""
+    # === SYSTEM TRAY DLA GLOWNEGO PROCESU ===
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    # Funkcja do ukrywania/pokazywania okna konsoli
+    $consolePtr = [ConsoleWindow]::GetConsoleWindow()
+    $Global:ConsoleVisible = $true
+    # Przycisk X w konsoli dziala normalnie (zamyka program)
+    function Hide-Console {
+        [ConsoleWindow]::ShowWindow($consolePtr, 0) | Out-Null
+        $Global:ConsoleVisible = $false
+        $Script:MainTray.ShowBalloonTip(1500, "CPU Manager AI", "Program dziala w tle. Kliknij 2x na ikone AI aby przywrocic.", [System.Windows.Forms.ToolTipIcon]::Info)
+    }
+    function Show-Console {
+        [ConsoleWindow]::ShowWindow($consolePtr, 5) | Out-Null
+        [ConsoleWindow]::SetForegroundWindow($consolePtr) | Out-Null
+        $Global:ConsoleVisible = $true
+    }
+    # NotifyIcon juz utworzony na poczatku skryptu
+    # Menu kontekstowe
+    $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+    $menuShow = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuShow.Text = "- Pokaz konsole"
+    $menuShow.Add_Click({ Show-Console })
+    $menuHide = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuHide.Text = "- Ukryj konsole"
+    $menuHide.Add_Click({ Hide-Console })
+    $menuDash = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuDash.Text = " Dashboard"
+    $menuDash.Add_Click({ Start-Process "http://localhost:8080" | Out-Null })
+    $menuWidget = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuWidget.Text = "- Pokaz Widget"
+    $menuWidget.Add_Click({
+        # Widget uruchomiony zewnetrznie - wyslij komende SHOW (async)
+        $widgetCmd = Join-Path $Script:ConfigDir 'WidgetCommand.txt'
+        Start-BackgroundWrite $widgetCmd "SHOW" 'UTF8'
+    })
+    $menuMini = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuMini.Text = "- Pokaz Mini Widget"
+    $menuMini.Add_Click({
+        $miniScript = Join-Path $Script:ConfigDir 'MiniWidget_v40.ps1'
+        if (Test-Path $miniScript) {
+            Start-Process pwsh.exe -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", $miniScript | Out-Null
+        }
+    })
+    $menuConfig = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuConfig.Text = " Konfiguracja"
+    $menuConfig.Add_Click({
+        $configRunspace = [runspacefactory]::CreateRunspace()
+        $configRunspace.ApartmentState = "STA"
+        $configRunspace.Open()
+        $configPS = New-TrackedPowerShell 'ConfigUI'
+        $configPS.Runspace = $configRunspace
+        $null = $configPS.AddScript({ Show-ConfigUI })
+        $null = $configPS.BeginInvoke()
+    })
+    $menuSep1 = New-Object System.Windows.Forms.ToolStripSeparator
+    # === SUBMENU TRYBOW ===
+    $menuModes = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuModes.Text = "- Tryb pracy"
+    $menuSilent = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuSilent.Text = "- Silent"
+    $menuSilent.Add_Click({
+        $Global:AI_Active = $false
+        Send-TrayCommand "SILENT"
+    })
+    $menuModes.DropDownItems.Add($menuSilent)
+    $menuBalanced = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuBalanced.Text = "- Balanced"
+    $menuBalanced.Add_Click({
+        $Global:AI_Active = $false
+        Send-TrayCommand "BALANCED"
+    })
+    $menuModes.DropDownItems.Add($menuBalanced)
+    $menuTurbo = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuTurbo.Text = " Turbo"
+    $menuTurbo.Add_Click({
+        $Global:AI_Active = $false
+        Send-TrayCommand "TURBO"
+    })
+    $menuModes.DropDownItems.Add($menuTurbo)
+    $menuModes.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $menuAI = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuAI.Text = " Toggle AI"
+    $menuAI.Add_Click({
+        $Global:AI_Active = -not $Global:AI_Active
+    })
+    $menuModes.DropDownItems.Add($menuAI)
+    $menuSep2 = New-Object System.Windows.Forms.ToolStripSeparator
+    $menuExit = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuExit.Text = "- Zamknij program"
+    $menuExit.Add_Click({
+        $Global:ExitRequested = $true
+        $Script:MainTray.Visible = $false
+        $Script:MainTray.Dispose()
+    })
+    $menuSep3 = New-Object System.Windows.Forms.ToolStripSeparator
+    # === KILL ALL ===
+    $menuKillAll = New-Object System.Windows.Forms.ToolStripMenuItem
+    $menuKillAll.Text = "- KILL ALL"
+    $menuKillAll.BackColor = [System.Drawing.Color]::FromArgb(80, 20, 20)
+    $menuKillAll.ForeColor = [System.Drawing.Color]::Red
+    $menuKillAll.Add_Click({
+        $Script:MainTray.Visible = $false
+        Send-TrayCommand "EXIT"
+        Start-BackgroundWrite (Join-Path $Script:ConfigDir 'MiniWidgetCommand.txt') "EXIT" 'UTF8'
+        Start-Sleep -Milliseconds 200
+        Get-Process powershell,pwsh,powershell_ise -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match "CPU|Widget|Mini" } | Stop-Process -Force -ErrorAction SilentlyContinue
+        $Global:ExitRequested = $true
+    })
+    $trayMenu.Items.Add($menuShow)
+    $trayMenu.Items.Add($menuHide)
+    $trayMenu.Items.Add($menuDash)
+    $trayMenu.Items.Add($menuWidget)
+    $trayMenu.Items.Add($menuMini)
+    $trayMenu.Items.Add($menuConfig)
+    $trayMenu.Items.Add($menuSep1)
+    $trayMenu.Items.Add($menuModes)
+    $trayMenu.Items.Add($menuSep2)
+    $trayMenu.Items.Add($menuExit)
+    $trayMenu.Items.Add($menuSep3)
+    $trayMenu.Items.Add($menuKillAll)
+    # Menu juz przypisane na poczatku skryptu (Script:TrayMenu)
+    # Podwojne klikniecie na tray - pokaz/ukryj konsole
+    $Script:MainTray.Add_DoubleClick({
+        if ($Global:ConsoleVisible) { Hide-Console } else { Show-Console }
+    })
+    # Komunikat powitalny z informacja o CPU
+    $cpuInfo = if ($Script:CPUName -ne "Unknown") { $Script:CPUName } else { $Script:CPUType }
+    $Script:MainTray.ShowBalloonTip(4000, "CPU Manager AI", "Wykryto: $cpuInfo`nTyp: $($Script:CPUType)`nTryb: AI AUTO", [System.Windows.Forms.ToolTipIcon]::Info)
+    # DEBUG TRACE: startup point - MainTray created
+    try { Write-Host "[DEBUG] Engine: MainTray created, CPU=$cpuInfo, CPUType=$($Script:CPUType)" -ForegroundColor Yellow } catch { }
+    # Global flags for tray/dashboard
+    $Global:ExitRequested = $false
+    $Global:ManualOverride = $null
+    # Obsluga Ctrl+C - traktuj jako input, nie jako przerwanie
+    try { [Console]::TreatControlCAsInput = $true } catch { }
+    # - DETEKCJA ZRODEL DANYCH - wykryj dostepne LHM/OHM/System
+    Detect-DataSources | Out-Null
+    $metrics = [FastMetrics]::new()
+    # Pokaz podsumowanie zrodel danych
+    Show-DataSourcesSummary
+    # --- Metrics updater using WinForms Timer (runs on UI thread) ---
+    try {
+        $Script:MetricsLock = New-Object System.Object
+        $Script:LatestMetrics = $metrics.GetExtended()
+        $Script:MetricsTimer = New-Object System.Windows.Forms.Timer
+        $Script:MetricsTimer.Interval = 1000
+        $Script:MetricsTimer.Add_Tick({
+            try {
+                # V40.3 FIX: Użyj GetExtended() zamiast Get() żeby mieć GPU data!
+                $m = $null
+                try { $m = $metrics.GetExtended() } catch { $m = $null }
+                if ($m) {
+                    if ([System.Threading.Monitor]::TryEnter($Script:MetricsLock, 50)) {
+                        try { $Script:LatestMetrics = $m } finally { [System.Threading.Monitor]::Exit($Script:MetricsLock) }
+                    }
+                }
+            } catch { }
+        })
+        $Script:MetricsTimer.Start()
+        try { Add-Log "Metrics timer started (UI thread)" } catch { }
+        # Background sensor poller (runs on ThreadPool thread) - offloads heavy WMI/Get-CimInstance calls
+        try {
+            if (-not $Script:SensorPollMs) { $Script:SensorPollMs = 1500 }
+            if (-not $Script:SensorErrorCount) { $Script:SensorErrorCount = 0 }
+            $Script:SensorTimer = New-Object System.Timers.Timer($Script:SensorPollMs)
+            $Script:SensorTimer.AutoReset = $true
+            $Script:SensorTimer.add_Elapsed({
+                try {
+                    $m = $metrics.GetExtended()
+                    if ($m) {
+                        if ([System.Threading.Monitor]::TryEnter($Script:MetricsLock, 200)) {
+                            try { $Script:LatestMetrics = $m } finally { [System.Threading.Monitor]::Exit($Script:MetricsLock) }
+                        }
+                    }
+                    # Periodic RyzenAdj info refresh (non-blocking)
+                    try {
+                        if ($Script:RyzenAdjAvailable) {
+                            $elapsed = ([DateTime]::Now - $Script:LastRyzenInfoPollTime).TotalMilliseconds
+                            if ($elapsed -ge $Script:RyzenInfoPollMs) {
+                                Start-RyzenAdjInfoRefresh | Out-Null
+                                $Script:LastRyzenInfoPollTime = [DateTime]::Now
+                            }
+                        }
+                    } catch { }
+                    # reset error counter on success
+                    $Script:SensorErrorCount = 0
+                } catch {
+                    try { $Script:SensorErrorCount = [int]($Script:SensorErrorCount + 1) } catch { $Script:SensorErrorCount = 1 }
+                    if ($Script:SensorErrorCount -gt 5) {
+                        # exponential backoff up to 60s
+                        $new = [int]::Min(60000, [int]($Script:SensorPollMs * 2))
+                        $Script:SensorPollMs = $new
+                        try { $Script:SensorTimer.Interval = $new } catch { }
+                        try { Add-Log "Sensor poll errors; backing off to $new ms" } catch { }
+                    }
+                }
+            })
+            $Script:SensorTimer.Start()
+            try { Add-Log "Sensor timer started (background thread), interval=${Script:SensorPollMs}ms" } catch { }
+        } catch { }
+    } catch { }
+    $loaded = Load-State
+    $brain = $loaded.Brain
+    $prophet = $loaded.Prophet
+    $gpuBound = $loaded.GPUBound  # v42.1: GPU-Bound Detector
+    # Apply CPUAgressiveness from config to Brain's AggressionBias
+    # CPUAgressiveness: 0=conservative, 50=neutral, 100=aggressive
+    # Maps to AggressionBias: -0.5 to +0.5
+    if ($brain -and $null -ne $Script:CPUAgressiveness) {
+        $brain.AggressionBias = ($Script:CPUAgressiveness - 50) / 100.0
+        Write-Host "  Brain AggressionBias set to $($brain.AggressionBias) from CPUAgressiveness=$($Script:CPUAgressiveness)" -ForegroundColor Gray
+    }
+    # v40.2 FIX: CPUAgressiveness wpływa RÓWNIEŻ na QLearning i SelfTuner (NeuralBrain domyślnie OFF)
+    if ($qLearning -and $null -ne $Script:CPUAgressiveness) {
+        # Agresywność wpływa na ExplorationRate: conservative=więcej eksploracji, aggressive=więcej eksploatacji
+        $qLearning.ExplorationRate = [Math]::Max(0.05, 0.25 - ($Script:CPUAgressiveness / 100.0) * 0.20)
+    }
+    if ($selfTuner -and $null -ne $Script:CPUAgressiveness) {
+        # Agresywność wpływa na progi SelfTunera
+        $aggrBias = ($Script:CPUAgressiveness - 50) / 100.0  # -0.5 do +0.5
+        $profile = $selfTuner.GetCurrentProfile()
+        if ($profile) {
+            $profile.AggressionBias = $aggrBias
+        }
+    }
+    # BiasInfluence: 0=AI ignores user, 25=balanced, 40=AI strongly follows user
+    if ($brain -and $null -ne $Script:BiasInfluence) {
+        $biasMultiplier = $Script:BiasInfluence / 25.0  # 0 -> 0.0, 25 -> 1.0, 40 -> 1.6
+        $brain.AggressionBias += ($biasMultiplier - 1.0) * 0.1  # Slight adjustment based on user preference
+        $brain.AggressionBias = [Math]::Max(-0.5, [Math]::Min(0.5, $brain.AggressionBias))
+        Write-Host "  BiasInfluence=$($Script:BiasInfluence) applied (multiplier=$biasMultiplier)" -ForegroundColor Gray
+    }
+    if (-not (Test-Path $Script:ProphetPath)) {
+        try {
+            $emptyProphet = @{ Apps = @{}; LastActiveApp = ""; TotalSessions = 0; HourlyActivity = [int[]]::new(24) }
+            $json = $emptyProphet | ConvertTo-Json -Depth 3 -Compress
+            [System.IO.File]::WriteAllText($Script:ProphetPath, $json, [System.Text.Encoding]::UTF8)
+            Add-Log " Created empty ProphetMemory.json"
+        } catch { }
+    }
+    if (-not (Test-Path $Script:BrainPath)) {
+        try {
+            $emptyBrain = @{ Weights = @{}; AggressionBias = 0.5; ReactivityBias = 0.5; LastLearned = ""; TotalDecisions = 0; RAMWeight = 0.3 }
+            $json = $emptyBrain | ConvertTo-Json -Depth 3 -Compress
+            [System.IO.File]::WriteAllText($Script:BrainPath, $json, [System.Text.Encoding]::UTF8)
+            Add-Log " Created empty BrainState.json"
+        } catch { }
+    }
+    $aiEngineFiles = @(
+        @{ Name = "EnsembleWeights.json"; Data = @{ Weights = @{}; Accuracy = @{}; TotalVotes = 0 } }
+        @{ Name = "QLearning.json"; Data = @{ QTable = @{}; TotalUpdates = 0 } }
+        @{ Name = "Bandit.json"; Data = @{ Arms = @(); TotalPulls = 0; BestArm = "" } }
+        @{ Name = "Genetic.json"; Data = @{ Population = @(); Generation = 0; BestFitness = 0 } }
+        @{ Name = "AnomalyProfiles.json"; Data = @{ Profiles = @{} } }
+        @{ Name = "LoadPatterns.json"; Data = @{ Patterns = @{} } }
+        @{ Name = "SelfTuner.json"; Data = @{ DecisionHistory = @(); Adjustments = 0 } }
+        @{ Name = "ChainPredictor.json"; Data = @{ Chains = @{}; TotalPredictions = 0 } }
+        @{ Name = "UserPatterns.json"; Data = @{ Patterns = @{} } }
+        @{ Name = "ContextPatterns.json"; Data = @{ Contexts = @{} } }
+        @{ Name = "ThermalProfiles.json"; Data = @{ Profiles = @{} } }
+        @{ Name = "DecisionExplainer.json"; Data = @{ Decisions = @() } }
+        @{ Name = "ThermalGuardian.json"; Data = @{ ThermalEvents = @(); ProtectionCount = 0 } }
+        @{ Name = "EnergyStats.json"; Data = @{ TotalScore = 0; Samples = 0; CurrentEfficiency = 0.5 } }
+        @{ Name = "AICoordinator.json"; Data = @{ TransferCount = 0; ActiveEngine = "QLearning" } }
+        @{ Name = "RAMAnalyzer.json"; Data = @{ SpikeHistory = @(); AppRAM = @{} } }
+    )
+    $createdCount = 0
+    foreach ($file in $aiEngineFiles) {
+        $filePath = Join-Path $Script:ConfigDir $file.Name
+        if (-not (Test-Path $filePath)) {
+            try {
+                $json = $file.Data | ConvertTo-Json -Depth 3 -Compress
+                [System.IO.File]::WriteAllText($filePath, $json, [System.Text.Encoding]::UTF8)
+                $createdCount++
+            } catch { }
+        }
+    }
+    if ($createdCount -gt 0) {
+        Add-Log " Created $createdCount empty AI engine files"
+    }
+    $initialCooldown = [Math]::Max(5, [int]$Script:BoostCooldown)
+    $watcher = [ProcessWatcher]::new($initialCooldown)
+    $Script:ProcessWatcherInstance = $watcher
+    $forecaster = [Forecaster]::new()
+    $anomalyDetector = [AnomalyDetector]::new()
+    $priorityManager = [SmartPriorityManager]::new()
+    $proBalance = [ProBalance]::new($Script:TotalThreads)  # v39.15: ProBalance (CPU hog restraint)
+    $performanceBooster = [PerformanceBooster]::new()  # V38 NEW: Advanced performance booster
+    try {
+        $pbConfigPath = Join-Path $Script:ConfigDir "ProBalanceConfig.json"
+        if (Test-Path $pbConfigPath) {
+            $pbConfig = Get-Content $pbConfigPath -Raw | ConvertFrom-Json
+            if ($pbConfig.ThrottleThreshold) {
+                $newThreshold = [Math]::Max(20, [Math]::Min(90, $pbConfig.ThrottleThreshold))
+                $proBalance.ThrottleThreshold = [double]$newThreshold
+                Add-Log "- ProBalance: Loaded custom threshold $newThreshold%"
+            }
+        }
+    } catch { }
+    $loadPredictor = [LoadPredictor]::new()
+    # Komponenty AI v9.0
+    $selfTuner = [SelfTuner]::new()
+    $chainPredictor = [ChainPredictor]::new()
+    $contextDetector = [ContextDetector]::new()
+    $phaseDetector = [PhaseDetector]::new()
+    $sharedKnowledge = [SharedAppKnowledge]::new()
+    $sharedKnowledge.LoadState($Script:ConfigDir)
+    $fanController = [FanController]::new()
+    $fanController.Initialize($Script:DataSourcesInfo.ActiveSource)
+    if ($fanController.Enabled) {
+        Add-Log "FanController: $($fanController.Source) | Read=$($fanController.CanRead) Control=$($fanController.CanControl) | Fans=$($fanController.FanSensorIds.Count)"
+    }
+    $thermalPredictor = [ThermalPredictor]::new()
+    $userPatterns = [UserPatternLearner]::new()
+    $adaptiveTimer = [AdaptiveTimer]::new()
+    #  MEGA AI Components
+    $qLearning = [QLearningAgent]::new()
+    $ensemble = [EnsembleVoter]::new()
+    $energyTracker = [EnergyTracker]::new()
+    #  ULTRA AI Components
+    $bandit = [MultiArmedBandit]::new()
+    $genetic = [GeneticOptimizer]::new()
+    $explainer = [DecisionExplainer]::new()
+    $thermalGuard = [ThermalGuardian]::new()
+    $webDashboard = [WebDashboard]::new($Global:WebDashboardPort)
+    $desktopWidget = [DesktopWidget]::new()
+    $aiCoordinator = [AICoordinator]::new()
+    # v43.6: Zmienna do śledzenia zmian stanu Ensemble (knowledge transfer)
+    $Script:LastEnsembleState = (Is-EnsembleEnabled)
+    # - V35 NEW: RAM Analyzer - wykrywanie skokow RAM i uczenie sie aplikacji
+    $ramAnalyzer = [RAMAnalyzer]::new()
+    # - V37.8.2 NEW: Network Optimizer - optymalizacja sieci dla gier i przegladarek
+    $networkOptimizer = [NetworkOptimizer]::new($Script:ConfigDir)
+    $Script:NetworkOptimizerInstance = $networkOptimizer  # FIX v40.1: Zapisz jako Script scope dla hot-reload
+    $networkAI = [NetworkAI]::new()
+    # - V40 NEW: Process AI - uczenie sie zachowan procesow dla inteligentnego throttlingu
+    $processAI = [ProcessAI]::new()
+    # Zapisz stan ProcessAI od razu aby CONFIGURATOR mógł go odczytać bez czekania 5 minut
+    [void]$processAI.SaveState($Script:ConfigDir)
+    # - V40 NEW: GPU AI - inteligentne zarządzanie GPU (iGPU/dGPU + power control)
+    $gpuAI = [GPUAI]::new($Script:HasiGPU, $Script:HasdGPU, $Script:iGPUName, $Script:dGPUName, $Script:dGPUVendor)
+    # V40.3 FIX: Nie zapisuj stanu od razu - najpierw załaduj stare dane!
+    # LoadState zostanie wywołane poniżej (linia ~13431)
+    # Widget uruchamiany zewnetrznie przez Widget_v40.ps1 (START_ALL.bat)
+    # Klasa DesktopWidget uzywana tylko do zapisu danych do WidgetData.json
+    # History for charts
+    $cpuHistory = [System.Collections.Generic.List[int]]::new()
+    $tempHistory = [System.Collections.Generic.List[int]]::new()
+    # Load all states
+    # Usunieto: $prophet.LoadState() i $brain.LoadState() - powodowaly podwojne wczytywanie
+    $anomalyDetector.LoadProfiles($Script:ConfigDir)
+    $loadPredictor.LoadPatterns($Script:ConfigDir)
+    $selfTuner.LoadState($Script:ConfigDir)
+    $chainPredictor.LoadState($Script:ConfigDir)
+    $userPatterns.LoadState($Script:ConfigDir)
+    $qLearning.LoadState($Script:ConfigDir)
+    $ensemble.LoadState($Script:ConfigDir)
+    $energyTracker.LoadState($Script:ConfigDir)
+    $bandit.LoadState($Script:ConfigDir)
+    $genetic.LoadState($Script:ConfigDir)
+    # v43.14: Zastosuj Genetic learned thresholds (jeśli fitness > 0.5 = wiarygodne)
+    if (Is-GeneticEnabled -and $genetic.BestGenome -and $genetic.BestFitness -gt 0.5) {
+        $genTurbo = $genetic.BestGenome.TurboThreshold
+        $genBalanced = $genetic.BestGenome.BalancedThreshold
+        if ($genTurbo -and $genTurbo -ge 60 -and $genTurbo -le 95) {
+            $Script:TurboThreshold = [int]$genTurbo
+            Write-Host "  Genetic TurboThreshold applied: $genTurbo% (fitness=$([Math]::Round($genetic.BestFitness*100))%)" -ForegroundColor Cyan
+        }
+        if ($genBalanced -and $genBalanced -ge 20 -and $genBalanced -le 55) {
+            $Script:BalancedThreshold = [int]$genBalanced
+            Write-Host "  Genetic BalancedThreshold applied: $genBalanced% (fitness=$([Math]::Round($genetic.BestFitness*100))%)" -ForegroundColor Cyan
+        }
+    }
+    $contextDetector.LoadState($Script:ConfigDir)
+    $phaseDetector.LoadState($Script:ConfigDir)
+    $thermalPredictor.LoadState($Script:ConfigDir)
+    $explainer.LoadState($Script:ConfigDir)
+    $thermalGuard.LoadState($Script:ConfigDir)
+    # v43.14: Sync ThermalGuardian with config ThermalLimit
+    if ($Script:ThermalLimit -and $Script:ThermalLimit -gt 60 -and $Script:ThermalLimit -lt 100) {
+        $thermalGuard.CPULimit = $Script:ThermalLimit
+        Write-Host "  ThermalGuardian CPULimit synced to config: $($Script:ThermalLimit)°C" -ForegroundColor Cyan
+    }
+    $aiCoordinator.LoadState($Script:ConfigDir)
+    $ramAnalyzer.LoadState($Script:ConfigDir)
+    # - V37.8.2: Network Optimizer - zaladuj stan i zainicjalizuj optymalizacje
+    $networkOptimizer.LoadState($Script:ConfigDir)
+    # - V40: Process AI - zaladuj stan
+    $processAI.LoadState($Script:ConfigDir)
+    # - V40: GPU AI - zaladuj stan
+    $gpuAI.LoadState($Script:ConfigDir)
+    if ($Script:NetworkOptimizerEnabled) {
+        Write-Host "  [v40] NetworkOptimizer ENABLED - stosowanie optymalizacji sieci..." -ForegroundColor Cyan
+        $networkOptimizer.Initialize()
+        if (-not $Script:NetworkOptimizeDNS) {
+            # Jeśli DNS ma być wyłączony, przywróć oryginalne
+            $networkOptimizer.RestoreDNS()
+            Write-Host "    DNS Cloudflare: WYŁĄCZONY (używam oryginalnego DNS)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  [v40] NetworkOptimizer DISABLED - pomijam optymalizacje sieci" -ForegroundColor Yellow
+        # Przywróć oryginalne ustawienia jeśli były zmienione
+        $networkOptimizer.Restore()
+    }
+    $networkAI.LoadState($Script:ConfigDir)
+    $networkAI.SaveState($Script:ConfigDir)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 1. MemoryAgressiveness (0-100) -> RAMAnalyzer SpikeThreshold
+    # 0=conservative (threshold 12%), 50=neutral (8%), 100=aggressive (4%)
+    if ($Script:MemoryAgressiveness -ne 30) {
+        $memAggr = [Math]::Max(0, [Math]::Min(100, $Script:MemoryAgressiveness))
+        # Map: 0->12, 50->8, 100->4
+        $newSpikeThreshold = 12 - ($memAggr / 100.0) * 8
+        $ramAnalyzer.SpikeThreshold = [Math]::Max(4, $newSpikeThreshold)
+        $ramAnalyzer.MinSpikeThreshold = [Math]::Max(3, $newSpikeThreshold - 2)
+        Write-Host "  RAMAnalyzer: SpikeThreshold=$([Math]::Round($ramAnalyzer.SpikeThreshold,1))% (MemoryAgressiveness=$memAggr)" -ForegroundColor Gray
+    }
+    # v40.2 FIX: MemoryCompression - obniża progi RAM spike i zwiększa wagę RAM w decyzjach AI
+    if ($Script:MemoryCompression) {
+        # Obniż spike threshold o 2% (bardziej czuły na wzrost RAM)
+        $ramAnalyzer.SpikeThreshold = [Math]::Max(3, $ramAnalyzer.SpikeThreshold - 2)
+        $ramAnalyzer.MinSpikeThreshold = [Math]::Max(2, $ramAnalyzer.MinSpikeThreshold - 1)
+        # Zwiększ wagę RAM w Ensemble voting
+        if ($ensemble -and $ensemble.Weights.ContainsKey("RAMMonitor")) {
+            $ensemble.Weights["RAMMonitor"] = [Math]::Min(2.0, $ensemble.Weights["RAMMonitor"] + 0.3)
+        }
+        # ProBalance bardziej agresywnie ogranicza procesy zjadające RAM
+        if ($proBalance) {
+            $proBalance.ThrottleThreshold = [Math]::Max(50, $proBalance.ThrottleThreshold - 10)
+        }
+        Write-Host "  MemoryCompression: ACTIVE - spike=$([Math]::Round($ramAnalyzer.SpikeThreshold,1))%, ProBalance thr=$($proBalance.ThrottleThreshold)%" -ForegroundColor Cyan
+    }
+    # 2. IOPriority (1-5) -> IOCheckInterval
+    # 1=slow (2000ms), 3=normal (1200ms), 5=fast (600ms)
+    if ($Script:IOPriority -ne 3) {
+        $ioPri = [Math]::Max(1, [Math]::Min(5, $Script:IOPriority))
+        # Map: 1->2000, 3->1200, 5->600
+        $Script:IOCheckInterval = [int](2000 - ($ioPri - 1) * 350)
+        Write-Host "  I/O: CheckInterval=$($Script:IOCheckInterval)ms (IOPriority=$ioPri)" -ForegroundColor Gray
+    }
+    # 3. CacheSize -> Prophet max apps limit
+    $Script:ProphetCacheLimit = [Math]::Max(20, [Math]::Min(200, $Script:CacheSize))
+    if ($Script:CacheSize -ne 50) {
+        Write-Host "  Prophet: CacheLimit=$($Script:ProphetCacheLimit) apps" -ForegroundColor Gray
+    }
+    # 4. PreBoostDuration -> stored for ChainPredictor/LoadPredictor
+    if ($Script:PreBoostDuration -ne 15000) {
+        Write-Host "  PreBoost: Duration=$($Script:PreBoostDuration)ms" -ForegroundColor Gray
+    }
+    # 5. Log optimization toggles status
+    $optStatus = @()
+    if ($Script:PreloadEnabled) { $optStatus += "Preload" }
+    if ($Script:SmartPreload) { $optStatus += "SmartPreload" }
+    if ($Script:PredictiveBoostEnabled) { $optStatus += "PredictiveBoost" }
+    if ($Script:PredictiveIO) { $optStatus += "PredictiveIO" }
+    if ($Script:MemoryCompression) { $optStatus += "MemCompress" }
+    if ($Script:PowerBoost) { $optStatus += "PowerBoost" }
+    if ($optStatus.Count -gt 0) {
+        Write-Host "  Optimization: $($optStatus -join ', ')" -ForegroundColor Cyan
+    }
+    Write-Host "  Brain: $($brain.GetCount()) weights" -ForegroundColor Green
+    Write-Host "  Prophet: $($prophet.GetAppCount()) apps" -ForegroundColor Green
+    Write-Host "  Self-Tuner: $($selfTuner.GetStatus())" -ForegroundColor Green
+    Write-Host "   Q-Learning: $($qLearning.GetStatus())" -ForegroundColor Magenta
+    Write-Host "  - Bandit: $($bandit.GetStatus())" -ForegroundColor Magenta
+    Write-Host "  - Genetic: $($genetic.GetStatus())" -ForegroundColor Magenta
+    Write-Host "   Energy: $($energyTracker.GetStatus())" -ForegroundColor Magenta
+    Write-Host "   AICoordinator: $($aiCoordinator.GetStatus())" -ForegroundColor Cyan
+    Write-Host "  - RAMAnalyzer: $($ramAnalyzer.GetStatus())" -ForegroundColor Cyan
+    Write-Host "  - ThermalGuard: Active (CPU<$($thermalGuard.CPULimit)C VRM<$($thermalGuard.VRMLimit)C)" -ForegroundColor Cyan
+    Write-Host "  - ProBalance: Active (Threshold: $($proBalance.ThrottleThreshold)% CPU)" -ForegroundColor Yellow
+    Write-Host "  - NetworkOptimizer: $($networkOptimizer.GetStatus())" -ForegroundColor Green
+    Write-Host "   NetworkAI: $($networkAI.GetStatus())" -ForegroundColor Green
+    Write-Host "   Explainer: Ready" -ForegroundColor Cyan
+    # Extended metrics check
+    try {
+        # Prefer async-updated metrics when available
+        if ($Script:LatestMetrics) { $extTest = $Script:LatestMetrics } else { $extTest = $metrics.GetExtended() }
+        if ($extTest.GPU -and $extTest.GPU.Name -ne "N/A") {
+            Write-Host "   GPU: $($extTest.GPU.Name)" -ForegroundColor Green
+        } else {
+            Write-Host "   GPU: Not detected (iGPU or no LHM)" -ForegroundColor Yellow
+        }
+        if ($extTest.VRM -and $extTest.VRM.Available) {
+            Write-Host "  - VRM: Monitoring active" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "   Extended metrics: Init failed" -ForegroundColor Yellow
+    }
+    # Start Web Dashboard
+    Write-Host "  - Starting Web Dashboard on port $($Global:WebDashboardPort)..." -ForegroundColor Cyan
+    try {
+        $webDashboard.Start()
+        if ($webDashboard.Running) {
+            Write-Host "   Dashboard: http://localhost:$($Global:WebDashboardPort)" -ForegroundColor Green
+        } else {
+            Write-Host "  [WARN] Dashboard failed to start (port may be in use)" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "  [WARN] Dashboard error: $_" -ForegroundColor Yellow
+    }
+    # Check auto-start
+    $autoStartEnabled = Test-CPUManagerTaskExists
+    Write-Host "  - Auto-start: $(if($autoStartEnabled){'Enabled'}else{'Disabled'}) (press 9 to toggle)" -ForegroundColor $(if($autoStartEnabled){"Green"}else{"Gray"})
+    # Pokaz info o zrodle danych
+    $dataSourceInfo = $Script:DataSourcesInfo
+    $srcColor = switch($dataSourceInfo.ActiveSource) { "LHM" {"Green"} "OHM" {"Yellow"} "SystemOnly" {"Red"} default {"Gray"} }
+    Write-Host "  - Data source: $($dataSourceInfo.ActiveSource) | Temp: $($metrics.TempSource)" -ForegroundColor $srcColor
+    Write-Host "`n  Press any key to start..." -ForegroundColor Yellow
+    Start-Sleep -Milliseconds 1500
+    $null = $metrics.Get()
+    Start-Sleep -Milliseconds 500
+    $manualMode = if ($Script:SavedManualMode) { $Script:SavedManualMode } else { "Balanced" }
+    $iteration = 0
+    $Script:LastWidgetWriteIteration = 0
+    $Script:LastWidgetJSON = ""
+    $Script:WidgetWriteThrottle = 2  # Zapisuj co 2 iteracje (~1.6-2s zamiast co 0.8s)
+    $lastSave = 0
+    $lastPriorityUpdate = 0
+    $lastAnomalyCheck = 0
+    $lastPrediction = 0
+    $lastGC = 0
+    $lastSelfTuneEval = 0
+    $lastChainCheck = 0
+    $lastDashboardUpdate = 0
+    $lastGeneticEval = 0
+    $lastProBalanceUpdate = 0
+    $predictedLoad = 0
+    $predictedApps = @()
+    $anomalyAlert = ""
+    $chainPrediction = ""
+    $preBoostReason = ""
+    $lastForegroundApp = ""
+    $currentActiveApp = ""  # Aktualna aplikacja dla tooltip
+    $currentState = "Balanced"
+    $currentContext = "Idle"
+    $isUserActive = $false
+    $dynamicInterval = 800
+    $prophetLastAutosave = [DateTime]::Now
+    $prophetLastSavedSessions = $prophet.TotalSessions
+    # Network monitoring
+    $lastNetTime = [DateTime]::Now
+    $netDownloadSpeed = 0
+    $netUploadSpeed = 0
+    $cpuCurrentMHz = 0
+    # Extended monitoring for widget
+    # === NETWORK TOTALS (Get-NetAdapterStatistics) ===
+    $totalBytesRecv = [int64]0
+    $totalBytesSent = [int64]0
+    $ramUsedPercent = 0
+    $diskReadSpeed = 0.0
+    $diskWriteSpeed = 0.0
+    $cpuLoadLHM = 0
+    $Script:PersistentNetDL = [int64]0
+    $Script:PersistentNetUL = [int64]0
+    $networkStatsPath = Join-Path $Script:ConfigDir "NetworkStats.json"
+    try {
+        if (Test-Path $networkStatsPath) {
+            $netStats = Get-Content $networkStatsPath -Raw -ErrorAction Stop | ConvertFrom-Json
+            if ($netStats) {
+                $Script:PersistentNetDL = if ($netStats.TotalDownloaded) { [int64]$netStats.TotalDownloaded } else { 0 }
+                $Script:PersistentNetUL = if ($netStats.TotalUploaded) { [int64]$netStats.TotalUploaded } else { 0 }
+                Add-Log " NetworkStats loaded: DL=$([Math]::Round($Script:PersistentNetDL/1GB, 2))GB UL=$([Math]::Round($Script:PersistentNetUL/1GB, 2))GB"
+            }
+        }
+    } catch { }
+    $lastNetStatsSave = [DateTime]::Now
+    # Smoothing variables (wygladzanie danych)
+    $smoothNetDL = 0.0
+    $smoothNetUL = 0.0
+    $smoothDiskRead = 0.0
+    $smoothDiskWrite = 0.0
+    $smoothFactor = 0.3  # 0.1 = bardzo gladkie, 0.5 = szybka reakcja
+    # MEGA AI State tracking
+    $qState = ""
+    $prevState = ""
+    $prevTemp = 50.0
+    Clear-Host
+    [Console]::CursorVisible = $false
+    Write-Host "`n#" -ForegroundColor DarkCyan
+    Write-Host "  - CPU Detection" -ForegroundColor Cyan
+    Write-Host "#" -ForegroundColor DarkCyan
+    Detect-HybridCPU | Out-Null
+    Write-Host ""
+# Network adapters cache (v39.3 - fix busy cursor)
+$Script:CachedNetAdapters = $null
+$Script:PreviousNeuralBrainEnabled = $false
+$Script:PreviousEnsembleEnabled = $false
+    try {
+        Write-Host "[DEBUG] Engine: starting main loop" -ForegroundColor Yellow
+        while (-not $Global:ExitRequested) {
+            # v43.14: Suppress non-terminating errors in main loop (Windows shutdown/sleep)
+            $ErrorActionPreference = 'SilentlyContinue'
+            # Aktualizuj statystyki sieci w kazdej iteracji
+            try {
+                $adapters = Get-NetAdapterStatistics -ErrorAction SilentlyContinue | Where-Object { $_.ReceivedBytes -gt 0 -or $_.SentBytes -gt 0 }
+                if ($adapters) {
+                    $totalBytesRecv = ($adapters | Measure-Object -Property ReceivedBytes -Sum).Sum
+                    $totalBytesSent = ($adapters | Measure-Object -Property SentBytes -Sum).Sum
+                }
+            } catch {
+                # Windows shutting down / sleep / network unavailable - ignore
+            }
+            # Process WinForms events for tray icon responsiveness
+            [System.Windows.Forms.Application]::DoEvents()
+            # Sprawdz czy uzytkownik chce wyjsc (z menu tray)
+            if ($Global:ExitRequested) {
+                Write-Host "`n  Zamykanie programu..." -ForegroundColor Yellow
+                break
+            }
+            # === HOT-RELOAD CONFIG ===
+            # v43.1: -Silent żeby nie zaśmiecać UI
+            Check-ConfigReload -Silent | Out-Null
+            # === CHECK AI ENGINES CONFIG + CPU CONFIG ===
+            if (($iteration % 5) -eq 0) {
+                #  Co 5 iteracji (~10 sekund) sprawdz AIEngines/CPU config (optymalizacja)
+                $prevEnsemble = $Script:AIEngines.Ensemble
+                $prevProphet = $Script:AIEngines.Prophet
+                $prevNeuralBrain = $Script:AIEngines.NeuralBrain
+                Load-AIEnginesConfig | Out-Null
+                if ($Script:AIEngines.Ensemble -ne $prevEnsemble) {
+                    $status = if ($Script:AIEngines.Ensemble) { "ON" } else { "OFF" }
+                    Add-Log " AI Engine: Ensemble = $status"
+                    
+                    # v43.7: KNOWLEDGE TRANSFER - przekazanie wiedzy między silnikami AI
+                    if ($Script:AIEngines.Ensemble) {
+                        # ENSEMBLE WŁĄCZONY → pobierz wiedzę ze wszystkich aktywnych silników
+                        try {
+                            # v43.8: Używamy AICoordinator zamiast oddzielnych funkcji
+                            $transferData = $aiCoordinator.TransferFromQLearning($qLearning)
+                            $aiCoordinator.IntegrateProphetData($prophet, $transferData)
+                            $aiCoordinator.IntegrateGPUBoundData($gpuBound, $transferData)
+                            $aiCoordinator.IntegrateBanditData($bandit, $transferData)
+                            $aiCoordinator.IntegrateGeneticData($genetic, $transferData)
+                            $aiCoordinator.ApplyEnrichedToEnsemble($ensemble, $transferData)
+                            
+                            Add-Log "   Knowledge Transfer → Ensemble: QLearning + extensions"
+                        } catch {
+                            Add-Log "[WARN] Knowledge transfer → Ensemble failed: $_" -Warning
+                        }
+                    } else {
+                        # ENSEMBLE WYŁĄCZONY → przekaż wiedzę z powrotem do podstawowych silników
+                        try {
+                            # v43.8: Używamy AICoordinator zamiast oddzielnych funkcji
+                            $aiCoordinator.TransferBackFromEnsemble($ensemble, $qLearning, $prophet)
+                            
+                            Add-Log "   Knowledge Transfer Ensemble →: Q-Learning, Prophet"
+                        } catch {
+                            Add-Log "[WARN] Knowledge transfer Ensemble → failed: $_" -Warning
+                        }
+                    }
+                }
+                if ($Script:AIEngines.Prophet -ne $prevProphet) {
+                    $status = if ($Script:AIEngines.Prophet) { "ON" } else { "OFF" }
+                    Add-Log " AI Engine: Prophet = $status"
+                }
+                if ($Script:AIEngines.NeuralBrain -ne $prevNeuralBrain) {
+                    $status = if ($Script:AIEngines.NeuralBrain) { "ON" } else { "OFF" }
+                    Add-Log " AI Engine: NeuralBrain = $status"
+                    
+                    # v43.8: KNOWLEDGE TRANSFER - NeuralBrain
+                    if ($Script:AIEngines.NeuralBrain) {
+                        # NEURAL BRAIN WŁĄCZONY → pobierz wiedzę
+                        try {
+                            # v43.8: Używamy AICoordinator zamiast oddzielnych funkcji
+                            $transferData = $aiCoordinator.TransferFromQLearning($qLearning)
+                            $aiCoordinator.IntegrateProphetData($prophet, $transferData)
+                            $aiCoordinator.ApplyToNeuralBrain($brain, $transferData)
+                            
+                            Add-Log "   Knowledge Transfer → NeuralBrain: Q-Learning, Prophet"
+                        } catch {
+                            Add-Log "[WARN] Knowledge transfer → NeuralBrain failed: $_" -Warning
+                        }
+                    } else {
+                        # NEURAL BRAIN WYŁĄCZONY → przekaż wiedzę z powrotem
+                        try {
+                            # v43.8: Używamy AICoordinator zamiast oddzielnych funkcji
+                            $aiCoordinator.TransferBackFromBrain($brain, $qLearning)
+                            
+                            Add-Log "   Knowledge Transfer NeuralBrain →: Q-Learning"
+                        } catch {
+                            Add-Log "[WARN] Knowledge transfer NeuralBrain → failed: $_" -Warning
+                        }
+                    }
+                }
+                # Sprawdz czy zmieniono typ CPU
+                if (Test-Path $Script:CPUConfigPath) {
+                    try {
+                        $cpuCfg = Get-Content $Script:CPUConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                        if ($cpuCfg.CPUType -and $cpuCfg.CPUType -ne $Script:CPUType) {
+                            $Script:CPUType = $cpuCfg.CPUType
+                            Add-Log "- CPU: Zmieniono na $($Script:CPUType)"
+                        }
+                    } catch {}
+                }
+            }
+            $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            # Get metrics with error handling (extended for GPU/VRM)
+            try {
+                # Read latest async metrics with a short try-enter lock fallback
+                if ($Script:LatestMetrics -and [System.Threading.Monitor]::TryEnter($Script:MetricsLock, 20)) {
+                    try { $currentMetrics = $Script:LatestMetrics } finally { [System.Threading.Monitor]::Exit($Script:MetricsLock) }
+                } else {
+                    # FIX v40.1: Fallback musi używać GetExtended() żeby mieć GPU data!
+                    $currentMetrics = $metrics.GetExtended()
+                }
+            } catch {
+                # Blok catch dodany automatycznie (naprawa krytycznego bledu skladni)
+                $currentMetrics = @{ CPU = 10; Temp = 50; IO = 0; GPU = @{Temp=0;Load=0}; VRM = @{Temp=0}; RAMUsage = 0 }
+            }
+            # ThermalGuardian: usunięty z pętli (v43.13) - duplikował ThermalPredictor
+            # Ochronę termiczną zapewnia: hardcoded Temp>90→Silent + ThermalPredictor score
+            # - Network speed monitoring + Total counters
+            try {
+                # Eliminacja busy cursor przy starcie ENGINE
+                if (($iteration % 5) -eq 0 -or -not $Script:CachedNetAdapters) {
+                    # Asynchroniczny update cache - ZAWSZE (nawet przy pierwszym razie)
+                    try {
+                        $ps = [powershell]::Create()
+                        $null = $ps.AddScript({
+                            try {
+                                $adapters = Get-CimInstance -ClassName Win32_PerfRawData_Tcpip_NetworkInterface -ErrorAction SilentlyContinue |
+                                    Where-Object {
+                                        ($_.Name -notmatch 'loopback|virtual|vmware|tunnel|teredo|pseudo|isatap|bluetooth|miniport|hyper-v|container' -and
+                                        $_.BytesReceivedPersec -ge 0 -and $_.BytesSentPersec -ge 0)
+                                    }
+                                return $adapters
+                            } catch {
+                                return $null
+                            }
+                        })
+                        # BeginInvoke - asynchroniczne wykonanie (NIE blokuje!)
+                        $asyncResult = $ps.BeginInvoke()
+                        # Sprawdz czy juz gotowe (non-blocking check)
+                        if ($asyncResult.IsCompleted) {
+                            try {
+                                $result = $ps.EndInvoke($asyncResult)
+                                if ($result) {
+                                    $Script:CachedNetAdapters = $result
+                                }
+                                $ps.Dispose()
+                            } catch { }
+                        }
+                        # Jesli nie gotowe - uzyj starego cache lub poczekaj na nastepna iteracje
+                    } catch {
+                        # W razie bledu - uzyj starego cache
+                    }
+                }
+                $netAdapters = $Script:CachedNetAdapters
+                if ($netAdapters) {
+                    # BytesReceivedPersec i BytesSentPersec to juz wartosci per second!
+                    # Nie trzeba obliczac roznicy ani dzielic przez czas
+                    $currentRecv = ($netAdapters | Measure-Object -Property BytesReceivedPersec -Sum).Sum
+                    $currentSent = ($netAdapters | Measure-Object -Property BytesSentPersec -Sum).Sum
+                    $currentTime = [DateTime]::Now
+                    $timeDiff = ($currentTime - $lastNetTime).TotalSeconds
+                    if ($timeDiff -gt 0.5) {
+                        # Predkosc: uzywaj bezposrednio Persec values
+                        $rawDL = [math]::Max(0, $currentRecv)
+                        $rawUL = [math]::Max(0, $currentSent)
+                        # Wygladzanie eksponencjalne (EMA) - minimalizuje skoki
+                        $smoothNetDL = $smoothNetDL * (1 - $smoothFactor) + $rawDL * $smoothFactor
+                        $smoothNetUL = $smoothNetUL * (1 - $smoothFactor) + $rawUL * $smoothFactor
+                        $netDownloadSpeed = $smoothNetDL
+                        $netUploadSpeed = $smoothNetUL
+                        # Win32_PerfRawData_Tcpip_NetworkInterface NIE MA BytesReceived (tylko Persec)
+                        # Musimy sami sumowac: bytes = rate * time
+                        $bytesRecvThisInterval = [int64]($currentRecv * $timeDiff)
+                        $bytesSentThisInterval = [int64]($currentSent * $timeDiff)
+                        if ($bytesRecvThisInterval -gt 0 -or $bytesSentThisInterval -gt 0) {
+                            $totalBytesRecv += $bytesRecvThisInterval
+                            $totalBytesSent += $bytesSentThisInterval
+                        }
+                        if ($iteration % 60 -eq 0) {
+                            $adaptersCount = if ($netAdapters) { @($netAdapters).Count } else { 0 }
+                            Add-Log "- Network: Adapters=$adaptersCount DL=$([Math]::Round($smoothNetDL/1MB, 2))MB/s UL=$([Math]::Round($smoothNetUL/1MB, 2))MB/s Raw=$([Math]::Round($currentRecv/1MB, 2))/$([Math]::Round($currentSent/1MB, 2)) Session=$([Math]::Round($totalBytesRecv/1MB, 0))MB" -Debug
+                        }
+                    }
+                    $lastNetTime = $currentTime
+                } else {
+                    if ($iteration % 60 -eq 0) {
+                        Add-Log "[WARN] Network: No adapters found (all filtered out?)" -Debug
+                    }
+                }
+            } catch { }
+            #  RAM usage monitoring
+            try {
+                $os = Get-OSCached
+                if ($os) {
+                    $totalMem = $os.TotalVisibleMemorySize
+                    $freeMem = $os.FreePhysicalMemory
+                    $ramUsedPercent = [int](100 - ($freeMem / $totalMem * 100))
+                }
+            } catch { }
+            # - Disk Read/Write speed monitoring (bytes/s)
+            try {
+                $diskPerf = Get-DiskPerfCached
+                if ($diskPerf) {
+                    # Osobno Read i Write - z null check
+                    $rawDiskRead = if ($null -ne $diskPerf.DiskReadBytesPersec) { [int64]$diskPerf.DiskReadBytesPersec } else { 0 }
+                    $rawDiskWrite = if ($null -ne $diskPerf.DiskWriteBytesPersec) { [int64]$diskPerf.DiskWriteBytesPersec } else { 0 }
+                    # Wygladzanie eksponencjalne
+                    $smoothDiskRead = $smoothDiskRead * (1 - $smoothFactor) + $rawDiskRead * $smoothFactor
+                    $smoothDiskWrite = $smoothDiskWrite * (1 - $smoothFactor) + $rawDiskWrite * $smoothFactor
+                    $diskReadSpeed = [int64]$smoothDiskRead
+                    $diskWriteSpeed = [int64]$smoothDiskWrite
+                }
+            } catch {
+                # Fallback: Try alternative method
+                try {
+                    $diskIO = Get-DiskCounterCached  #  v39.3: Cached
+                    if ($diskIO) {
+                        $rawDisk = $diskIO.CounterSamples[0].CookedValue
+                        $smoothDiskRead = $smoothDiskRead * (1 - $smoothFactor) + ($rawDisk / 2) * $smoothFactor
+                        $smoothDiskWrite = $smoothDiskWrite * (1 - $smoothFactor) + ($rawDisk / 2) * $smoothFactor
+                        $diskReadSpeed = [int64]$smoothDiskRead
+                        $diskWriteSpeed = [int64]$smoothDiskWrite
+                    }
+                } catch { }
+            }
+            #  CPU current speed - NAPRAWIONA METODA dla AMD/Intel
+            try {
+                $cpuCurrentMHz = 0
+                # Metoda 1: LibreHardwareMonitor - PRIORYTET (najdokladniejsze)
+                try {
+                    $lhmSensors = Get-LHMSensorsCached
+                    if ($lhmSensors) {
+                        # Filtruj TYLKO sensory CPU Clock
+                        $cpuClocks = $lhmSensors | Where-Object { 
+                            $_.SensorType -eq "Clock" -and 
+                            ($_.Identifier -match "/amdcpu/|/intelcpu/") -and
+                            $_.Name -match "Core #\d" -and
+                            $_.Value -gt 100
+                        }
+                        if ($cpuClocks -and $cpuClocks.Count -gt 0) {
+                            $avgClock = ($cpuClocks | Measure-Object -Property Value -Average).Average
+                            if ($avgClock -gt 100) {
+                                $cpuCurrentMHz = [int]$avgClock
+                            }
+                        }
+                        # Pobierz CPU Load z LHM
+                        $lhmLoad = $lhmSensors | Where-Object { 
+                            $_.SensorType -eq "Load" -and $_.Name -eq "CPU Total"
+                        } | Select-Object -First 1
+                        if ($lhmLoad) {
+                            $cpuLoadLHM = [int]$lhmLoad.Value
+                        }
+                    }
+                } catch { }
+                # Metoda 2: PercentProcessorPerformance * MaxClock (najlepsza bez LHM!)
+                if ($cpuCurrentMHz -eq 0 -or $cpuCurrentMHz -lt 100) {
+                    try {
+                        $cpuWmi = Get-CPUInfoCached
+                        $perfData = Get-ProcessorPerfCached  #  v39.3: Cached (bylo niebuforowane!)
+                        if ($cpuWmi -and $perfData -and $perfData.PercentProcessorPerformance -gt 0) {
+                            $maxClock = $cpuWmi.MaxClockSpeed
+                            $perfPercent = $perfData.PercentProcessorPerformance
+                            $cpuCurrentMHz = [int]($maxClock * $perfPercent / 100)
+                        }
+                    } catch { }
+                }
+                # Metoda 3: Registry - bazowa czestotliwosc
+                if ($cpuCurrentMHz -eq 0 -or $cpuCurrentMHz -lt 100) {
+                    try {
+                        $regPath = "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+                        $regMHz = (Get-ItemProperty -Path $regPath -Name "~MHz" -ErrorAction SilentlyContinue)."~MHz"
+                        if ($regMHz -and $regMHz -gt 100) {
+                            $cpuCurrentMHz = [int]$regMHz
+                        }
+                    } catch { }
+                }
+                # Metoda 4: Performance Counter - Processor Frequency
+                if ($cpuCurrentMHz -eq 0 -or $cpuCurrentMHz -lt 100) {
+                    try {
+                        $counter = Get-Counter '\Processor Information(_Total)\Processor Frequency' -ErrorAction SilentlyContinue
+                        if ($counter -and $counter.CounterSamples[0].CookedValue -gt 100) {
+                            $cpuCurrentMHz = [int]$counter.CounterSamples[0].CookedValue
+                        }
+                    } catch { }
+                }
+                # Metoda 5: CurrentClockSpeed z WMI
+                if ($cpuCurrentMHz -eq 0 -or $cpuCurrentMHz -lt 100) {
+                    try {
+                        $cpuInfo = Get-CPUInfoCached
+                        if ($cpuInfo -and $cpuInfo.CurrentClockSpeed -gt 0) {
+                            $cpuCurrentMHz = [int]$cpuInfo.CurrentClockSpeed
+                        }
+                    } catch { }
+                }
+                # Metoda 6: Fallback - MaxClockSpeed
+                if ($cpuCurrentMHz -eq 0 -or $cpuCurrentMHz -lt 100) {
+                    try {
+                        $cpuInfo = Get-CPUInfoCached
+                        if ($cpuInfo) {
+                            $cpuCurrentMHz = [int]$cpuInfo.MaxClockSpeed
+                        }
+                    } catch { }
+                }
+            } catch { }
+            $cpuForForecaster = if ($cpuLoadLHM -gt 0) { $cpuLoadLHM } else { [int]$currentMetrics.CPU }
+            [void]$forecaster.Add($cpuForForecaster)
+            # Update history for dashboard
+            [void]$cpuHistory.Add([int]$cpuForForecaster)
+            [void]$tempHistory.Add([int]$currentMetrics.Temp)
+            if ($cpuHistory.Count -gt 60) { $cpuHistory.RemoveAt(0) }
+            if ($tempHistory.Count -gt 60) { $tempHistory.RemoveAt(0) }
+            # Chain Predictor - sledz zmiany aplikacji na pierwszym planie
+            $currentForeground = Get-ForegroundProcessName
+            if (-not [string]::IsNullOrWhiteSpace($currentForeground) -and 
+                $currentForeground -ne $lastForegroundApp -and
+                -not $Script:BlacklistSet.Contains($currentForeground)) {
+                # v42.6: Sprawdź czy Chain włączone
+                if (Is-ChainEnabled) {
+                    [void]$chainPredictor.RecordAppLaunch($currentForeground)
+                }
+                [void]$userPatterns.RecordAppUsage($currentForeground)
+                $lastForegroundApp = $currentForeground
+                if ($performanceBooster.IsHeavyApp($currentForeground) -or 
+                    ($prophet.Apps.ContainsKey($currentForeground) -and $prophet.Apps[$currentForeground].IsHeavy)) {
+                    # 1. Priority Boost
+                    [void]$performanceBooster.BoostProcessPriority($currentForeground)
+                    # 2. Memory pre-allocation
+                    [void]$performanceBooster.PreallocateMemory($currentForeground)
+                    # 3. Disk cache warming
+                    [void]$performanceBooster.WarmDiskCache($currentForeground)
+                    # 4. Freeze background processes (aggressive mode for games)
+                    if ($performanceBooster.BackgroundFreezeEnabled) {
+                        $frozenCount = $performanceBooster.FreezeBackgroundProcesses($currentForeground)
+                        if ($frozenCount -gt 0) {
+                            Add-Log "- PERF: Froze $frozenCount bg processes for $currentForeground"
+                        }
+                    }
+                    Add-Log "- PERF: Boosted $currentForeground (Pri+Cache+Mem)"
+                }
+                if ($Global:DebugMode) {
+                    Add-Log "- CHAIN: $currentForeground" -Debug
+                }
+            }
+            if ($iteration % 5 -eq 0) {  # Co 5 iteracji (~10s)
+                $preemptiveResult = $performanceBooster.CheckPreemptiveBoost($prophet, $chainPredictor)
+                if ($preemptiveResult.ShouldBoost) {
+                    # Pre-boost: przygotuj system PRZED uruchomieniem
+                    [void]$performanceBooster.PreallocateMemory($preemptiveResult.App)
+                    [void]$performanceBooster.WarmDiskCache($preemptiveResult.App)
+                    # Jeśli AI aktywne, włącz Turbo preemptively
+                    if ($Global:AI_Active -and $currentState -ne "Turbo") {
+                        Set-PowerMode -Mode "Balanced" -CurrentCPU $currentMetrics.CPU
+                        Add-Log "- PREEMPT: $($preemptiveResult.Reason)"
+                    }
+                }
+                # Cleanup PerformanceBooster
+                $performanceBooster.Cleanup()
+            }
+            # Aktualizuj nowe komponenty AI
+            [void]$contextDetector.UpdateActiveApps($currentForeground, $currentMetrics.CPU)
+            # Dodaj raw ProcessName do ActiveApps (np. "TormentedSouls2-Win64-Shipping")
+            try {
+                $hwnd2 = [Win32]::GetForegroundWindow()
+                if ($hwnd2 -ne [IntPtr]::Zero) {
+                    $pid3 = 0; [Win32]::GetWindowThreadProcessId($hwnd2, [ref]$pid3) | Out-Null
+                    if ($pid3 -gt 0) { 
+                        $rawPN = (Get-Process -Id $pid3 -ErrorAction SilentlyContinue).ProcessName
+                        if ($rawPN -and $rawPN -ne $currentForeground) {
+                            [void]$contextDetector.UpdateActiveApps($rawPN, $currentMetrics.CPU)
+                        }
+                    }
+                }
+            } catch {}
+            $currentContext = $contextDetector.DetectContext($currentMetrics.CPU)
+            $Script:CurrentAppContext = $currentContext  # v43.14: Expose to CalcReward for Audio/Gaming awareness
+            
+            # v43.14: Periodic Knowledge Transfer (every 150 iterations ≈ 5 min)
+            # Transfers Q-Learning + Prophet → TransferCache, NIEZALEŻNIE od Ensemble
+            if (($iteration % 150) -eq 0 -and $iteration -gt 0) {
+                try {
+                    if ($aiCoordinator.ShouldTransferKnowledge($qLearning.TotalUpdates)) {
+                        $transferData = $aiCoordinator.TransferFromQLearning($qLearning)
+                        $aiCoordinator.IntegrateProphetData($prophet, $transferData)
+                        $aiCoordinator.IntegrateGPUBoundData($gpuBound, $transferData)
+                        $aiCoordinator.IntegrateBanditData($bandit, $transferData)
+                        $aiCoordinator.IntegrateGeneticData($genetic, $transferData)
+                        # Save TransferCache
+                        $transferData | ConvertTo-Json -Depth 5 | Set-Content "$($Script:ConfigDir)\TransferCache.json" -Encoding UTF8 -Force
+                        Add-Log "  PERIODIC Knowledge Transfer #$($aiCoordinator.TransferCount): Q→Prophet→SK"
+                    }
+                } catch {}
+            }
+            # PhaseDetector - wykrywanie fazy aplikacji (Loading/Gameplay/Menu/Cutscene/Idle)
+            $ioForPhase = $diskReadMB + $diskWriteMB
+            $gpuForPhase = if ($currentMetrics.GPU) { $currentMetrics.GPU.Load } else { 0 }
+            $phaseDetector.Update($currentForeground, $currentMetrics.CPU, $gpuForPhase, $ioForPhase, $currentMetrics.Temp)
+            [void]$thermalPredictor.RecordSample($currentMetrics.Temp, $currentMetrics.CPU, $currentForeground)
+            
+            # NetworkAI - przewidywanie optymalnej konfiguracji sieci (co 5 iteracji ~10s)
+            if ($iteration % 5 -eq 0 -and ![string]::IsNullOrWhiteSpace($currentForeground)) {
+                try {
+                    $isGaming = ($currentContext -eq "Gaming")
+                    $networkResult = $networkAI.Update($currentForeground, $netDownloadSpeed, $netUploadSpeed, $currentContext, $isGaming)
+                    # v43.13: Zachowaj wynik NetworkAI do użycia w modelScores
+                    if ($networkResult -and $networkResult.PredictedMode) {
+                        $Script:LastNetworkAIMode = $networkResult.PredictedMode
+                    }
+                    
+                    # Debug log co 60 iteracji (~2 minuty) 
+                    if ($Global:DebugMode -and $iteration % 60 -eq 0) {
+                        $dlMBps = [Math]::Round($netDownloadSpeed / 1MB, 2)
+                        $ulMBps = [Math]::Round($netUploadSpeed / 1MB, 2)
+                        Add-Log "- NetworkAI: $currentForeground Mode=$($networkResult.PredictedMode) Type=$($networkResult.NetworkType) DL=${dlMBps}MB/s UL=${ulMBps}MB/s" -Debug
+                    }
+                } catch {
+                    # Silent fail - nie przerywaj glownej petli
+                }
+            }
+            
+            # ═══════════════════════════════════════════════════════════════════════════
+            # PROPHET CONTINUOUS LEARNING - Ciągłe uczenie podczas pracy aplikacji
+            # Co 5 iteracji (~10 sekund) aktualizuj dane o aktywnej aplikacji
+            # ═══════════════════════════════════════════════════════════════════════════
+            if ($iteration % 5 -eq 0 -and (Is-ProphetEnabled) -and $currentForeground -and 
+                -not [string]::IsNullOrWhiteSpace($currentForeground) -and
+                -not $Script:BlacklistSet.Contains($currentForeground)) {
+                try {
+                    # Pobierz DisplayName dla czytelności logów
+                    $displayName = Get-FriendlyAppName -ProcessName $currentForeground
+                    
+                    # Aktualizuj Prophet z bieżącymi metrykami
+                    $prophet.UpdateRunning($currentForeground, $currentMetrics.CPU, $currentMetrics.IO, $displayName)
+                    
+                    # Debug log co 30 iteracji (~1 minuta)
+                    if ($Global:DebugMode -and $iteration % 30 -eq 0 -and $prophet.Apps.ContainsKey($currentForeground)) {
+                        $appInfo = $prophet.Apps[$currentForeground]
+                        $cleanCategory = $appInfo.Category -replace "^LEARNING_", ""
+                        $confidence = if ($prophet.IsCategoryConfident($currentForeground)) { "CONF" } else { "LEARN" }
+                        $samples = if ($appInfo.ContainsKey('Samples')) { $appInfo.Samples } else { 0 }
+                        Add-Log "- Prophet Update: $displayName = $cleanCategory ($confidence) Samples=$samples AvgCPU=$([Math]::Round($appInfo.AvgCPU))% MaxCPU=$([Math]::Round($appInfo.MaxCPU))%" -Debug
+                    }
+                } catch {
+                    # Silent fail - nie przerywaj głównej pętli
+                }
+            }
+            
+            $isUserActive = Update-ActivityStatus
+            [void]$userPatterns.RecordSample($currentMetrics.CPU, $currentMetrics.Temp, $currentContext, $currentState, $isUserActive)
+            # WYMUSZENIE TRYBU SILENT W IDLE
+            if ($currentContext -eq "Idle" -and -not $isUserActive -and -not $watcher.IsBoosting) {
+                Set-PowerMode -Mode "Silent" -CurrentCPU $currentMetrics.CPU
+                $currentState = "Silent"
+                $aiDecision = @{ Score = 0; Mode = "Silent"; Reason = "Wymuszone Idle"; Trend = 0 }
+            }
+            # Oblicz dynamiczny interwal
+            $dynamicInterval = $adaptiveTimer.CalculateInterval($currentContext, $isUserActive, $watcher.IsBoosting, $currentMetrics.CPU)
+            [void]$loadPredictor.RecordSample($currentMetrics.CPU, $currentMetrics.IO)
+            $cpuSpike = [Math]::Max(0, $currentMetrics.CPU - $Script:LastCPU)
+            $Script:LastCPU = [int][Math]::Round($currentMetrics.CPU)
+            if ($iteration - $lastPrediction -ge 30) {
+                $lastPrediction = $iteration
+                $predictedLoad = $loadPredictor.PredictNextMinute()
+                $predictedApps = $loadPredictor.PredictNextApps($prophet)
+                if ($predictedLoad -gt 60 -and -not $watcher.IsBoosting) {
+                    if ($Global:DebugMode) {
+                        Add-Log " PREDICT: High load ($([Math]::Round($predictedLoad)))% - pre-boost" -Debug
+                    }
+                    # Nie podnoś trybu jeśli Idle wymusza Silent
+                    if (!($currentContext -eq "Idle" -and -not $isUserActive)) {
+                        Set-PowerMode -Mode "Balanced" -CurrentCPU $currentMetrics.CPU
+                    }
+                }
+            }
+            #  FIXED: Boost dziala ZAWSZE - niezaleznie od stanu AI!
+            # Uzytkownik w trybie manualnym tez powinien miec Boost dla nowych aplikacji
+            if (-not $watcher.IsBoosting) {
+                $newFound = $watcher.ScanAndBoost($Script:BlacklistSet, $prophet, $cpuSpike, $currentMetrics.CPU)
+                if ($newFound) {
+                    #  FIXED: BOOST nowej aplikacji = TURBO natychmiast!
+                    Set-PowerMode -Mode "Turbo" -CurrentCPU $currentMetrics.CPU
+                    $boostSecs = $watcher.GetBoostRemainingSeconds()
+                    Add-Log " BOOST: $($watcher.BoostDisplayName) (${boostSecs}s)"
+                    [void]$loadPredictor.RecordAppLaunch($watcher.BoostProcessName)
+                    $isHeavy = $performanceBooster.IsHeavyApp($watcher.BoostProcessName) -or 
+                               ($prophet.Apps.ContainsKey($watcher.BoostProcessName) -and $prophet.Apps[$watcher.BoostProcessName].IsHeavy)
+                    if ($isHeavy) {
+                        # Heavy app: High priority + affinity + cache + memory + freeze
+                        [void]$performanceBooster.BoostProcessPriority($watcher.BoostProcessName)
+                        [void]$performanceBooster.PreallocateMemory($watcher.BoostProcessName)
+                        [void]$performanceBooster.WarmDiskCache($watcher.BoostProcessName)
+                        [void]$performanceBooster.FreezeBackgroundProcesses($watcher.BoostProcessName)
+                    } else {
+                        # Normal app: AboveNormal priority only
+                        $priorityManager.BoostProcess($watcher.BoostProcessName)
+                    }
+                }
+            }
+            if ($watcher.IsBoosting) {
+                [void]$watcher.UpdateBoost($currentMetrics.CPU, $currentMetrics.IO)
+                #  FIXED: Utrzymuj TURBO przez caly czas BOOST
+                Set-PowerMode -Mode "Turbo" -CurrentCPU $currentMetrics.CPU
+            }
+            if (-not $watcher.IsBoosting -and ![string]::IsNullOrWhiteSpace($watcher.BoostProcessName)) {
+                $learnData = $watcher.FinishBoost()
+                if ($learnData) {
+                    # AI uczy sie po ProcessName (stabilne), ale wyswietla DisplayName (czytelne)
+                    if (Is-NeuralBrainEnabled) {
+                        $result = $brain.Train(
+                            $learnData.ProcessName, 
+                            $learnData.DisplayName, 
+                            $learnData.PeakCPU, 
+                            $learnData.PeakIO, 
+                            $prophet
+                        )
+                        #  POPRAWKA: Rozroznienie komunikatow dla nowych i znanych aplikacji
+                        if ($result -match "^NEW") {
+                            Add-Log " LEARNED: $($learnData.DisplayName) -> $result"
+                        } else {
+                            Add-Log " KNOWN: $($learnData.DisplayName) -> $result"
+                        }
+                    }
+                    # ProphetMemory uczy sie niezaleznie od NeuralBrain
+                    if (Is-ProphetEnabled) {
+                        [void]$prophet.RecordLaunch($learnData.ProcessName, $learnData.PeakCPU, $learnData.PeakIO, $learnData.DisplayName)
+                        Add-Log " Prophet: Nauczono aplikacje: $($learnData.DisplayName)" -Debug
+                    }
+                    # Chain Predictor - NIE rejestruj tutaj (app juz zarejestrowana przy foreground switch, linia 14905)
+                    # Duplikat RecordAppLaunch psul TransitionGraph (ta sama app 2x = false transitions)
+                    $chainPrediction = $chainPredictor.GetPredictionStatus()
+                    [void]$anomalyDetector.UpdateBaseline(
+                        $learnData.ProcessName,
+                        $learnData.PeakCPU,
+                        $learnData.PeakIO
+                    )
+                    $peakRAM = if ($learnData.PeakRAM) { $learnData.PeakRAM } else { 0 }
+                    $performanceBooster.LearnHeavyApp($learnData.ProcessName, $learnData.PeakCPU, $peakRAM)
+                    # Unfreeze background processes after BOOST finished
+                    $performanceBooster.UnfreezeAllProcesses()
+                    $learnSaveSuccess = Save-State -Brain $brain -Prophet $prophet
+                    if ($learnSaveSuccess) {
+                        $prophetLastAutosave = [DateTime]::Now
+                        $prophetLastSavedSessions = $prophet.TotalSessions
+                    }
+                }
+            }
+            $startupBoostEntry = Update-StartupBoostState
+            if ($iteration - $lastAnomalyCheck -ge 10) {
+                $lastAnomalyCheck = $iteration
+                $anomalyResult = $anomalyDetector.CheckForAnomalies($currentMetrics.CPU, $currentMetrics.IO)
+                if ($anomalyResult.IsAnomaly) {
+                    $anomalyAlert = $anomalyResult.Type
+                    Add-Log "[WARN] ANOMALY: $($anomalyResult.Type) - $($anomalyResult.Details)"
+                    switch ($anomalyResult.Type) {
+                        "CPU_SPIKE" {
+                            $culprit = $anomalyDetector.FindCulpritProcess()
+                            if ($culprit) {
+                                Add-Log "   Culprit: $($culprit.ProcessName) (CPU: $($culprit.CPU)%)" 
+                            }
+                        }
+                        "CRYPTO_MINER" {
+                            Add-Log " ALERT: Possible crypto miner detected!"
+                        }
+                        "MEMORY_LEAK" {
+                            Add-Log "- Memory leak suspected in: $($anomalyResult.Details)"
+                        }
+                    }
+                } else {
+                    $anomalyAlert = ""
+                }
+            }
+            # - Pobierz aktywna aplikacje dla tooltip (kazda iteracja)
+            $rawAppName = ""
+            try {
+                $rawAppName = $priorityManager.GetForegroundApp()
+                if ([string]::IsNullOrWhiteSpace($rawAppName)) { 
+                    $currentActiveApp = "Desktop" 
+                } else {
+                    $currentActiveApp = Get-FriendlyAppName -ProcessName $rawAppName
+                }
+            } catch { $currentActiveApp = "Unknown" }
+            if ($iteration - $lastPriorityUpdate -ge 15) {
+                $lastPriorityUpdate = $iteration
+                # Uzyj oryginalnej nazwy procesu dla optymalizacji
+                if (![string]::IsNullOrWhiteSpace($rawAppName) -and $rawAppName -ne "Desktop") {
+                    $priorityManager.OptimizeForForeground($rawAppName, $Script:BlacklistSet)
+                    if ($Global:DebugMode) {
+                        Add-Log " Priority: Boosted $currentActiveApp ($rawAppName)" -Debug
+                    }
+                }
+            }
+            # - V37.7.15: ProBalance - CPU Hog Restraint (co 5 iteracji = ~10s)
+            if ($iteration - $lastProBalanceUpdate -ge 5) {
+                $lastProBalanceUpdate = $iteration
+                try {
+                    $proBalance.Update($currentActiveApp)
+                    # - V40: Zastosuj rekomendacje ProcessAI
+                    $throttleRecs = $processAI.GetThrottleRecommendations($currentForeground)
+                    $proBalance.ApplyAIRecommendations($throttleRecs)
+                    # Zapisz punkt historii
+                    $pbHistoryPoint = @{
+                        Time = (Get-Date).ToString("HH:mm:ss")
+                        Throttled = $proBalance.ThrottledProcesses.Count
+                        TotalThrottles = $proBalance.TotalThrottles
+                        TotalRestores = $proBalance.TotalRestores
+                        Threshold = $proBalance.ThrottleThreshold
+                        CPU = [int]$currentMetrics.CPU
+                    }
+                    $Script:ProBalanceHistory.Insert(0, $pbHistoryPoint)
+                    while ($Script:ProBalanceHistory.Count -gt $Script:ProBalanceHistoryMaxSize) {
+                        $Script:ProBalanceHistory.RemoveAt($Script:ProBalanceHistoryMaxSize)
+                    }
+                } catch { }
+            }
+            $aiDecision = @{ Score = 0; Mode = "Balanced"; Reason = "Init"; Trend = 0 }
+            $currentState = "Balanced"
+            # #
+            # #
+            if ($startupBoostEntry -and -not $Script:SilentLockMode) {
+                $boostAppName = $startupBoostEntry.ProcessName
+                
+                # v43.10 FIX: Sprawdź HardLock PRZED wymuszeniem StartupBoost
+                $hasHardLock = $false
+                if ($Script:AppCategoryPreferences) {
+                    $appLower = $boostAppName.ToLower() -replace '\.exe$', ''
+                    foreach ($key in $Script:AppCategoryPreferences.Keys) {
+                        $keyLower = $key.ToLower() -replace '\.exe$', ''
+                        
+                        # v43.10b: Rozszerzone dopasowanie
+                        $matches = ($keyLower -eq $appLower) -or 
+                                  ($appLower -like "*$keyLower*") -or 
+                                  ($keyLower -like "*$appLower*") -or
+                                  ($keyLower -eq "google chrome" -and $appLower -eq "chrome") -or
+                                  ($keyLower -eq "chrome" -and $appLower -eq "chrome")
+                        
+                        if ($matches) {
+                            $pref = $Script:AppCategoryPreferences[$key]
+                            if ($pref.HardLock) {
+                                $hasHardLock = $true
+                                break
+                            }
+                        }
+                    }
+                }
+                
+                if ($hasHardLock) {
+                    # Aplikacja ma HardLock - NIE STOSUJ StartupBoost
+                    if ($Global:DebugMode) {
+                        Add-Log " STARTUP BOOST SKIPPED: $boostAppName has HardLock (user enforced mode)" -Debug
+                    }
+                    # Usuń z Activity Boost Apps
+                    if ($Script:ActivityBoostApps -and $startupBoostEntry.Pid) {
+                        $Script:ActivityBoostApps.Remove($startupBoostEntry.Pid)
+                    }
+                    # Nie zmieniaj $currentState - niech HardLock logika określi tryb
+                }
+                # Sprawdz czy to proces systemowy
+                elseif (Test-IsSystemProcess -ProcessName $boostAppName) {
+                    # Ignoruj procesy systemowe
+                    if ($Global:DebugMode) {
+                        Add-Log "- Startup Boost SKIP (system): $boostAppName" -Debug
+                    }
+                } elseif ($Script:SilentModeActive) {
+                    # W trybie SILENT - pytaj uzytkownika
+                    $userApproved = Show-BoostNotification -AppName $boostAppName -CPUUsage ([int]$currentMetrics.CPU) -RecommendedMode "Turbo"
+                    if ($userApproved) {
+                        $remainingStartup = [Math]::Max(0, [int][Math]::Ceiling(($startupBoostEntry.Until - (Get-Date)).TotalSeconds))
+                        $currentState = "Turbo"
+                        $aiDecision = @{
+                            Score = 95
+                            Mode = "Turbo"
+                            Reason = "Startup Boost (approved): $boostAppName (${remainingStartup}s)"
+                            Trend = 0
+                        }
+                    }
+                    # Jesli nie zatwierdzono - zostan w domyslnym trybie
+                } else {
+                    # BALANCED/TURBO - normalny boost
+                    $remainingStartup = [Math]::Max(0, [int][Math]::Ceiling(($startupBoostEntry.Until - (Get-Date)).TotalSeconds))
+                    $currentState = "Turbo"
+                    $aiDecision = @{
+                        Score = 95
+                        Mode = "Turbo"
+                        Reason = "Startup Boost: $boostAppName (${remainingStartup}s)"
+                        Trend = 0
+                    }
+                }
+            }
+            # #
+            # #
+            elseif ($watcher.IsBoosting -and -not $Script:SilentLockMode) {
+                $boostAppName = $watcher.BoostProcessName
+                
+                # v43.10 FIX: Sprawdź HardLock - jeśli aplikacja ma HardLock, ANULUJ BOOST
+                $hasHardLock = $false
+                if ($Script:AppCategoryPreferences) {
+                    $appLower = $boostAppName.ToLower() -replace '\.exe$', ''
+                    foreach ($key in $Script:AppCategoryPreferences.Keys) {
+                        $keyLower = $key.ToLower() -replace '\.exe$', ''
+                        
+                        # v43.10b: Rozszerzone dopasowanie
+                        $matches = ($keyLower -eq $appLower) -or 
+                                  ($appLower -like "*$keyLower*") -or 
+                                  ($keyLower -like "*$appLower*") -or
+                                  ($keyLower -eq "google chrome" -and $appLower -eq "chrome") -or
+                                  ($keyLower -eq "chrome" -and $appLower -eq "chrome")
+                        
+                        if ($matches) {
+                            $pref = $Script:AppCategoryPreferences[$key]
+                            if ($pref.HardLock) {
+                                $hasHardLock = $true
+                                break
+                            }
+                        }
+                    }
+                }
+                
+                if ($hasHardLock) {
+                    # Aplikacja ma HardLock - anuluj boost i użyj HardLock mode
+                    $watcher.CancelBoost()
+                    if ($Global:DebugMode) {
+                        Add-Log " BOOST CANCELLED: $boostAppName has HardLock (user enforced mode)" -Debug
+                    }
+                    # Nie zmieniaj $currentState - niech HardLock logika (wyżej w hierarchii) określi tryb
+                }
+                # Sprawdz czy to proces systemowy
+                elseif (Test-IsSystemProcess -ProcessName $boostAppName) {
+                    # Ignoruj procesy systemowe - anuluj boost
+                    $watcher.CancelBoost()
+                    if ($Global:DebugMode) {
+                        Add-Log "- Watcher Boost SKIP (system): $boostAppName" -Debug
+                    }
+                } elseif ($Script:SilentModeActive) {
+                    # W trybie SILENT - pytaj uzytkownika (tylko raz na aplikacje)
+                    if (-not $Script:UserApprovedBoosts.Contains($boostAppName)) {
+                        $userApproved = Show-BoostNotification -AppName $boostAppName -CPUUsage ([int]$currentMetrics.CPU) -RecommendedMode "Turbo"
+                        if (-not $userApproved) {
+                            $watcher.CancelBoost()
+                        }
+                    }
+                    # Jesli zatwierdzono lub auto-approved
+                    if ($Script:UserApprovedBoosts.Contains($boostAppName) -or $watcher.IsBoosting) {
+                        $currentState = "Turbo"
+                        $aiDecision = @{ 
+                            Score = 90
+                            Mode = "Turbo"
+                            Reason = " BOOST (approved) $($watcher.GetBoostRemainingSeconds())s"
+                            Trend = 0 
+                        }
+                    }
+                } else {
+                    # BALANCED/TURBO - normalny boost
+                    $currentState = "Turbo"
+                    $aiDecision = @{ 
+                        Score = 90
+                        Mode = "Turbo"
+                        Reason = " BOOST $($watcher.GetBoostRemainingSeconds())s"
+                        Trend = 0 
+                    }
+                }
+            } elseif (![string]::IsNullOrWhiteSpace($anomalyAlert) -and $anomalyAlert -eq "CRYPTO_MINER") {
+                $currentState = "Silent"
+                $aiDecision = @{
+                    Score = 10
+                    Mode = "Silent"
+                    Reason = "SECURITY"
+                    Trend = 0
+                }
+            } elseif ($Global:AI_Active) {
+                # Pobierz progi z Self-Tuner
+                $turboThreshold = $selfTuner.GetTurboThreshold()
+                $balancedThreshold = $selfTuner.GetBalancedThreshold()
+                $ramInfo = $ramAnalyzer.Update($currentForeground, $currentMetrics.Temp, $currentState)
+                $ramUsage = if ($ramInfo) { $ramInfo.RAM } else { 0 }
+                $ramSpike = if ($ramInfo) { $ramInfo.Spike -or $ramInfo.Trend } else { $false }
+                # - V40: ProcessAI - ucz sie zachowan procesow
+                if ($currentForeground) {
+                    try { $processAI.Learn($currentForeground, $currentMetrics.CPU, $ramUsage) } catch { }
+                }
+                # - V40: GPU AI - rekomendacja GPU na podstawie trybu i aplikacji
+                $gpuRecommendation = $null
+                if ($Script:HasiGPU -or $Script:HasdGPU) {
+                    # Aktualny tryb będzie znany po decyzji AI, więc używamy poprzedniego
+                    $gpuRecommendation = $gpuAI.GetGPURecommendation($currentState, $currentForeground, $currentMetrics.CPU)
+                    
+                    # V40.2 FIX: Ulepszone wykrywanie GPU Load i typu aktywnego GPU
+                    $gpuLoad = 0
+                    $activeGPU = "Unknown"
+                    
+                    # Pobierz rzeczywiste obciążenie GPU z currentMetrics
+                    if ($currentMetrics.GPU -and $currentMetrics.GPU.Load) {
+                        $gpuLoad = $currentMetrics.GPU.Load
+                    }
+                    
+                    # V40.2 FIX: Ulepszone wykrywanie aktywnego GPU
+                    if ($gpuLoad -gt 5) {
+                        $gpuName = if ($currentMetrics.GPU.Name) { $currentMetrics.GPU.Name } else { "" }
+                        
+                        # Sprawdź typ GPU na podstawie nazwy z sensorów
+                        # V40 FIX: Rozszerzone wzorce dla AMD dGPU
+                        if ($gpuName -match "NVIDIA|GeForce|RTX|GTX|Quadro") {
+                            $activeGPU = "dGPU"
+                        }
+                        elseif ($gpuName -match "Radeon\s*(RX|Pro|VII|WX|W\d)|AMD.*RX\s*\d{4}") {
+                            $activeGPU = "dGPU"  # AMD dedicated
+                        }
+                        elseif ($gpuName -match "Intel.*UHD|Intel.*HD|Intel.*Iris|Intel.*Graphics") {
+                            $activeGPU = "iGPU"  # Intel integrated
+                        }
+                        elseif ($gpuName -match "AMD.*Graphics|Radeon.*Graphics|Radeon\s+\d{3}M|Vega|APU") {
+                            $activeGPU = "iGPU"  # AMD APU integrated (Vega, 680M, 780M etc.)
+                        }
+                        # Fallback: użyj danych z detekcji hardware
+                        elseif ($Script:HasdGPU -and $Script:dGPUName -and $gpuName -match $Script:dGPUName.Split(' ')[0]) {
+                            $activeGPU = "dGPU"
+                        }
+                        elseif ($Script:HasiGPU -and $Script:iGPUName -and $gpuName -match $Script:iGPUName.Split(' ')[0]) {
+                            $activeGPU = "iGPU"
+                        }
+                        # Ostateczny fallback: jeśli tylko jeden GPU
+                        elseif ($Script:HasdGPU -and -not $Script:HasiGPU) {
+                            $activeGPU = "dGPU"
+                        }
+                        elseif ($Script:HasiGPU -and -not $Script:HasdGPU) {
+                            $activeGPU = "iGPU"
+                        }
+                        else {
+                            $activeGPU = "Auto"  # Hybrid - nie wiadomo które
+                        }
+                    }
+                    
+                    # GPU Learning - ucz się preferencji aplikacji
+                    if ($currentForeground -and $gpuLoad -gt 0) {
+                        try { 
+                            $gpuAI.Learn($currentForeground, $gpuLoad, $activeGPU, $currentMetrics.CPU, $currentMetrics.Temp) 
+                        } catch { }
+                    }
+                    
+                    # Log co 30 iteracji gdy GPU aktywne
+                    if ($iteration % 30 -eq 0 -and $gpuLoad -gt 20) {
+                        Add-Log "- GPU AI: Load=$gpuLoad% Active=$activeGPU App=$currentForeground" -Debug
+                    }
+                }
+                #  1. BRAIN - Neural Network Decision (V35: z RAM)
+                if (Is-NeuralBrainEnabled) {
+                    $brainDecision = $brain.Decide(
+                        $currentMetrics.CPU, 
+                        $currentMetrics.IO, 
+                        $forecaster.Trend(), 
+                        $prophet,
+                        $ramUsage,      # V35 NEW
+                        $ramSpike       # V35 NEW
+                    )
+                    # Brain daje Score, nie wymusza trybu
+                    $aiDecision = @{ 
+                        Score = $brainDecision.Score
+                        Mode = "Balanced"  # Placeholder, zostanie ustalony przez kombinację
+                        Reason = $brainDecision.Reason
+                        Trend = $brainDecision.Trend
+                        BrainSuggestion = $brainDecision.Suggestion  # Sugestia do użycia w kombinacji
+                    }
+                } else {
+                    $aiDecision = @{ Score = 0; Mode = "Silent"; Reason = "DISABLED"; Trend = 0; BrainSuggestion = "Balanced" }
+                }
+                #  2. Q-LEARNING - Reinforcement Learning (V35: z RAM)
+                # v43.1 FIX: Update() musi być PRZED SelectAction() żeby nagrodzić poprzednią akcję
+                if (Is-QLearningEnabled) {
+                    # v43.14: Per-app learning - Q-Learning zna aktywną aplikację
+                    $qLearning.CurrentApp = if ($currentForeground) { $currentForeground } else { "" }
+                    $newQState = $qLearning.DiscretizeState($currentMetrics.CPU, $currentMetrics.Temp, $isUserActive, $currentContext, $ramUsage, $ramSpike, $phaseDetector.CurrentPhase)
+                    # Najpierw Update - nagradzamy poprzednią akcję (LastAction z poprzedniej iteracji)
+                    if ($qState -and $qLearning.LastAction) {
+                        $reward = $qLearning.CalcReward($qLearning.LastAction, $currentMetrics.CPU, $currentMetrics.Temp, $prevTemp, $isUserActive, $ramUsage, $ramSpike, $phaseDetector.CurrentPhase)
+                        [void]$qLearning.Update($qState, $qLearning.LastAction, $reward, $newQState)
+                    }
+                    # Potem SelectAction - wybieramy nową akcję (zapisuje LastAction dla następnej iteracji)
+                    $qAction = $qLearning.SelectAction($newQState)
+                    $qState = $newQState
+                }
+                # - 3. MULTI-ARMED BANDIT - Thompson Sampling
+                # v42.6: Sprawdź czy włączone
+                $banditAction = if (Is-BanditEnabled) { $bandit.SelectArm() } else { "Balanced" }
+                # - 4. GENETIC OPTIMIZER - Evolving Parameters
+                # v42.6: Sprawdź czy włączone
+                $geneticParams = if (Is-GeneticEnabled) { $genetic.GetCurrentParams() } else { @{ TurboThreshold = 75; BalancedThreshold = 35 } }
+                $geneticMode = "Balanced"
+                if ($geneticParams.TurboThreshold -and $aiDecision.Score -gt $geneticParams.TurboThreshold -and $currentMetrics.CPU -gt 40) {
+                    $geneticMode = "Turbo"
+                } elseif ($geneticParams.BalancedThreshold -and ($aiDecision.Score -lt $geneticParams.BalancedThreshold -or $currentMetrics.CPU -lt 20)) {
+                    $geneticMode = "Silent"
+                }
+                #  5. CONTEXT DETECTOR - Application Context
+                $contextMode = $contextDetector.GetRecommendedMode()
+                # v43.14: Context + Prophet learned = inteligentny score
+                # Jeśli Prophet zna lepszy tryb per-app, użyj go zamiast hardcoded
+                $contextLearnedMode = ""
+                if ($prophet -and $currentForeground -and (Is-ProphetEnabled)) {
+                    $contextLearnedMode = $prophet.GetLearnedMode($currentForeground, $phaseDetector.CurrentPhase)
+                }
+                $contextEffective = if ($contextLearnedMode) { $contextLearnedMode } else { $contextMode }
+                $contextScore = switch ($contextEffective) {
+                    "Turbo" { 75 }
+                    "Balanced" { 50 }
+                    "Silent" { 25 }
+                    default { 50 }
+                }
+                
+                # - 6. THERMAL PREDICTOR - Temperature Trend (votes carefully)
+                #  FIXED: Thermal glosuje score na podstawie temperatury
+                $thermalScore = 50  # Neutralny
+                if ($thermalPredictor.ShouldThrottle()) { 
+                    $thermalScore = 20  # Silnie obniż score przy przegrzaniu
+                } elseif ($currentMetrics.Temp -lt 50 -and $currentMetrics.CPU -gt 40) {
+                    $thermalScore = 70  # Zimny CPU + wysokie obciążenie = pozwól na wyższy score
+                } elseif ($currentMetrics.Temp -lt 45 -and $currentMetrics.CPU -lt 20) {
+                    $thermalScore = 25  # Zimny CPU + niskie obciążenie = niski score
+                }
+                
+                #  7. USER PATTERNS - Activity Patterns
+                $patternScore = if ($userPatterns.IsTypicallyActiveNow()) { 55 } else { 30 }
+                
+                #  8. GPU MONITOR - Graphics Load + GPU Type + AI Learning drives score
+                $gpuLoad = if ($currentMetrics.GPU) { $currentMetrics.GPU.Load } else { 0 }
+                $gpuScore = 50  # Neutralny
+                
+                # v43.14: GPU score ODWROTNY do CPU potrzeb!
+                # Wysokie GPU load = GPU robi robotę = CPU NIE potrzebuje Turbo
+                if ($gpuAI -and $currentForeground) {
+                    $gpuLearnedMode = $gpuAI.GetRecommendedMode($currentForeground, $gpuLoad)
+                    if ($gpuLearnedMode) {
+                        $gpuScore = switch ($gpuLearnedMode) {
+                            "Turbo" { 80 }
+                            "Balanced" { 50 }
+                            "Silent" { 25 }
+                            default { 50 }
+                        }
+                    }
+                }
+                
+                # GPU-BOUND logic: wysoki GPU + niski CPU = nie potrzeba Turbo CPU
+                if ($gpuLoad -gt 60 -and $currentMetrics.CPU -lt 50) {
+                    # GPU robi robotę - CPU score w DÓŁ
+                    $gpuScore = [Math]::Min($gpuScore, 30)
+                } elseif ($gpuLoad -lt 20 -and $gpuScore -eq 50) {
+                    # Brak GPU = CPU-intensive - użyj raw CPU jako indicator
+                    $gpuScore = [Math]::Min(100, [Math]::Max(20, $currentMetrics.CPU))
+                }
+                
+                #  9. LOAD PREDICTOR - Future Load Prediction
+                # Prediction drives decision - prepare BEFORE load hits
+                $predictorScore = 50  # Neutralny
+                if ($Script:PredictiveBoostEnabled) {
+                    # Zamiast wymuszać tryb, dajemy score proporcjonalny do predykcji
+                    $predictorScore = [Math]::Min(100, [Math]::Max(0, $predictedLoad))
+                }
+                #  10. CHAIN PREDICTOR - App Launch Prediction (v43.14: per-app learned)
+                $chainScore = 50  # Neutralny
+                if ($Script:PreloadEnabled -or $Script:SmartPreload) {
+                    if ($chainPredictor.ShouldPreBoost()) {
+                        # v43.14: Sprawdź czy predicted app ma learned mode
+                        $predictedApp = $chainPredictor.CurrentPrediction
+                        $chainLearnedMode = ""
+                        if ($predictedApp -and $prophet -and (Is-ProphetEnabled)) {
+                            $chainLearnedMode = $prophet.GetLearnedMode($predictedApp, "Loading")
+                        }
+                        if ($chainLearnedMode) {
+                            $chainScore = switch ($chainLearnedMode) {
+                                "Turbo" { 80 }
+                                "Balanced" { 55 }
+                                "Silent" { 30 }
+                                default { 65 }
+                            }
+                        } else {
+                            $chainScore = 70
+                        }
+                    } elseif ($currentContext -eq "Idle" -and $currentMetrics.CPU -lt 20) { 
+                        $chainScore = 20
+                    }
+                }
+                #  11. FORECASTER - CPU Trend Analysis
+                #  SYNC: uses variables z config.json
+                $trend = $forecaster.Trend()
+                $trendScore = 50  # Bazowy
+                # Trend wpływa na score: +trend = wyższy score, -trend = niższy score
+                $trendScore += ($trend * 0.5)  # Trend ±20 = ±10 score
+                $trendScore = [Math]::Min(100, [Math]::Max(0, $trendScore))
+                
+                #  12. SELF-TUNER - Dynamic Thresholds
+                #  SYNC: uses variables z config.json
+                $tunerScore = $aiDecision.Score  # Bazuj na aktualnym AI score
+                
+                #  13. ENERGY TRACKER - Efficiency Focus
+                $energyScore = 50  # Neutralny
+                $efficiency = $energyTracker.CurrentEfficiency
+                # Wysoka efektywność przy niskim CPU = preferuj Silent
+                # Niska efektywność przy wysokim CPU = preferuj Turbo
+                if ($efficiency -gt 0.8 -and $currentMetrics.CPU -lt 30) { 
+                    $energyScore = 25  # Zachęcaj do Silent
+                } elseif ($efficiency -lt 0.4 -and $currentMetrics.CPU -gt $Script:TurboThreshold) { 
+                    $energyScore = 80  # Zachęcaj do Turbo
+                }
+                
+                #  14. PROPHET MEMORY - App History (v43.14: LEARNED per-app per-phase)
+                $prophetScore = 50  # Neutralny
+                if ($prophet.LastActiveApp -and (Is-ProphetEnabled)) {
+                    $currentPhase = $phaseDetector.CurrentPhase
+                    # v43.14: Najpierw sprawdź NAUCZONY tryb per-app per-phase
+                    $learnedMode = $prophet.GetLearnedMode($prophet.LastActiveApp, $currentPhase)
+                    if ($learnedMode) {
+                        # Learned mode → score: Silent=20, Balanced=50, Turbo=80
+                        $prophetScore = switch ($learnedMode) {
+                            "Silent"   { 20 }
+                            "Balanced" { 50 }
+                            "Turbo"    { 80 }
+                            default    { 50 }
+                        }
+                    } else {
+                        # Nie ma jeszcze learned mode - użyj category ale z GPU-bound korektą
+                        $appWeight = $prophet.GetWeight($prophet.LastActiveApp)
+                        $prophetScore = $appWeight * 100
+                        # GPU-bound korekta: HEAVY + GPU-bound → NIE dawaj Turbo
+                        $appData = $prophet.Apps[$prophet.LastActiveApp]
+                        if ($appData -and $appData.ContainsKey('IsGPUBound') -and $appData.IsGPUBound) {
+                            $prophetScore = [Math]::Min($prophetScore, 40)  # Cap at Balanced
+                        }
+                    }
+                }
+                
+                #  15. ANOMALY DETECTOR - Security Check
+                $anomalyScore = 50  # Neutralny
+                if ($anomalyAlert -eq "CRYPTO_MINER") { 
+                    $anomalyScore = 15  # Silnie obniż score dla podejrzanej aktywności
+                }
+                
+                # - 16. ACTIVITY MONITOR - User Presence
+                $activityScore = 50  # Neutralny
+                if (-not $isUserActive -and $currentMetrics.CPU -lt 25) { 
+                    $activityScore = 25  # Użytkownik nieaktywny = niższy score
+                } elseif ($isUserActive -and $currentMetrics.CPU -gt 70) { 
+                    $activityScore = 75  # Użytkownik aktywny + wysokie CPU = wyższy score
+                }
+                # - 17. I/O MONITOR - Disk Activity Reaction (NOWE!)
+                $ioScore = 50  # Neutralny
+                if ($Script:PredictiveIO) {
+                    $diskReadMB = $diskReadSpeed / 1MB
+                    $diskWriteMB = $diskWriteSpeed / 1MB
+                    # Zastosuj czulosc (1-10) jako mnoznik progow
+                    # Sens 10 = x1.0 (najbardziej czuly), Sens 1 = x1.9 (najmniej czuly)
+                    $sensitivityMultiplier = 1.0 + ((10 - $Script:IOSensitivity) * 0.1)
+                    $effectiveReadThreshold = $Script:IOReadThreshold * $sensitivityMultiplier
+                    $effectiveWriteThreshold = $Script:IOWriteThreshold * $sensitivityMultiplier
+                    # Sprawdz czy aktywnosc I/O wymaga reakcji
+                    if ($diskReadMB -gt $effectiveReadThreshold -or $diskWriteMB -gt $effectiveWriteThreshold) {
+                        $Script:LastIOThresholdEvent = [DateTime]::Now
+                        # Aktywuj IO Boost jesli jeszcze nie aktywny
+                        if (-not $Script:IOBoostActive) {
+                            $Script:IOBoostActive = $true
+                            $Script:IOBoostStartTime = [DateTime]::Now
+                            Add-Log "- I/O Boost: Read=$([int]$diskReadMB)MB/s Write=$([int]$diskWriteMB)MB/s"
+                        }
+                        # Bardzo wysoka aktywnosc I/O = wysoki score
+                        if ($diskReadMB -gt ($effectiveReadThreshold * 2) -or $diskWriteMB -gt ($effectiveWriteThreshold * 2)) {
+                            $ioScore = 85  # Wysoki score, nie wymuszenie Turbo
+                        } else {
+                            $ioScore = 60  # Średni score
+                        }
+                    } else {
+                        # Niska aktywnosc I/O - sprawdz czy zakonczyc boost
+                        if ($Script:IOBoostActive) {
+                            $ioBoostDuration = ([DateTime]::Now - $Script:IOBoostStartTime).TotalMilliseconds
+                            if ($ioBoostDuration -gt $Script:BoostDuration) {
+                                $Script:IOBoostActive = $false
+                            }
+                        }
+                        # Brak aktywnosci I/O i niskie CPU = niski score
+                        if ($currentMetrics.CPU -lt 30 -and -not $Script:IOBoostActive) {
+                            $ioScore = 25  # Niski score
+                        }
+                    }
+                } else {
+                    # PredictiveIO disabled - still calculate disk metrics for display
+                    $diskReadMB = $diskReadSpeed / 1MB
+                    $diskWriteMB = $diskWriteSpeed / 1MB
+                }
+                # v43.13: 18. NETWORK AI - Network-aware mode prediction
+                $networkScore = 50  # Neutralny
+                if ($Script:LastNetworkAIMode) {
+                    $networkScore = switch ($Script:LastNetworkAIMode) {
+                        "Turbo" { 75 }
+                        "Balanced" { 50 }
+                        "Silent" { 25 }
+                        default { 50 }
+                    }
+                }
+                # #
+                # AI LEARNING LOG - tylko w trybie DEBUG (aby nie spowalniac)
+                # #
+                if ($Global:DebugMode -and $iteration % 30 -eq 0) {
+                    Write-Log "AI LEARNING | LoadPred=$($predictedLoad)% | Trend=$($trend)% | Temp=$($currentMetrics.Temp)°C" "INFO"
+                    if ($predictedLoad -gt 75) {
+                        Write-Log "    LoadPredictor: High load predicted!" "INFO"
+                    }
+                    if ($trend -gt 20) {
+                        Write-Log "    TrendForecaster: CPU rising!" "INFO"
+                    } elseif ($trend -lt -15) {
+                        Write-Log "    TrendForecaster: CPU falling!" "INFO"
+                    }
+                }
+                # - MEGA AI: Ensemble voting - WSZYSTKIE 17 modeli glosuja!
+                # Context priority wplywa na wagi: Priority 1 (Gaming/Audio) = waga x2, Priority 6 (Background) = waga x0.5
+                $powerBoostScore = 50  # Neutralny
+                if ($Script:PowerBoost) {
+                    # PowerBoost gives extra push when CPU > 60% or RAM spike
+                    if ($currentMetrics.CPU -gt 60 -or $ramSpike) {
+                        $powerBoostScore = 80  # Wysoki score
+                        if ($Global:DebugMode -and $iteration % 30 -eq 0) {
+                            Add-Log "- PowerBoost: Active (CPU=$([int]$currentMetrics.CPU)% RAMSpike=$ramSpike)"
+                        }
+                    } elseif ($currentMetrics.CPU -lt 15) {
+                        $powerBoostScore = 20  # Niski score
+                    }
+                }
+                $contextPriority = if ($contextDetector.ContextPatterns.ContainsKey($currentContext)) {
+                    $contextDetector.ContextPatterns[$currentContext].Priority
+                } else { 6 }
+                $contextWeight = 3.0 - ($contextPriority * 0.4)  # Priority 1 = 2.6x, Priority 6 = 0.6x
+                #  SYNC: Filtruj glosy Q-Learning i Bandit - uses variables z config.json
+                # ZMIANA: Zwiększony score dla Silent (z 15 na 25) - lepsza reprezentacja w kombinacji
+                $qScore = switch ($qAction) {
+                    "Turbo" { 85 }
+                    "Balanced" { 50 }
+                    "Silent" { 25 }
+                    default { 50 }
+                }
+                $banditScore = switch ($banditAction) {
+                    "Turbo" { 85 }
+                    "Balanced" { 50 }
+                    "Silent" { 25 }
+                    default { 50 }
+                }
+                
+                # Filtry dla bardzo niskiego CPU
+                if ($currentMetrics.CPU -lt $Script:BalancedThreshold) {
+                    # Przy niskim CPU, obniż score jeśli zbyt wysoki
+                    if ($qScore -gt 70) { $qScore = 55 }
+                    if ($banditScore -gt 70) { $banditScore = 55 }
+                }
+                if ($currentMetrics.CPU -lt $Script:ForceSilentCPU) {
+                    # Przy bardzo niskim CPU, wszystkie scores idą w dół
+                    $qScore = [Math]::Min($qScore, 30)
+                    $banditScore = [Math]::Min($banditScore, 30)
+                }
+                
+                $geneticScore = switch ($geneticMode) {
+                    "Turbo" { 85 }
+                    "Balanced" { 50 }
+                    "Silent" { 25 }
+                    default { 50 }
+                }
+                
+                # AICoordinator: wybierz aktywny silnik na podstawie warunków
+                if ($aiCoordinator) {
+                    try { [void]$aiCoordinator.DecideActiveEngine($currentMetrics.CPU, $currentMetrics.Temp, $currentContext, $qLearning.TotalUpdates) } catch {}
+                }
+                
+                # v43.14: Prophet LearnMode - CO ITERACJĘ uczy się jaki tryb działa per-app per-phase
+                if ($currentForeground -and $currentForeground -ne "Desktop" -and (Is-ProphetEnabled)) {
+                    try {
+                        # Reward: używamy tego samego co Q-Learning (spójność)
+                        $prophetReward = if ($qLearning.LastReward) { $qLearning.LastReward } else { 0.0 }
+                        $prophet.LearnMode($currentForeground, $currentState, $prophetReward, $phaseDetector.CurrentPhase, $gpuLoad)
+                    } catch {}
+                }
+                
+                # v43.14: SharedAppKnowledge - silniki PISZĄ wiedzę per-app (co 5 iteracji)
+                # Umieszczone PO obliczeniu score'ów - qAction, gpuLoad, context dostępne
+                if ($iteration % 5 -eq 0 -and $currentForeground -and $currentForeground -ne "Desktop") {
+                    try {
+                        $phDom = $phaseDetector.CurrentPhase
+                        $phHist = @{}
+                        if ($phaseDetector.AppPhaseHistory.ContainsKey($currentForeground)) {
+                            $phHist = $phaseDetector.AppPhaseHistory[$currentForeground]
+                        }
+                        $sharedKnowledge.WriteFromPhase($currentForeground, $phDom, $phHist)
+                        
+                        $thermalRisk = if ($currentMetrics.Temp -gt 85) { "High" } elseif ($currentMetrics.Temp -gt 70) { "Medium" } else { "Low" }
+                        $sharedKnowledge.WriteFromThermal($currentForeground, $currentMetrics.Temp, $currentMetrics.Temp, $thermalRisk)
+                        
+                        $ctxPriority = if ($contextDetector.ContextPatterns.ContainsKey($currentContext)) { $contextDetector.ContextPatterns[$currentContext].Priority } else { 5 }
+                        $sharedKnowledge.WriteFromContext($currentForeground, $currentContext, $ctxPriority)
+                        
+                        $gpuCat = if ($gpuLoad -gt 60) { "Heavy" } elseif ($gpuLoad -lt 20) { "Light" } else { "Work" }
+                        $gpuBoundNow = ($gpuBound -and $gpuBound.IsConfident)
+                        $prefGPU = if ($gpuAI -and $gpuAI.GetRecommendation) { try { ($gpuAI.GetRecommendation($currentForeground)).PreferredGPU } catch { "" } } else { "" }
+                        $sharedKnowledge.WriteFromGPUAI($currentForeground, $prefGPU, $gpuBoundNow, $gpuLoad, $gpuCat)
+                        
+                        $propBestMode = ""
+                        if ($prophet) {
+                            # v43.14: Najpierw per-phase learned, potem global PreferredMode
+                            $propBestMode = $prophet.GetLearnedMode($currentForeground, $phDom)
+                            if (-not $propBestMode -and $prophet.Apps.ContainsKey($currentForeground)) {
+                                $pa = $prophet.Apps[$currentForeground]
+                                $propBestMode = if ($pa.ContainsKey('PreferredMode') -and $pa.PreferredMode) { $pa.PreferredMode } else { "" }
+                            }
+                        }
+                        $sharedKnowledge.WriteFromProphet($currentForeground, $currentMetrics.CPU, $gpuLoad, $propBestMode, 0)
+                        
+                        if ($qAction -and $phDom) {
+                            $qConf = if ($qLearning.TotalUpdates -gt 100) { 0.8 } elseif ($qLearning.TotalUpdates -gt 20) { 0.5 } else { 0.2 }
+                            $sharedKnowledge.WriteFromQLearning($currentForeground, $qAction, $qConf, $phDom, $qAction)
+                        }
+                        
+                        if ($energyTracker) {
+                            $eff = if ($currentMetrics.CPU -gt 5) { [Math]::Min(1.0, 50.0 / $currentMetrics.CPU) } else { 1.0 }
+                            $sharedKnowledge.WriteFromEnergy($currentForeground, $eff)
+                        }
+                        
+                        if ($Script:LastNetworkAIMode) {
+                            $sharedKnowledge.WriteFromNetwork($currentForeground, $Script:LastNetworkAIMode, $netDownloadSpeed, $netUploadSpeed)
+                        }
+                    } catch {}
+                }
+                
+                # NOWA STRUKTURA: modelScores zamiast modelDecisions (tryby)
+                # Każdy silnik AI daje score 0-100, nie tryb
+                $modelScores = @{
+                    "Brain" = $aiDecision.Score
+                    "QLearning" = $qScore
+                    "Bandit" = $banditScore
+                    "Genetic" = $geneticScore
+                    "Context" = $contextScore
+                    "Thermal" = $thermalScore
+                    "Pattern" = $patternScore
+                    "GPU" = $gpuScore
+                    "Predictor" = $predictorScore
+                    "Chain" = $chainScore
+                    "Trend" = $trendScore
+                    "Tuner" = $tunerScore
+                    "Energy" = $energyScore
+                    "Prophet" = $prophetScore
+                    "Anomaly" = $anomalyScore
+                    "Activity" = $activityScore
+                    "IOMonitor" = $ioScore
+                    "NetworkAI" = $networkScore
+                    "PowerBoost" = $powerBoostScore
+                }
+                
+                # v43.14: SharedAppKnowledge - INTELIGENCJA per-app (najwyższa waga!)
+                # Zbiera wiedzę WSZYSTKICH silników o tej aplikacji i daje score
+                $appIntel = $null
+                if ($sharedKnowledge -and $currentForeground -and $currentForeground -ne "Desktop") {
+                    try {
+                        $appIntel = $sharedKnowledge.GetAppIntelligence($currentForeground, $phaseDetector.CurrentPhase)
+                        if ($appIntel -and $appIntel.Confidence -gt 0.2) {
+                            $modelScores["AppIntel"] = $appIntel.Score
+                        }
+                    } catch {}
+                }
+                $modelWeights = @{
+                    "Context" = $contextWeight  # Dynamiczne wagi
+                    "PowerBoost" = if ($Script:PowerBoost) { 1.5 } else { 0.5 }  # V38: Higher weight when enabled
+                }
+                # #
+                #  HOT-RELOAD: ForceMode z konfiguratora
+                # #
+                # Sprawdz czy I/O moze nadpisac ForceMode
+                $currentIOTotal = $diskReadMB + $diskWriteMB
+                $ioCanOverride = $Script:IOOverrideForceMode -and $currentIOTotal -gt $Script:IOTurboThreshold
+                $forceModeValue = $Script:ForceModeFromConfig
+                $hasForceMode = $forceModeValue -and $forceModeValue -ne ""
+                $forceModeUpper = if ($hasForceMode) { $forceModeValue.ToUpper() } else { "" }
+                $forceModeAllowed = $hasForceMode -and -not $ioCanOverride
+                if ($forceModeAllowed -and $forceModeUpper -eq "EXTREME") {
+                    $quietSeconds = if ($Script:LastIOThresholdEvent -eq [DateTime]::MinValue) {
+                        [double]::PositiveInfinity
+                    } else {
+                        ([DateTime]::Now - $Script:LastIOThresholdEvent).TotalSeconds
+                    }
+                    if ($Script:IOBoostActive -or $quietSeconds -lt $Script:IOExtremeGraceSeconds) {
+                        $forceModeAllowed = $false
+                        if ($Global:DebugMode) {
+                            $quietInfo = if ($quietSeconds -eq [double]::PositiveInfinity) { "?" } else { "${([Math]::Round($quietSeconds,1))}s" }
+                            Write-Log " ForceMode=Extreme wstrzymany po I/O (cisza: $quietInfo)" "INFO"
+                        }
+                    }
+                }
+                if ($forceModeAllowed) {
+                    if ($forceModeUpper -eq "SILENT LOCK") {
+                        $currentState = "Silent"
+                        $aiDecision.Mode = "Silent"
+                        $aiDecision.Reason = "ForceMode: Silent Lock (total)"
+                        $Script:SilentLockMode = $true
+                    }
+                    # Extreme = staly Turbo (max wydajnosc)
+                    elseif ($forceModeUpper -eq "EXTREME") {
+                        $currentState = "Turbo"
+                        $aiDecision.Mode = "Turbo"
+                        $aiDecision.Reason = "ForceMode: Extreme (Turbo)"
+                    } else {
+                        $currentState = $Script:ForceModeFromConfig
+                        $aiDecision.Mode = $Script:ForceModeFromConfig
+                        $aiDecision.Reason = "ForceMode: $($Script:ForceModeFromConfig)"
+                    }
+                    $aiDecision.Score = 50
+                } elseif ($ioCanOverride) {
+                    # - I/O OVERRIDE: Wysoki I/O nadpisuje ForceMode!
+                    $currentState = "Turbo"
+                    $aiDecision.Mode = "Turbo"
+                    $aiDecision.Reason = "- I/O Override: $([int]$currentIOTotal) MB/s > $($Script:IOTurboThreshold) MB/s"
+                    $aiDecision.Score = 90
+                } else {
+                # ═══════════════════════════════════════════════════════════════════════════
+                # V42 SIMPLE: PROSTA HIERARCHIA DECYZJI + STABILNOŚĆ
+                # FIX: Prophet SUGERUJE, nie WYMUSZA - rzeczywiste CPU ma priorytet
+                # ═══════════════════════════════════════════════════════════════════════════
+                
+                $gpuLoad = if ($currentMetrics.GPU) { $currentMetrics.GPU.Load } else { 0 }
+                $ioTotal = $diskReadMB + $diskWriteMB
+                
+                # Inicjalizacja zmiennej Script jeśli nie istnieje
+                if (-not $Script:V42_PrevMode) { $Script:V42_PrevMode = "Balanced" }
+                if (-not $Script:LastHardLockApp) { $Script:LastHardLockApp = $null }
+                
+                # STABILNOŚĆ: Różne progi w zależności od obecnego trybu (hysteresis)
+                # v43.10: Używaj wartości z Config.json (slidery w Settings) zamiast hardcoded!
+                $silentExitThreshold = if ($null -ne $Script:BalancedThreshold) { $Script:BalancedThreshold } else { 35 }
+                $turboEntryThreshold = if ($null -ne $Script:TurboThreshold) { $Script:TurboThreshold } else { 70 }
+                $turboExitThreshold = [Math]::Max(30, $turboEntryThreshold - 30)  # Hysteresis: 30% niżej niż entry
+                
+                $prevMode = $Script:V42_PrevMode
+                $newMode = "Balanced"
+                $reason = "DEFAULT"
+                
+                # ═══════════════════════════════════════════════════════════════════════════
+                # 0. HARDLOCK - ABSOLUTNY PRIORYTET (przed GPU-BOUND, THERMAL, HIGH, wszystkim)
+                # Jedyny wyjątek: THERMAL >95°C jako safety override
+                # ═══════════════════════════════════════════════════════════════════════════
+                $hardLockBlocked = $false
+                if ($currentForeground -and $currentForeground -notin @("Desktop", "explorer", "Explorer", "ShellExperienceHost", "StartMenuExperienceHost", "SearchHost", "Widgets")) {
+                    $appLower = $currentForeground.ToLower() -replace '\.exe$', ''
+                    $rawProcessName = ""
+                    try {
+                        $hwnd = [Win32]::GetForegroundWindow()
+                        if ($hwnd -ne [IntPtr]::Zero) {
+                            $pid2 = 0; [Win32]::GetWindowThreadProcessId($hwnd, [ref]$pid2) | Out-Null
+                            if ($pid2 -gt 0) { $rawProcessName = (Get-Process -Id $pid2 -ErrorAction SilentlyContinue).ProcessName.ToLower() -replace '\.exe$', '' }
+                        }
+                    } catch {}
+                    foreach ($key in $Script:AppCategoryPreferences.Keys) {
+                        $keyLower = $key.ToLower() -replace '\.exe$', ''
+                        $matchFound = ($keyLower -eq $rawProcessName) -or
+                                  ($keyLower -eq $appLower) -or
+                                  ($appLower -like "*$keyLower*") -or
+                                  ($keyLower -like "*$appLower*") -or
+                                  ($keyLower -eq "google chrome" -and $appLower -eq "chrome") -or
+                                  ($keyLower -eq "chrome" -and $appLower -eq "chrome")
+                        if ($matchFound) {
+                            $pref = $Script:AppCategoryPreferences[$key]
+                            if ($pref.HardLock) {
+                                $hardLockBias = $pref.Bias
+                                $hardLockMode = if ($hardLockBias -le 0.2) { "Silent" } 
+                                               elseif ($hardLockBias -ge 0.8) { "Turbo" } 
+                                               else { "Balanced" }
+                                $newMode = $hardLockMode
+                                $reason = "HARDLOCK: $currentForeground=$hardLockMode key=$key bias=$([Math]::Round($hardLockBias,2))"
+                                $hardLockBlocked = $true
+                                # Safety: THERMAL >95°C override HardLock (ochrona sprzętu)
+                                if ($currentMetrics.Temp -gt 95 -and $hardLockMode -ne "Silent") {
+                                    $newMode = "Silent"
+                                    $reason = "THERMAL-SAFETY: $([int]$currentMetrics.Temp)C overrides HARDLOCK ($hardLockMode)"
+                                }
+                                # v43.14 FIX: I/O LOADING NIE overriduje HardLock!
+                                # HardLock = user WYMUSZA tryb = ABSOLUTNY priorytet
+                                # Jedyny wyjątek: thermal safety >95°C
+                                break
+                            }
+                        }
+                    }
+                }
+                
+                # v42.5 FIX: Flaga czy GPU-BOUND obsłużone (żeby nie duplikować Detect())
+                $gpuBoundHandled = $false
+                $gpuBoundResult = $null
+                
+                # v42.5: Sprawdź GPU-BOUND gdy IsConfident - ale NIE gdy HardLock aktywne
+                if (-not $hardLockBlocked -and $gpuBound -and $gpuBound.IsConfident) {
+                    try {
+                        $gpuType = "dGPU"
+                        if ($Script:HasiGPU -and -not $Script:HasdGPU) {
+                            $gpuType = "iGPU"
+                        } elseif ($Script:HasiGPU -and $Script:HasdGPU) {
+                            $gpuType = if ($gpuLoad -gt 50) { "dGPU" } else { "iGPU" }
+                        }
+                        
+                        # v43.12: Przekaż Phase do GPU-BOUND (phase-aware exit delay)
+                        $gpuBound.CurrentPhase = $phaseDetector.CurrentPhase
+                        # Wywołaj Detect() żeby sprawdzić EXIT condition
+                        $gpuBoundResult = $gpuBound.Detect($currentMetrics.CPU, $gpuLoad, ($Script:HasiGPU -or $Script:HasdGPU), $gpuType)
+                        $gpuBoundHandled = $true
+                        
+                        # Ustaw mode jeśli nadal GPU-BOUND
+                        if ($gpuBoundResult.IsGPUBound) {
+                            $newMode = $gpuBoundResult.SuggestedMode
+                            $reason = $gpuBoundResult.Reason
+                        }
+                    }
+                    catch {
+                        Write-ErrorLog -Component "GPU-BOUND" -ErrorMessage "PRE-CHECK GPU-Bound failed" -Details $_.Exception.Message
+                        $gpuBoundHandled = $false
+                    }
+                }
+                
+                # ═══════════════════════════════════════════════════════════════════════════
+                # HIERARCHIA DECYZJI - RZECZYWISTE METRYKI MAJĄ PRIORYTET!
+                # FIX v42.5: Skipuj hierarchię jeśli GPU-BOUND aktywne (obsłużone w PRE-CHECK)
+                # ═══════════════════════════════════════════════════════════════════════════
+                
+                # Jeśli HardLock wymusza tryb - skipuj CAŁĄ hierarchię (THERMAL, HIGH, itd.)
+                if (-not $hardLockBlocked) {
+                    # 1. THERMAL (>90°C) - ZAWSZE (nawet gdy GPU-BOUND!)
+                    if ($currentMetrics.Temp -gt 90) {
+                        $newMode = "Silent"
+                        $reason = "THERMAL: $([int]$currentMetrics.Temp)C"
+                    }
+                    # 2. LOADING (I/O + aktywność) - INTELIGENTNE: Turbo tylko gdy naprawdę potrzeba
+                    # v43.10: Balanced dla umiarkowanego I/O, Turbo tylko dla ciężkiego
+                    elseif ($ioTotal -gt 80 -and ($currentMetrics.CPU -gt 25 -or $gpuLoad -gt 25)) {
+                        # Ciężkie I/O (>150MB/s) + wysokie CPU → Turbo
+                        # Umiarkowane I/O (80-150MB/s) → Balanced (szybko ale cicho)
+                        if ($ioTotal -gt 150 -and $currentMetrics.CPU -gt 50) {
+                            $newMode = "Turbo"
+                            $reason = "HEAVY LOADING: IO=$([int]$ioTotal)MB CPU=$([int]$currentMetrics.CPU)%"
+                        } else {
+                            $newMode = "Balanced"
+                            $reason = "LOADING: IO=$([int]$ioTotal)MB (Balanced for quiet)"
+                        }
+                    }
+                    # 2.5 GPU-BOUND MAINTAIN - jeśli PRE-CHECK ustawił mode, skipuj resztę
+                    elseif ($gpuBoundHandled -and $gpuBoundResult -and $gpuBoundResult.IsGPUBound) {
+                        # Mode już ustawiony w PRE-CHECK
+                    }
+                    # 3. HIGH CPU LOAD (>TurboThreshold%) - TYLKO CPU decyduje o Turbo!
+                    # v43.13: GPU load NIE jest powodem do Turbo CPU. GPU pracuje niezależnie.
+                    # Jeśli GPU=95% a CPU=30% → CPU nie potrzebuje Turbo, AICoordinator zdecyduje.
+                    elseif ($currentMetrics.CPU -gt $turboEntryThreshold) {
+                        # Nawet przy wysokim CPU - sprawdź czy to GPU-BOUND scenario
+                        $isGPUBoundScenario = (($currentMetrics.CPU -lt 50 -and $gpuLoad -gt 75) -or ($gpuBound -and $gpuBound.IsConfident))
+                    
+                    if ($isGPUBoundScenario -and $gpuBound) {
+                        try {
+                            $gpuType = "dGPU"
+                            if ($Script:HasiGPU -and -not $Script:HasdGPU) {
+                                $gpuType = "iGPU"
+                            } elseif ($Script:HasiGPU -and $Script:HasdGPU) {
+                                $gpuType = if ($gpuLoad -gt 50) { "dGPU" } else { "iGPU" }
+                            }
+                            
+                            $gpuBound.CurrentPhase = $phaseDetector.CurrentPhase
+                            $gpuBoundResult = $gpuBound.Detect($currentMetrics.CPU, $gpuLoad, ($Script:HasiGPU -or $Script:HasdGPU), $gpuType)
+                            
+                            if ($gpuBoundResult.IsGPUBound) {
+                                $newMode = $gpuBoundResult.SuggestedMode
+                                $reason = $gpuBoundResult.Reason
+                                if ($gpuBoundResult.Confidence -ge 100) {
+                                    Add-Log "GPU-BOUND detected: Reducing CPU TDP by $($gpuBoundResult.CPUReduction)W for better GPU thermal headroom"
+                                }
+                            } else {
+                                $newMode = "Turbo"
+                                $reason = "HIGH: CPU=$([int]$currentMetrics.CPU)%"
+                            }
+                        }
+                        catch {
+                            Write-ErrorLog -Component "GPU-BOUND" -ErrorMessage "GPU-Bound detection failed" -Details $_.Exception.Message
+                            $newMode = "Turbo"
+                            $reason = "HIGH: CPU=$([int]$currentMetrics.CPU)%"
+                        }
+                    } else {
+                        # v43.14 FIX: Sprawdź czy GPU-BOUND cooldown aktywny LUB GPU nadal wysoki
+                        $gpuBoundCooldownActive = $false
+                        if ($gpuBound -and $gpuBound.LastExitTime -ne [datetime]::MinValue) {
+                            $sinceBoundExit = ((Get-Date) - $gpuBound.LastExitTime).TotalSeconds
+                            if ($sinceBoundExit -lt $gpuBound.ReEntryCooldownSeconds) { $gpuBoundCooldownActive = $true }
+                        }
+                        if ($gpuBoundCooldownActive -or $gpuLoad -gt 75) {
+                            # GPU-BOUND cooldown lub GPU nadal wysoki - Balanced zamiast Turbo
+                            $newMode = "Balanced"
+                            $reason = "HIGH+GPU-PROTECT: CPU=$([int]$currentMetrics.CPU)% GPU=$([int]$gpuLoad)% (GPU active, no Turbo)"
+                        } else {
+                            # Normalny HIGH CPU - Turbo uzasadniony
+                            $newMode = "Turbo"
+                            $reason = "HIGH: CPU=$([int]$currentMetrics.CPU)%"
+                        }
+                    }
+                }
+                # 4. UTRZYMAJ TURBO jeśli już w Turbo i CPU > exit threshold
+                # v43.14 FIX: NIE utrzymuj Turbo gdy GPU>75% (GPU-bound → Balanced wystarczy)
+                elseif ($prevMode -eq "Turbo" -and $currentMetrics.CPU -gt $turboExitThreshold) {
+                        if ($gpuLoad -gt 75) {
+                            $newMode = "Balanced"
+                            $reason = "HOLD→BALANCED: CPU=$([int]$currentMetrics.CPU)% GPU=$([int]$gpuLoad)% (GPU active)"
+                        } else {
+                            $newMode = "Turbo"
+                            $reason = "HOLD TURBO: CPU=$([int]$currentMetrics.CPU)%"
+                        }
+                    }
+                    # 5. UTRZYMAJ SILENT jeśli już w Silent i CPU < exit threshold
+                    # v43.13: TYLKO CPU decyduje (GPU może być wysoki w Silent - to normalne)
+                    elseif ($prevMode -eq "Silent" -and $currentMetrics.CPU -lt $silentExitThreshold) {
+                        $newMode = "Silent"
+                        $reason = "HOLD SILENT: CPU=$([int]$currentMetrics.CPU)%"
+                    }
+                    # ═══════════════════════════════════════════════════════════════
+                    # 6. AI COORDINATOR - WAŻONE GŁOSOWANIE WSZYSTKICH SILNIKÓW
+                    # Zamiast hardcoded hierarchii, AICoordinator waży 18 silników
+                    # i podejmuje decyzję na podstawie ich zbiorowej mądrości
+                    # ═══════════════════════════════════════════════════════════════
+                    else {
+                        try {
+                            $coordResult = $aiCoordinator.DecideMode(
+                                $modelScores,
+                                $currentMetrics.CPU,
+                                $gpuLoad,
+                                $currentMetrics.Temp,
+                                $prevMode,
+                                $qAction,
+                                $currentForeground,
+                                $phaseDetector.CurrentPhase
+                            )
+                            $newMode = $coordResult.Mode
+                            $reason = $coordResult.Reason
+                        } catch {
+                            # Fallback przy błędzie AICoordinator + LOG
+                            try { Add-Content -Path "$Script:ConfigDir\ErrorLog.txt" -Value "[AI-COORD ERROR] $($_.Exception.Message)" -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+                            if ($currentMetrics.CPU -gt 65) { $newMode = "Turbo"; $reason = "FALLBACK-HIGH" }
+                            elseif ($currentMetrics.CPU -lt 20) { $newMode = "Silent"; $reason = "FALLBACK-LOW" }
+                            else { $newMode = "Balanced"; $reason = "FALLBACK-ERR" }
+                        }
+                    }
+                }  # KONIEC BLOKU if (-not $hardLockBlocked)
+                
+                # ═══════════════════════════════════════════════════════════════
+                # MODE STABILITY SYSTEM - anty-pingpong debounce
+                # Zapobiega: Silent→Balanced→Turbo→Silent co 1-2 sekundy
+                # Typowe przy przeglądaniu stron (CPU skacze 15-40%)
+                # ═══════════════════════════════════════════════════════════════
+                if (-not $Script:ModeHoldStart) { $Script:ModeHoldStart = [DateTime]::UtcNow }
+                if (-not $Script:ModeHoldConfirmCount) { $Script:ModeHoldConfirmCount = 0 }
+                if (-not $Script:ModeHoldCandidate) { $Script:ModeHoldCandidate = $null }
+                
+                $modeHoldSeconds = ([DateTime]::UtcNow - $Script:ModeHoldStart).TotalSeconds
+                $modeMinHoldTime = 6  # Minimum sekund w trybie zanim zmiana
+                
+                if ($newMode -ne $prevMode) {
+                    # Wyjątki - natychmiastowa zmiana (bez debounce):
+                    $instantChange = ($reason -match "^THERMAL|^HARDLOCK|^GAMING") -or
+                                     ($newMode -eq "Silent" -and $prevMode -eq "Turbo" -and $currentMetrics.CPU -lt 15) -or
+                                     ($newMode -eq "Turbo" -and $currentMetrics.CPU -gt 85)
+                    
+                    if ($instantChange) {
+                        # Krytyczne - zmień natychmiast
+                        $Script:ModeHoldStart = [DateTime]::UtcNow
+                        $Script:ModeHoldConfirmCount = 0
+                        $Script:ModeHoldCandidate = $null
+                    }
+                    elseif ($modeHoldSeconds -lt $modeMinHoldTime) {
+                        # Za wcześnie na zmianę - trzymaj obecny tryb
+                        # Ale licz potwierdzenia (jeśli ten sam kandydat wraca)
+                        if ($Script:ModeHoldCandidate -eq $newMode) {
+                            $Script:ModeHoldConfirmCount++
+                        } else {
+                            $Script:ModeHoldCandidate = $newMode
+                            $Script:ModeHoldConfirmCount = 1
+                        }
+                        
+                        # Jeśli 4+ potwierdzenia tego samego trybu - pozwól zmienić wcześniej
+                        if ($Script:ModeHoldConfirmCount -ge 4) {
+                            $Script:ModeHoldStart = [DateTime]::UtcNow
+                            $Script:ModeHoldConfirmCount = 0
+                            $Script:ModeHoldCandidate = $null
+                            $reason = "$reason [CONFIRMED x4]"
+                        } else {
+                            $newMode = $prevMode  # BLOKUJ zmianę
+                            $reason = "HOLD($([int]$modeHoldSeconds)s/$($modeMinHoldTime)s): wanted $($Script:ModeHoldCandidate) x$($Script:ModeHoldConfirmCount)"
+                        }
+                    }
+                    else {
+                        # Minął hold time - pozwól zmienić
+                        $Script:ModeHoldStart = [DateTime]::UtcNow
+                        $Script:ModeHoldConfirmCount = 0
+                        $Script:ModeHoldCandidate = $null
+                    }
+                }
+                # ═══════════════════════════════════════════════════════════════
+                
+                # v43.14: GLOBAL MINIMUM HOLD TIME - zapobiega ping-pong
+                # Po zmianie trybu, TRZYMAJ minimum 12s zanim następna zmiana
+                # WYJĄTKI: HIGH CPU, THERMAL, GPU-BOUND, HARDLOCK (safety ma priorytet)
+                if (-not $Script:LastModeChangeTime) { $Script:LastModeChangeTime = [datetime]::MinValue }
+                if ($newMode -ne $prevMode) {
+                    $holdElapsed = ((Get-Date) - $Script:LastModeChangeTime).TotalSeconds
+                    $isSafetyOverride = ($reason -match "THERMAL|HIGH|HARDLOCK|GPU-BOUND|IO-LOADING|HEAVY LOADING|PAUSED")
+                    if ($holdElapsed -lt 12 -and -not $isSafetyOverride) {
+                        # Za wcześnie - zostań przy obecnym trybie
+                        $newMode = $prevMode
+                        $reason = "HOLD-MIN-TIME: $([int]$holdElapsed)/12s (blocked: $reason)"
+                    } else {
+                        $Script:LastModeChangeTime = Get-Date
+                    }
+                }
+                
+                $aiDecision.Mode = $newMode
+                $aiDecision.Reason = $reason
+                $aiDecision.Score = switch ($newMode) { "Turbo"{85} "Silent"{25} default{50} }
+                
+                # Log tylko przy ZMIANIE trybu
+                if ($newMode -ne $prevMode) { 
+                    Add-Log "V42: $prevMode -> $newMode | $reason"
+                    # DEBUG: Log mode changes
+                    Write-DebugLog "MODE CHANGE: $prevMode -> $newMode | Reason: $reason | CPU=$([int]$currentMetrics.CPU)%, GPU=$([int]$gpuLoad)% | Phase=$($phaseDetector.CurrentPhase) Suggest=$($phaseDetector.GetRecommendedMode())" "MODE"
+                }
+                
+                # Zapisz dla następnej iteracji
+                $Script:V42_PrevMode = $newMode
+                
+                $currentState = $newMode
+                
+                # v42.6 FIX BUG #3: Energy Tracker - zapisuj efektywność decyzji
+                if ($energyTracker -and (Is-EnergyEnabled)) {
+                    $energyTracker.Record($newMode, $currentMetrics.CPU, $currentMetrics.Temp, $isUserActive)
+                }
+                
+                # v42.6 FIX BUG #4: SelfTuner - zapisuj decyzje do późniejszej ewaluacji
+                if ($selfTuner -and (Is-SelfTunerEnabled)) {
+                    $selfTuner.RecordDecision($newMode, $currentMetrics.CPU, $currentMetrics.Temp, $aiDecision.Score, $ioTotal)
+                }
+                
+                # v40.2 FIX: Bandit feedback - ocen czy wybrany arm był trafny
+                if ($bandit -and (Is-BanditEnabled) -and $banditAction) {
+                    # Success = tryb bandita zgadza się z finalną decyzją LUB był odpowiedni dla CPU
+                    $banditSuccess = ($banditAction -eq $newMode) -or
+                        ($banditAction -eq "Turbo" -and $currentMetrics.CPU -gt 60) -or
+                        ($banditAction -eq "Silent" -and $currentMetrics.CPU -lt 25) -or
+                        ($banditAction -eq "Balanced" -and $currentMetrics.CPU -ge 25 -and $currentMetrics.CPU -le 60)
+                    $bandit.Update($banditAction, $banditSuccess)
+                }
+                
+                # v40.2 FIX: Ensemble feedback - ocen które modele trafiły z finalną decyzją
+                if ($ensemble -and (Is-EnsembleEnabled) -and $modelScores) {
+                    foreach ($modelKey in $modelScores.Keys) {
+                        $modelMode = if ($modelScores[$modelKey] -gt 70) { "Turbo" } elseif ($modelScores[$modelKey] -lt 35) { "Silent" } else { "Balanced" }
+                        $ensemble.UpdateAccuracy($modelKey, ($modelMode -eq $newMode))
+                    }
+                }
+                }
+            } else {
+                $currentState = $manualMode
+                $aiDecision = @{ 
+                    Score = 0
+                    Mode = $manualMode
+                    Reason = "Manual"
+                    Trend = 0 
+                }
+            }
+            # #
+            # #
+            # v43.14: HardLock flag → wyłącza dynamiczne skalowanie (strict Min/Max)
+            $isHardLocked = $hardLockBlocked -or $Script:SilentLockMode -or $Script:BalancedLockMode -or ($Script:UserForcedMode -and $Script:UserForcedMode -ne "")
+            # 1. USER FORCED MODE - uzytkownik wybral tryb, AI sie uczy ale nie zmienia trybu
+            if ($Script:UserForcedMode -and $Script:UserForcedMode -ne "") {
+                $aiSuggestion = $currentState  # Zapisz co AI sugerowalo
+                $currentState = $Script:UserForcedMode
+                $aiDecision.Reason = "User locked: $($Script:UserForcedMode) (AI suggests: $aiSuggestion)"
+                Set-PowerMode -Mode $currentState -CurrentCPU $currentMetrics.CPU -HardLock:$isHardLocked
+            }
+            # 2. SILENT LOCK - calkowita cisza, AI wylaczone
+            elseif ($Script:SilentLockMode) {
+                $currentState = "Silent"
+                $aiDecision.Reason = "Silent Lock (enforced)"
+                Set-PowerMode -Mode "Silent" -CurrentCPU $currentMetrics.CPU -HardLock
+            }
+            # 3. BALANCED LOCK - AI wylaczone, zawsze Balanced
+            elseif ($Script:BalancedLockMode) {
+                $currentState = "Balanced"
+                $aiDecision.Reason = "Balanced Lock (enforced)"
+                Set-PowerMode -Mode "Balanced" -CurrentCPU $currentMetrics.CPU -HardLock
+            }
+            # 4. SILENT MODE (legacy) - AI sugeruje ale zostajemy w Silent
+            elseif ($Script:SilentModeActive -and $currentState -ne "Silent") {
+                $currentApp = if ($watcher.BoostProcessName) { $watcher.BoostProcessName } else { $currentActiveApp }
+                if ($currentApp -and $Script:UserApprovedBoosts.Contains($currentApp)) {
+                    Set-PowerMode -Mode $currentState -CurrentCPU $currentMetrics.CPU
+                } else {
+                    $aiDecision.Reason = "AI suggests: $currentState (Silent enforced)"
+                    $currentState = "Silent"
+                    Set-PowerMode -Mode "Silent" -CurrentCPU $currentMetrics.CPU -HardLock
+                }
+            }
+            # 5. PELNE AI - AI decyduje o trybie
+            else {
+                Set-PowerMode -Mode $currentState -CurrentCPU $currentMetrics.CPU -HardLock:$hardLockBlocked
+            }
+            $Script:BalancedLockMode = $false
+            
+            # v43.14: FAN CONTROLLER - szybkie zbijanie RPM przy Silent/Paused
+            if ($fanController -and $fanController.Enabled) {
+                try {
+                    $fanResult = $fanController.Update($currentMetrics.Temp, $currentState, $phaseDetector.CurrentPhase)
+                    if ($fanResult.Action -ne "none" -and $Global:DebugMode) {
+                        Add-Log "FAN: $($fanResult.Action) RPM=$($fanResult.RPM) $($fanResult.Reason)" -Debug
+                    }
+                } catch { }
+            }
+            
+            Render-UI -Metrics $currentMetrics `
+                     -State $currentState `
+                     -AIDecision $aiDecision `
+                     -Watcher $watcher `
+                     -Brain $brain `
+                     -Prophet $prophet `
+                     -TempSource $metrics.TempSource `
+                     -PredictedLoad $predictedLoad `
+                     -AnomalyAlert $anomalyAlert `
+                     -PriorityCount $priorityManager.GetBoostedCount() `
+                     -SelfTunerStatus $selfTuner.GetStatus() `
+                     -ChainPrediction $chainPrediction `
+                     -TurboThreshold $selfTuner.GetTurboThreshold() `
+                     -BalancedThreshold $selfTuner.GetBalancedThreshold() `
+                     -ActivityStatus (Get-UserActivityStatus) `
+                     -ContextStatus $contextDetector.GetStatus() `
+                     -ThermalStatus $thermalPredictor.GetStatus() `
+                     -UserPatternStatus $userPatterns.GetStatus() `
+                     -TimerStatus $adaptiveTimer.GetStatus() `
+                     -GPUInfo $currentMetrics.GPU `
+                     -VRMTemp $(if ($currentMetrics.VRM) { $currentMetrics.VRM.Temp } else { 0 }) `
+                     -CPUPower $currentMetrics.CPUPower `
+                     -ExplainerReason $aiDecision.Reason
+            $iteration++
+            
+            # DEBUG: Log metrics snapshot every 100 iterations (~3-4 minutes)
+            if ($Script:DebugLogEnabled -and $iteration % 100 -eq 0) {
+                $gpuLoadCurrent = if ($currentMetrics.GPU) { [int]$currentMetrics.GPU.Load } else { 0 }
+                Write-DebugLog "METRICS SNAPSHOT [Iter $iteration]: CPU=$([int]$currentMetrics.CPU)%, GPU=$gpuLoadCurrent%, Temp=$([int]$currentMetrics.Temp)C, Mode=$currentState, App=$currentForeground, Phase=$($phaseDetector.CurrentPhase)" "METRICS"
+            }
+            
+            try {
+                $storageManager.AutoBackup()
+            } catch { }
+            # - MEGA DEBUG: Potwierdzenie ze petla dziala (ZAWSZE)
+            if ($iteration -eq 1 -or $iteration % 10 -eq 0) {
+            }
+            # - ULTRA: Update Web Dashboard data
+            if ($webDashboard.Running -and $iteration % 3 -eq 0) {
+                $dashMetrics = @{
+                    CPU = [int]$currentMetrics.CPU
+                    Temp = [int]$currentMetrics.Temp
+                    Mode = $currentState
+                    Activity = Get-UserActivityStatus
+                    Context = $currentContext
+                    Iteration = ($qLearning.TotalUpdates + $bandit.TotalPulls + $genetic.Generation + $selfTuner.DecisionHistory.Count + $chainPredictor.TotalPredictions + $Prophet.GetAppCount() + $Brain.TotalDecisions)
+                    CPUHistory = $cpuHistory.ToArray()
+                    TempHistory = $tempHistory.ToArray()
+                    RAM = $ramUsedPercent
+                    DiskIO = [Math]::Round(($diskReadSpeed + $diskWriteSpeed) / 1MB, 1)
+                    DiskRead = [Math]::Round($diskReadSpeed / 1MB, 1)
+                    DiskWrite = [Math]::Round($diskWriteSpeed / 1MB, 1)
+                    IOBoost = $Script:IOBoostActive
+                    NetDL = [int64]$smoothNetDL
+                    NetUL = [int64]$smoothNetUL
+                    CpuMHz = $cpuCurrentMHz
+                    AI = $aiStatus
+                }
+                $dashAI = @{
+                    Brain = "$($brain.GetCount())w"
+                    QLearning = $qLearning.GetStatus()
+                    Bandit = $bandit.GetStatus()
+                    Genetic = $genetic.GetStatus()
+                    Ensemble = $ensemble.GetStatus()
+                    Energy = $energyTracker.GetStatus()
+                    ModeSwitches = $Global:ModeChangeCount
+                    AppsDetected = (Get-Process | Where-Object { $_.MainWindowTitle } | Measure-Object).Count
+                    Runtime = [math]::Round($stopwatch.Elapsed.TotalMinutes, 1)
+                    CPUType = $Script:CPUType
+                    CPUName = $Script:CPUName
+                    Engines = $Script:AIEngines
+                }
+                # Polacz metrics i AI w jeden obiekt
+                $combinedDashData = $dashMetrics.Clone()
+                foreach ($key in $dashAI.Keys) {
+                    $combinedDashData[$key] = $dashAI[$key]
+                }
+                try {
+                    [void]$webDashboard.UpdateData($combinedDashData)
+                } catch {
+                    # Ignore dashboard errors to prevent freezing
+                }
+            }
+            # - Update Desktop Widget (kazda iteracja) - ZAWSZE zapisuj dane
+            try {
+                # DEBUG: Sprawdz czy ten block w ogole sie wykonuje
+                if ($iteration % 20 -eq 0) {
+                }
+                $aiStatus = if ($Global:AI_Active) { "ON" } else { "OFF" }
+                $activityStatus = if ($isUserActive) { "Active" } else { "Idle" }
+                # Uzyj CPU z LHM jesli dostepne, inaczej standardowe
+                $cpuToShow = if ($cpuLoadLHM -gt 0) { $cpuLoadLHM } else { [int]$currentMetrics.CPU }
+                try {
+                    # Ensure DecisionHistory is initialized
+                    if (-not $Script:DecisionHistory) {
+                        $Script:DecisionHistory = [System.Collections.Generic.List[hashtable]]::new()
+                    }
+                    # DEBUG: Potwierdzenie ze blok sie wykonuje (log co 10 iteracji)
+                    if ($iteration % 10 -eq 0) {
+                    }
+                    # Pobierz Prophet prediction jesli dostepne
+                    # DYNAMICZNA PREDYKCJA: Przewiduj przyszłe obciążenie na podstawie trendu + wiedzy Prophet
+                    $prophetPrediction = 0
+                    $prophetDebug = "N/A"
+                    $predictionSteps = 8  # 8 iteracji = ~8-16 sekund do przodu
+                    
+                    # Pobierz dynamiczną predykcję z Forecaster
+                    $basePrediction = $forecaster.Predict($predictionSteps)
+                    $cpuTrend = $forecaster.Trend()
+                    
+                    # Wzmocnij trend (momentum) - nagły wzrost/spadek powinien być widoczny
+                    if ([Math]::Abs($cpuTrend) -gt 1.5) {
+                        $momentum = $cpuTrend * 0.3 * $predictionSteps
+                        $basePrediction += $momentum
+                    }
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # MULTI-SIGNAL PREDICTION: Zbierz sygnały z WSZYSTKICH silników
+                    # ═══════════════════════════════════════════════════════════════
+                    $signalBoost = 0.0  # Dodatkowy wpływ na predykcję (-30 do +30)
+                    $signalDebug = @()
+                    
+                    # SYGNAŁ 1: RAM Spike Detection → CPU spike koreluje z RAM spike
+                    if ($ramAnalyzer -and $ramAnalyzer.SpikeDetected) {
+                        $signalBoost += 12  # RAM spike = CPU zaraz wzrośnie
+                        $signalDebug += "RAMSpike+12"
+                    }
+                    if ($ramAnalyzer -and $ramAnalyzer.TrendDetected) {
+                        $signalBoost += 6  # Trend wzrostowy RAM = CPU też rośnie
+                        $signalDebug += "RAMTrend+6"
+                    }
+                    
+                    # SYGNAŁ 2: ProBalance Throttled → ciężkie procesy aktywne = CPU wysoko
+                    if ($proBalance -and $proBalance.ThrottledProcesses.Count -gt 0) {
+                        $throttleBoost = [Math]::Min(15, $proBalance.ThrottledProcesses.Count * 5)
+                        $signalBoost += $throttleBoost
+                        $signalDebug += "Throttle+$throttleBoost($($proBalance.ThrottledProcesses.Count))"
+                    }
+                    
+                    # SYGNAŁ 3: Anomaly Detection → anomalia = CPU utrzyma się wysoko
+                    if (-not [string]::IsNullOrWhiteSpace($anomalyAlert)) {
+                        if ($anomalyAlert -eq "CRYPTO_MINER") {
+                            $signalBoost += 25  # Miner = CPU 100% non-stop
+                            $signalDebug += "Miner+25"
+                        } else {
+                            $signalBoost += 10  # Inna anomalia
+                            $signalDebug += "Anomaly+10"
+                        }
+                    }
+                    
+                    # SYGNAŁ 4: ChainPredictor → wie jaka NASTĘPNA app będzie
+                    if ($chainPredictor -and $chainPredictor.PredictionConfidence -gt 0.3 -and $prophet) {
+                        $nextApp = $chainPredictor.CurrentPrediction
+                        if ($nextApp -and $prophet.Apps.ContainsKey($nextApp)) {
+                            $nextAppData = $prophet.Apps[$nextApp]
+                            $nextAvgCPU = if ($nextAppData.AvgCPU) { [int]$nextAppData.AvgCPU } else { 0 }
+                            # Jeśli następna appka jest cięższa niż aktualna → boost up
+                            if ($nextAvgCPU -gt $cpuToShow + 10) {
+                                $chainBoost = [Math]::Min(15, [int](($nextAvgCPU - $cpuToShow) * $chainPredictor.PredictionConfidence * 0.5))
+                                $signalBoost += $chainBoost
+                                $signalDebug += "Chain+$chainBoost($nextApp)"
+                            }
+                            # Jeśli następna jest lżejsza → reduce
+                            elseif ($nextAvgCPU -lt $cpuToShow - 15) {
+                                $chainDrop = [Math]::Max(-10, [int](($nextAvgCPU - $cpuToShow) * $chainPredictor.PredictionConfidence * 0.3))
+                                $signalBoost += $chainDrop
+                                $signalDebug += "Chain$chainDrop($nextApp)"
+                            }
+                        }
+                    }
+                    
+                    # SYGNAŁ 5: I/O Boost aktywny → CPU będzie wyższe
+                    if ($Script:IOBoostActive) {
+                        $signalBoost += 8
+                        $signalDebug += "IOBoost+8"
+                    }
+                    
+                    # Zastosuj sygnały do basePrediction
+                    $basePrediction += $signalBoost
+                    $basePrediction = [Math]::Max(2, [Math]::Min(100, $basePrediction))
+                    
+                    # ═══════════════════════════════════════════════════════════════
+                    # PROPHET KNOWLEDGE: Ogranicz/kieruj wiedzą o aplikacji
+                    # ═══════════════════════════════════════════════════════════════
+                    if ($prophet -and $currentActiveApp) {
+                        if ($prophet.Apps.ContainsKey($currentActiveApp)) {
+                            $appData = $prophet.Apps[$currentActiveApp]
+                            $appCategory = $appData.Category
+                            $learnedAvgCPU = if ($appData.AvgCPU -gt 0) { [int]$appData.AvgCPU } else { 0 }
+                            $learnedMaxCPU = if ($appData.MaxCPU -gt 0) { [int]$appData.MaxCPU } else { 0 }
+                            $samples = if ($appData.Samples) { $appData.Samples } else { 0 }
+                            
+                            # Granice na podstawie historii aplikacji
+                            $minBound = [Math]::Max(2, $learnedAvgCPU * 0.15)
+                            $maxBound = [Math]::Min(100, $learnedMaxCPU + 25)
+                            
+                            # Trend-aware prediction z wiedzą Prophet:
+                            if ($cpuTrend -gt 1.0) {
+                                $trendWeight = [Math]::Min(0.6, $cpuTrend / 10.0)
+                                $basePrediction = $basePrediction * (1 - $trendWeight) + $learnedMaxCPU * $trendWeight
+                            }
+                            elseif ($cpuTrend -lt -1.0) {
+                                $trendWeight = [Math]::Min(0.5, [Math]::Abs($cpuTrend) / 10.0)
+                                $basePrediction = $basePrediction * (1 - $trendWeight) + ($learnedAvgCPU * 0.7) * $trendWeight
+                            }
+                            elseif ($samples -ge 10 -and [Math]::Abs($cpuTrend) -le 1.0) {
+                                $revertWeight = 0.15
+                                $basePrediction = $basePrediction * (1 - $revertWeight) + $learnedAvgCPU * $revertWeight
+                            }
+                            
+                            $prophetPrediction = [int][Math]::Max($minBound, [Math]::Min($maxBound, $basePrediction))
+                            $sigInfo = if ($signalDebug.Count -gt 0) { " Sig:$($signalDebug -join ',')" } else { "" }
+                            $prophetDebug = "$currentActiveApp=$appCategory(T:$([Math]::Round($cpuTrend,1)),P:$prophetPrediction,A:$learnedAvgCPU,M:$learnedMaxCPU$sigInfo)"
+                        } else {
+                            $prophetDebug = "$currentActiveApp=Unknown(T:$([Math]::Round($cpuTrend,1)))"
+                            $prophetPrediction = [int][Math]::Max(5, [Math]::Min(95, $basePrediction))
+                        }
+                    } else {
+                        $prophetDebug = "NoApp-T:$([Math]::Round($cpuTrend,1))"
+                        $prophetPrediction = [int][Math]::Max(5, [Math]::Min(95, $basePrediction))
+                    }
+                    # Pobierz aktualne TDP/Power
+                    $currentPower = if ($currentMetrics.CPUPower -and $currentMetrics.CPUPower -gt 0) {
+                        [int]$currentMetrics.CPUPower
+                    } else {
+                        # Szacuj power z mode
+                        switch ($currentState) {
+                            "Extreme" { 45 }
+                            "Turbo" { 35 }
+                            "Balanced" { 25 }
+                            "Silent" { 15 }
+                            default { 20 }
+                        }
+                    }
+                    # Dodaj punkt do historii
+                    $anyBoostActive = (
+                        ($Script:ActiveStartupBoost -ne $null) -or  # Activity-Based Boost
+                        ($Script:IOBoostActive -eq $true) -or       # I/O Boost
+                        ($Script:BoostActive -eq $true) -or         # General Boost flag
+                        ($manualBoostOverride -eq $true) -or        # Manual Boost
+                        ($currentState -eq "Turbo") -or             # Turbo mode = boost
+                        ($currentState -eq "Extreme")               # Extreme mode = boost
+                    )
+                    $historyPoint = @{
+                        Time = (Get-Date)
+                        CPU = [int]$cpuToShow
+                        Mode = $currentState
+                        Power = $currentPower
+                        Predicted = $prophetPrediction
+                        ActivityBoost = $anyBoostActive  # v40: Shows when ANY boost is active
+                    }
+                    $Script:DecisionHistory.Insert(0, $historyPoint)
+                    # Ogranicz do 60 ostatnich punktow (60 sekund)
+                    while ($Script:DecisionHistory.Count -gt $Script:DecisionHistoryMaxSize) {
+                        $Script:DecisionHistory.RemoveAt($Script:DecisionHistoryMaxSize)
+                    }
+                    # DEBUG: Log co 5 iteracji (~10s)
+                    if ($iteration % 5 -eq 0) {
+                    }
+                    try {
+                        $ramHistoryPoint = @{
+                            Time = (Get-Date)
+                            RAM = if ($ramInfo) { $ramInfo.RAM } else { 0 }
+                            Delta = if ($ramInfo) { $ramInfo.Delta } else { 0 }
+                            Acceleration = if ($ramInfo) { $ramInfo.Acceleration } else { 0 }
+                            TrendType = if ($ramInfo) { $ramInfo.TrendType } else { "NONE" }
+                            Spike = if ($ramInfo) { $ramInfo.Spike } else { $false }
+                            Trend = if ($ramInfo) { $ramInfo.Trend } else { $false }
+                            App = $currentActiveApp
+                            ThresholdZone = if ($ramInfo) { $ramInfo.ThresholdZone } else { "NORMAL" }
+                            ThresholdIcon = if ($ramInfo) { $ramInfo.ThresholdIcon } else { "" }
+                            ThresholdReason = if ($ramInfo) { $ramInfo.ThresholdReason } else { "" }
+                            ThresholdValue = if ($ramInfo) { $ramInfo.Threshold } else { 8.0 }
+                            RewardGiven = $false
+                            RewardSource = ""
+                            RewardValue = 0.0
+                        }
+                        # Sprawdz czy ktorys z AI engines dal reward w tej iteracji
+                        if ($qLearning -and $qLearning.LastReward -ne $null -and $qLearning.LastReward -gt 0) {
+                            $ramHistoryPoint.RewardGiven = $true
+                            $ramHistoryPoint.RewardSource = "QLearning"
+                            $ramHistoryPoint.RewardValue = [Math]::Round($qLearning.LastReward, 2)
+                        }
+                        elseif ($genetic -and $genetic.LastFitnessImprovement -ne $null -and $genetic.LastFitnessImprovement -gt 0) {
+                            $ramHistoryPoint.RewardGiven = $true
+                            $ramHistoryPoint.RewardSource = "Genetic"
+                            $ramHistoryPoint.RewardValue = [Math]::Round($genetic.LastFitnessImprovement, 2)
+                        }
+                        elseif ($selfTuner -and $selfTuner.LastReward -ne $null -and $selfTuner.LastReward -gt 0) {
+                            $ramHistoryPoint.RewardGiven = $true
+                            $ramHistoryPoint.RewardSource = "SelfTuner"
+                            $ramHistoryPoint.RewardValue = [Math]::Round($selfTuner.LastReward, 2)
+                        }
+                        $Script:RAMIntelligenceHistory.Insert(0, $ramHistoryPoint)
+                        # Ogranicz do 30 ostatnich punktow
+                        while ($Script:RAMIntelligenceHistory.Count -gt $Script:RAMIntelligenceMaxSize) {
+                            $Script:RAMIntelligenceHistory.RemoveAt($Script:RAMIntelligenceMaxSize)
+                        }
+                        if ($iteration % 30 -eq 0 -and $Script:RAMIntelligenceHistory.Count -gt 0) {
+                            Add-Log " RAM Intelligence: $($Script:RAMIntelligenceHistory.Count) points, Latest: RAM=$($ramHistoryPoint.RAM)% D=$($ramHistoryPoint.Delta) Reward=$($ramHistoryPoint.RewardGiven)" -Debug
+                        }
+                    } catch {
+                        # Jesli blad, nie przerywaj glownej petli
+                    }
+                } catch {
+                }
+                # Skroc nazwe aplikacji dla wyswietlania
+                $appDisplay = if ($currentActiveApp.Length -gt 15) { $currentActiveApp.Substring(0,12) + "..." } else { $currentActiveApp }
+                
+                # v43.3 FIX KRYTYCZNY: Zmienne muszą być PRZED hashtable, nie wewnątrz!
+                $neuralBrainEnabledUser = Is-NeuralBrainEnabled
+                $ensembleEnabledUser = Is-EnsembleEnabled
+                
+                $widgetData = @{
+                    CPU = $cpuToShow
+                    Temp = [int]$currentMetrics.Temp
+                    Mode = $currentState
+                    AI = $aiStatus
+                    Context = $currentContext
+                    Phase = $phaseDetector.CurrentPhase
+                    PhaseSuggest = $phaseDetector.GetRecommendedMode()
+                    Activity = $activityStatus
+                    CpuMHz = $cpuCurrentMHz
+                    DL = [int64]$smoothNetDL
+                    UL = [int64]$smoothNetUL
+                    TotalDownloaded = ($Script:PersistentNetDL + $totalBytesRecv)
+                    TotalUploaded = ($Script:PersistentNetUL + $totalBytesSent)
+                    RAM = $ramUsedPercent
+                    Disk = [Math]::Round(($diskReadSpeed + $diskWriteSpeed) / 1MB, 1)
+                    DiskRead = [Math]::Round($diskReadSpeed / 1MB, 1)
+                    DiskWrite = [Math]::Round($diskWriteSpeed / 1MB, 1)
+                    IOBoost = $Script:IOBoostActive
+                    #  Extended metrics
+                    GPUTemp = if ($currentMetrics.GPU) { $currentMetrics.GPU.Temp } else { 0 }
+                    GPULoad = if ($currentMetrics.GPU) { $currentMetrics.GPU.Load } else { 0 }
+                    VRMTemp = if ($currentMetrics.VRM) { $currentMetrics.VRM.Temp } else { 0 }
+                    CPUPower = if ($currentMetrics.CPUPower) { $currentMetrics.CPUPower } else { 0 }
+                    CPUVendor = $Script:CPUVendor
+                    CPUModel = $Script:CPUModel
+                    CPUGeneration = $Script:CPUGeneration
+                    CPUArchitecture = $Script:HybridArchitecture
+                    CPUCores = $Script:TotalCores
+                    CPUThreads = $Script:TotalThreads
+                    IsHybridCPU = $Script:IsHybridCPU
+                    PCoreCount = $Script:PCoreCount
+                    ECoreCount = $Script:ECoreCount
+                    Reason = $aiDecision.Reason
+                    App = $currentActiveApp
+                    Iteration = ($qLearning.TotalUpdates + $bandit.TotalPulls + $genetic.Generation + $selfTuner.DecisionHistory.Count + $chainPredictor.TotalPredictions + $Prophet.GetAppCount() + $Brain.TotalDecisions)
+                    ActivityLog = @($Script:ActivityLog | Select-Object -First 5)
+                    DecisionHistory = @($Script:DecisionHistory | Select-Object -First 30)
+                    RAMIntelligenceHistory = @($Script:RAMIntelligenceHistory | Select-Object -First 30)
+                    # - V37.7.15: ProBalance data
+                    ProBalanceEnabled = if ($proBalance) { $proBalance.Enabled } else { $false }
+                    ProBalanceThrottled = if ($proBalance) { $proBalance.ThrottledProcesses.Count } else { 0 }
+                    ProBalanceTotalThrottles = if ($proBalance) { $proBalance.TotalThrottles } else { 0 }
+                    ProBalanceTotalRestores = if ($proBalance) { $proBalance.TotalRestores } else { 0 }
+                    ProBalanceThreshold = if ($proBalance) { $proBalance.ThrottleThreshold } else { 80 }
+                    ProBalanceThrottledList = if ($proBalance -and $proBalance.ThrottledProcesses.Count -gt 0) { 
+                        @($proBalance.ThrottledProcesses.Values | ForEach-Object { "$($_.Name) ($($_.CPUAtThrottle)%)" })
+                    } else { @() }
+                    ProBalanceHistory = @($Script:ProBalanceHistory | Select-Object -First 30)
+                    PerfBoosterEnabled = if ($performanceBooster) { $performanceBooster.Enabled } else { $false }
+                    PerfBoosterPreemptiveBoosts = if ($performanceBooster) { $performanceBooster.TotalPreemptiveBoosts } else { 0 }
+                    PerfBoosterPriorityBoosts = if ($performanceBooster) { $performanceBooster.TotalPriorityBoosts } else { 0 }
+                    PerfBoosterFreezes = if ($performanceBooster) { $performanceBooster.TotalFreezes } else { 0 }
+                    PerfBoosterCacheWarms = if ($performanceBooster) { $performanceBooster.TotalCacheWarms } else { 0 }
+                    PerfBoosterCurrentlyFrozen = if ($performanceBooster) { $performanceBooster.FrozenProcesses.Count } else { 0 }
+                    PerfBoosterKnownHeavyApps = if ($performanceBooster) { $performanceBooster.KnownHeavyApps.Count } else { 0 }
+                    PerfBoosterLastReason = if ($performanceBooster) { $performanceBooster.LastBoostReason } else { "" }
+                    OptimizationCacheSize = if ($prophet) { $prophet.GetAppCount() } else { 0 }
+                    FastBootAppsCount = if ($chainPredictor -and $chainPredictor.TransitionGraph) { $chainPredictor.TransitionGraph.Count } else { 0 }
+                    LaunchHistorySize = if ($loadPredictor -and $loadPredictor.AppLaunchPatterns) { $loadPredictor.AppLaunchPatterns.Count } else { 0 }
+                    SilentMode = $Script:SilentModeActive
+                    SilentLock = $Script:SilentLockMode
+                    UserForcedMode = $Script:UserForcedMode
+                    AutoRestoreIn = 0
+                    # #
+                    # AI Engine Status (zmienne zdefiniowane przed hashtable)
+                    # #
+                    Brain = if ($neuralBrainEnabledUser) {
+                        if ($brain -and $brain.GetCount() -gt 0) { 
+                            "$($brain.GetCount()) wag" 
+                        } else { 
+                            "ON (waiting)"  # Pokazuje ze jest wlaczony ale czeka na decyzje
+                        }
+                    } else {
+                        if ($brain -and $brain.GetCount() -gt 0) {
+                            "$($brain.GetCount()) wag (OFF)"  # Dane istnieja ale silnik wylaczony
+                        } else {
+                            "OFF"
+                        }
+                    }
+                    QLearning = if ($qLearning) { "Q:$($qLearning.QTable.Count) Upd:$($qLearning.TotalUpdates)" } else { "Q:0 Upd:0" }
+                    Bandit = if ($bandit) { $bandit.GetStatus() } else { "T:0% B:0% S:0%" }
+                    Genetic = if ($genetic) { "Gen:$($genetic.Generation) Fit:$([Math]::Round($genetic.BestFitness, 2))" } else { "Gen:0 Fit:0" }
+                    Ensemble = if ($ensembleEnabledUser) {
+                        if ($ensemble -and $ensemble.TotalVotes -gt 0) { 
+                            $ensemble.GetStatus() 
+                        } else { 
+                            "ON (waiting)"  # Pokazuje ze jest wlaczony ale czeka na uzycie
+                        }
+                    } else { 
+                        "OFF" 
+                    }
+                    Energy = if ($energyTracker) { $energyTracker.GetStatus() } else { "Eff:0%" }
+                    Prophet = if ($prophet) { "$($prophet.GetAppCount()) apps" } else { "0 apps" }
+                    SelfTuner = if ($selfTuner -and $selfTuner.DecisionHistory) { $selfTuner.GetStatus() } else { "Good:0/0" }
+                    Chain = if ($chainPredictor) { "$($chainPredictor.TotalPredictions) pred" } else { "0 pred" }
+                    Anomaly = if ([string]::IsNullOrWhiteSpace($anomalyAlert)) { "OK" } else { $anomalyAlert }
+                    Thermal = if ($currentMetrics.Temp -gt 0) { "Pred:$([int]($currentMetrics.Temp + 2))C" } else { "N/A" }
+                    Patterns = if ($isUserActive) { "Active" } else { "Idle" }
+                    # #
+                    # #
+                    AIMetrics = @{
+                        Brain = if ($brain) { [Math]::Min(100, $brain.GetCount()) } else { 0 }
+                        # Prophet: Apps count normalized (max 100 apps = 100%)
+                        Prophet = if ($prophet) { [Math]::Min(100, $prophet.GetAppCount()) } else { 0 }
+                        # QLearning: States + Updates combined (max ~200 = 100%)
+                        QLearning = if ($qLearning) { [Math]::Min(100, [int](($qLearning.QTable.Count + $qLearning.TotalUpdates / 10) / 2)) } else { 0 }
+                        # Bandit: Success rate for best arm (already 0-100%)
+                        Bandit = if ($bandit) { [int]([Math]::Max($bandit.GetArmProbability("Turbo"), [Math]::Max($bandit.GetArmProbability("Balanced"), $bandit.GetArmProbability("Silent"))) * 100) } else { 0 }
+                        # Genetic: Generation + Fitness combined (max Gen 50 + Fit 1.0 = 100%)
+                        Genetic = if ($genetic) { [Math]::Min(100, [int]($genetic.Generation * 2 + $genetic.BestFitness * 50)) } else { 0 }
+                        # Ensemble: Best model accuracy (already 0-100%) - V37.7.5 FIX: 0 jesli OFF
+                        Ensemble = if ($ensembleEnabledUser) { 
+                            if ($ensemble) { [int](($ensemble.Accuracy.Values | Measure-Object -Maximum).Maximum * 100) } else { 0 } 
+                        } else { 
+                            0 
+                        }
+                        # Energy: Efficiency (already 0-100%)
+                        Energy = if ($energyTracker) { [int]($energyTracker.CurrentEfficiency * 100) } else { 50 }
+                        # SelfTuner: Good decisions ratio (0-100%)
+                        SelfTuner = if ($selfTuner -and $selfTuner.DecisionHistory.Count -gt 0) { 
+                            $good = ($selfTuner.DecisionHistory | Where-Object { $_.Score -gt 50 }).Count
+                            [Math]::Min(100, [int]($good / [Math]::Max(1, $selfTuner.DecisionHistory.Count) * 100))
+                        } else { 50 }
+                        # Chain: Predictions made normalized (max 500 = 100%)
+                        Chain = if ($chainPredictor) { [Math]::Min(100, [int]($chainPredictor.TotalPredictions / 5)) } else { 0 }
+                        # Anomaly: Inverted (0 = healthy = 100%, high = problem = low%)
+                        Anomaly = if ([string]::IsNullOrWhiteSpace($anomalyAlert)) { 100 } else { 20 }
+                        # Thermal: Temperature health (cold = 100%, hot = 0%)
+                        Thermal = if ($currentMetrics.Temp -gt 0) { [Math]::Max(0, 100 - [int](($currentMetrics.Temp - 30) * 1.4)) } else { 50 }
+                        # Patterns: User activity detection confidence
+                        Patterns = if ($isUserActive) { 80 } else { 30 }
+                    }
+                    TopModel = if ($ensembleDecision -and $ensembleEnabled) { "Ensemble" } 
+                               elseif ($manualBoostOverride) { "Prophet" }
+                               elseif ($aiDecision.Mode -eq $currentState) { "Brain" }
+                               else { "Rules" }
+                    ActiveEngine = if ($aiCoordinator) { $aiCoordinator.ActiveEngine } else { "QLearning" }
+                    CoordinatorStatus = if ($aiCoordinator) { $aiCoordinator.GetStatus() } else { "N/A" }
+                    TransferCount = if ($aiCoordinator) { $aiCoordinator.TransferCount } else { 0 }
+                    RAMUsage = if ($ramInfo) { $ramInfo.RAM } else { 0 }
+                    RAMDelta = if ($ramInfo) { $ramInfo.Delta } else { 0 }
+                    RAMSpike = if ($ramInfo) { $ramInfo.Spike } else { $false }
+                    RAMTrend = if ($ramInfo) { $ramInfo.Trend } else { $false }
+                    RAMThreshold = if ($ramInfo) { $ramInfo.Threshold } else { 8 }
+                    ProphetLearnedApps = if ($prophet) { $prophet.GetAppCount() } else { 0 }
+                    ProphetTotalSessions = if ($prophet) { $prophet.TotalSessions } else { 0 }
+                    RAMAnalyzerSpikes = if ($ramAnalyzer) { $ramAnalyzer.TotalSpikesDetected } else { 0 }
+                    RAMAnalyzerTrends = if ($ramAnalyzer) { $ramAnalyzer.TotalTrendsDetected } else { 0 }
+                    RAMAnalyzerPreBoosts = if ($ramAnalyzer) { $ramAnalyzer.TotalPreBoosts } else { 0 }
+                    RAMAnalyzerStatus = if ($ramAnalyzer) { $ramAnalyzer.GetStatus() } else { "N/A" }
+                    # Legacy compatibility
+                    RAMLearnedApps = if ($ramAnalyzer) { $ramAnalyzer.GetLearnedAppsCount() } else { 0 }
+                    RAMAppsNeedingBoost = if ($ramAnalyzer) { $ramAnalyzer.GetAppsNeedingBoostCount() } else { 0 }
+                    RAMSpikesTotal = if ($ramAnalyzer) { $ramAnalyzer.TotalSpikesDetected } else { 0 }
+                    RAMTrendsTotal = if ($ramAnalyzer) { $ramAnalyzer.TotalTrendsDetected } else { 0 }
+                    RAMPreBoostsTotal = if ($ramAnalyzer) { $ramAnalyzer.TotalPreBoosts } else { 0 }
+                    RAMStatus = if ($ramAnalyzer) { $ramAnalyzer.GetStatus() } else { "N/A" }
+                    # - V35 NEW: EcoMode
+                    EcoMode = $Global:EcoMode
+                    TotalAIActivity = 0  # Obliczone ponizej
+                    ModeSwitches = if ($Global:ModeChangeCount) { $Global:ModeChangeCount } else { 0 }
+                    Runtime = if ($Script:StartTime) { [Math]::Round(([DateTime]::Now - $Script:StartTime).TotalMinutes, 1) } else { 0 }
+                    DataSources = @{
+                        LHMAvailable = $Script:DataSourcesInfo.LHMAvailable
+                        OHMAvailable = $Script:DataSourcesInfo.OHMAvailable
+                        ActiveSource = $Script:DataSourcesInfo.ActiveSource
+                        DetectedSensors = $Script:DataSourcesInfo.DetectedSensors
+                    }
+                    RAMManagerStats = if ($Script:SharedRAM) {
+                        try {
+                            $Script:SharedRAM.GetTelemetry()
+                        } catch {
+                            @{ QueueSize = 0; QueueDrops = 0; BackgroundWrites = 0; BackgroundRetries = 0; IsInitialized = $false }
+                        }
+                    } else {
+                        @{ QueueSize = 0; QueueDrops = 0; BackgroundWrites = 0; BackgroundRetries = 0; IsInitialized = $false }
+                    }
+                }
+                # Oblicz TotalAIActivity jako srednia znormalizowanych metryk
+                if ($widgetData.AIMetrics) {
+                    $sumActivity = 0
+                    foreach ($key in $widgetData.AIMetrics.Keys) {
+                        $sumActivity += $widgetData.AIMetrics[$key]
+                    }
+                    $widgetData.TotalAIActivity = [int]($sumActivity / 12)
+                }
+                try {
+                    if ($null -ne $widgetData) {
+                        $prophetVal = $widgetData.Prophet
+                        $chainVal = $widgetData.Chain
+                        # Check if Prophet contains "pred" (wrong - should be from Chain)
+                        if ($prophetVal -match "pred" -and $prophetVal -notmatch "apps") {
+                            Add-Log " SYNC ERROR: Prophet='$prophetVal' contains 'pred'! Swapping with Chain='$chainVal'" -Error
+                            # Force correct values
+                            $widgetData.Prophet = if ($prophet) { "$($prophet.GetAppCount()) apps" } else { "0 apps" }
+                            $widgetData.Chain = if ($chainPredictor) { "$($chainPredictor.TotalPredictions) pred" } else { "0 pred" }
+                            Add-Log "- FIXED: Prophet='$($widgetData.Prophet)' | Chain='$($widgetData.Chain)'" -Success
+                        }
+                        # Check if Prophet is empty
+                        elseif ([string]::IsNullOrEmpty($prophetVal) -or $prophetVal -eq "---") {
+                            Add-Log "[WARN]  Prophet field is empty! Recalculating..." -Warning
+                            $widgetData.Prophet = if ($prophet) { "$($prophet.GetAppCount()) apps" } else { "0 apps" }
+                        }
+                    }
+                    $jsonForWidget = $widgetData | ConvertTo-Json -Depth 20 -Compress
+                    if ($Script:UseRAMStorage -and $Script:SharedRAM) {
+                        try {
+                            $Script:SharedRAM.Write("WidgetData", $widgetData)
+                        } catch {
+                            try { Add-Content -Path 'C:\CPUManager\ErrorLog.txt' -Value "$(Get-Date -Format 'HH:mm:ss') - SharedRAM write error: $_" -Encoding UTF8 } catch {}
+                        }
+                    }
+                    # JSON mode: always write to JSON
+                    # RAM mode: JSON backup handled by AutoBackup (every 5 min)
+                    # BOTH mode: JSON backup handled by AutoBackup (every 1 min)
+                    $shouldWriteJSON = switch ($Script:StorageMode) {
+                        "JSON" { $true }
+                        "BOTH" { $false }  # AutoBackup handles JSON writes
+                        "RAM" { $false }   # AutoBackup handles JSON writes
+                        default { $true }
+                    }
+                    # Throttling: zapisuj co N iteracji (~1.6-2s zamiast co 0.8s)
+                    # Change detection: zapisuj tylko gdy dane sie zmienily
+                    if ($shouldWriteJSON) {
+                        $shouldActuallyWrite = $false
+                        # Warunek 1: Minal throttle interval
+                        if (($iteration - $Script:LastWidgetWriteIteration) -ge $Script:WidgetWriteThrottle) {
+                            # Warunek 2: Dane sie zmienily (porownanie JSON)
+                            if ($jsonForWidget -ne $Script:LastWidgetJSON) {
+                                $shouldActuallyWrite = $true
+                            }
+                        }
+                        # Pierwsza iteracja - zawsze zapisz
+                        if ($iteration -le 2) {
+                            $shouldActuallyWrite = $true
+                        }
+                        if ($shouldActuallyWrite) {
+                            try {
+                                # ASYNCHRONICZNY ZAPIS - bez blokowania glownego watku!
+                                # Uzyj prostego runspace (NIE tworzy procesu, tylko thread w tym samym procesie)
+                                $ps = [powershell]::Create()
+                                $null = $ps.AddScript({
+                                    param($outPath, $json)
+                                    try {
+                                        $tmp = "$outPath.tmp"
+                                        [System.IO.File]::WriteAllText($tmp, $json, [System.Text.Encoding]::UTF8)
+                                        try { 
+                                            Move-Item -Path $tmp -Destination $outPath -Force -ErrorAction Stop
+                                        } catch { 
+                                            Copy-Item -Path $tmp -Destination $outPath -Force
+                                            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+                                        }
+                                    } catch { }
+                                }).AddArgument($desktopWidget.DataFile).AddArgument($jsonForWidget)
+                                # BeginInvoke = asynchroniczne wykonanie (NIE BLOKUJE glownego watku!)
+                                $null = $ps.BeginInvoke()
+                                # Update tracking
+                                $Script:LastWidgetWriteIteration = $iteration
+                                $Script:LastWidgetJSON = $jsonForWidget
+                            } catch {
+                                # Silent fail
+                            }
+                        }
+                    }
+                } catch { }
+                # - Update TDP Learning (AI dla RyzenADJ)
+                if ($Script:RyzenAdjAvailable) {
+                    $aiScore = if ($Script:AI_Active -and $aiScore) { $aiScore } else { 50 }
+                    Update-TDPLearning -Mode $currentState -CPU $cpuToShow -Temp $currentMetrics.Temp -Score $aiScore
+                }
+                # - Dynamic tray tooltip - pokazuje dane po najechaniu na ikone
+                $gpuInfo = if ($widgetData.GPULoad -gt 0) { " | GPU:$($widgetData.GPULoad)%" } else { "" }
+                $cpuGHz = [Math]::Round($cpuCurrentMHz / 1000, 2)
+                $trayTip = "CPU:$cpuToShow% ${cpuGHz}GHz $([int]$currentMetrics.Temp)C`n"
+                $trayTip += "App: $appDisplay`n"
+                $trayTip += "$currentState | AI:$aiStatus$gpuInfo"
+                if ($Script:MainTray) { $Script:MainTray.Text = $trayTip }
+            } catch { }
+            # Self-Tuner ewaluacja (co 15 iteracji = ~30 sekund)
+            # v42.6: Sprawdź czy włączone w CONFIGURATOR
+            if ($iteration - $lastSelfTuneEval -ge 15 -and (Is-SelfTunerEnabled)) {
+                $lastSelfTuneEval = $iteration
+                $selfTuner.EvaluateDecisions($currentMetrics.CPU, $currentMetrics.Temp)
+                #  Szybkie zapisywanie decyzji SelfTunera (co 45 iteracji = ~90 sekund)
+                # Zapobiega utracie nauczonego stanu przy naglym wylaczeniu
+                if ($iteration % 45 -eq 0) {
+                    [void]$selfTuner.SaveState($Script:ConfigDir)
+                }
+                if ($Global:DebugMode) {
+                    Add-Log " Self-Tune: $($selfTuner.GetStatus())" -Debug
+                }
+            }
+            # v42.6 FIX BUG #2: Genetic Optimizer evaluation + evolution (co 30 iteracji = ~60 sekund)
+            # v42.6: Sprawdź czy włączone w CONFIGURATOR
+            if ($iteration - $lastGeneticEval -ge 30 -and (Is-GeneticEnabled)) {
+                $lastGeneticEval = $iteration
+                # Oblicz metryki wydajności dla fitness
+                $performance = [Math]::Min(1.0, $currentMetrics.CPU / 100.0)
+                $efficiency = if (Is-EnergyEnabled) { $energyTracker.CurrentEfficiency } else { 0.5 }
+                $thermal = [Math]::Max(0, 1.0 - (($currentMetrics.Temp - 50) / 50.0))  # 50°C=1.0, 100°C=0.0
+                # Ewaluuj obecny genom (index 0 = najlepszy z poprzedniej generacji)
+                $genetic.EvaluateFitness(0, $performance, $efficiency, $thermal)
+                # Evolve co 5 ewaluacji (150 iteracji = ~5 minut)
+                if ($genetic.Population[0].Fitness -gt 0 -and $iteration % 150 -eq 0) {
+                    $genetic.Evolve()
+                    if ($Global:DebugMode) {
+                        Add-Log " Genetic evolved: $($genetic.GetStatus())" -Debug
+                    }
+                }
+            }
+            # Chain Predictor update (co 20 iteracji)
+            if ($iteration - $lastChainCheck -ge 20) {
+                $lastChainCheck = $iteration
+                $chainPrediction = $chainPredictor.GetPredictionStatus()
+            }
+            if ($Script:ProphetAutosaveSeconds -gt 0) {
+                $secondsSinceProphetSave = ([DateTime]::Now - $prophetLastAutosave).TotalSeconds
+                if ($prophet.TotalSessions -gt $prophetLastSavedSessions -and $secondsSinceProphetSave -ge $Script:ProphetAutosaveSeconds) {
+                    if (Save-State -Brain $brain -Prophet $prophet) {
+                        $prophetLastAutosave = [DateTime]::Now
+                        $prophetLastSavedSessions = $prophet.TotalSessions
+                        if ($Global:DebugMode) {
+                            Add-Log " Prophet autosave tick ($($prophet.GetAppCount()) apps)" -Debug
+                        }
+                    }
+                }
+            }
+            # (Zostaje tylko szybki zapis co iteracje ponizej)
+            # Iteracja trwa ~800ms-1s, wiec 300 iteracji = ~5 minut
+            $backupInterval = switch ($Script:StorageMode) {
+                "JSON" { 300 }     # 5 minut
+                "RAM" { 300 }      # 5 minut
+                "BOTH" { 300 }     # 5 minut
+                default { 300 }    # 5 minut
+            }
+            if ($iteration - $lastSave -ge $backupInterval) {
+                $lastSave = $iteration
+                # #
+                # #
+                # Poprzednio: SaveState bylo w if ($StorageMode -eq "RAM" or "BOTH")
+                # Problem: W trybie "JSON only" AI engines NIE zapisywaly danych na biezaco
+                # Rozwiazanie: Zapis AI poza warunkiem Storage Mode
+                # Storage Mode dotyczy tylko WidgetData.json, nie plikow AI (EnsembleWeights.json, etc)
+                # Poprzednio: prophet.SaveState() + brain.SaveState() + Save-State() = 3x zapis!
+                # Teraz: tylko Save-State() = 1x zapis
+                $saveSuccess = Save-State -Brain $brain -Prophet $prophet
+                # Core AI Components
+                [void]$anomalyDetector.SaveProfiles($Script:ConfigDir)
+                [void]$loadPredictor.SavePatterns($Script:ConfigDir)
+                try { $selfTuner.SaveState($Script:ConfigDir) } catch { }
+                [void]$chainPredictor.SaveState($Script:ConfigDir)
+                [void]$userPatterns.SaveState($Script:ConfigDir)
+                #  MEGA AI Components
+                [void]$qLearning.SaveState($Script:ConfigDir)
+                [void]$ensemble.SaveState($Script:ConfigDir)
+                [void]$energyTracker.SaveState($Script:ConfigDir)
+                #  ULTRA AI Components
+                [void]$bandit.SaveState($Script:ConfigDir)
+                [void]$genetic.SaveState($Script:ConfigDir)
+                [void]$contextDetector.SaveState($Script:ConfigDir)
+                [void]$phaseDetector.SaveState($Script:ConfigDir)
+                [void]$thermalPredictor.SaveState($Script:ConfigDir)
+                [void]$explainer.SaveState($Script:ConfigDir)
+                [void]$thermalGuard.SaveState($Script:ConfigDir)
+                [void]$aiCoordinator.SaveState($Script:ConfigDir)
+                [void]$ramAnalyzer.SaveState($Script:ConfigDir)
+                [void]$sharedKnowledge.SaveState($Script:ConfigDir)
+                # - V37.8.2: Network Optimizer + Network AI
+                [void]$networkOptimizer.SaveState($Script:ConfigDir)
+                # - V40: NetworkAI.Train() - ucz sie wzorcow sieciowych (co 5 min)
+                try { $networkAI.Train() } catch { }
+                [void]$networkAI.SaveState($Script:ConfigDir)
+                # - V40: ProcessAI - zapisz wyuczone profile procesow
+                [void]$processAI.SaveState($Script:ConfigDir)
+                # - V40: GPU AI - zapisz profile GPU dla aplikacji
+                [void]$gpuAI.SaveState($Script:ConfigDir)
+                # #
+                # BACKUP WIDGETDATA - tylko w RAM/BOTH mode
+                # #
+                if ($Script:StorageMode -eq "RAM" -or $Script:StorageMode -eq "BOTH") {
+                    $backupLabel = if ($Script:StorageMode -eq "RAM") { "5-min" } else { "1-min" }
+                    # Backup WidgetData.json w trybie RAM (co 5 min) lub BOTH (co 1 min)
+                    if ($widgetData) {
+                        try {
+                            $jsonBackup = $widgetData | ConvertTo-Json -Depth 10 -Compress
+                            [System.IO.File]::WriteAllText($desktopWidget.DataFile, $jsonBackup, [System.Text.Encoding]::UTF8)
+                        } catch { }
+                    }
+                    if ($saveSuccess) { 
+                        Add-Log " Auto-save ($backupLabel backup) | Gen:$($genetic.Generation) | $($bandit.GetStatus()) | RAM:$($ramAnalyzer.GetStatus())" 
+                    }
+                } else {
+                    # JSON only mode - AI zapisany, bez WidgetData backup
+                    if ($saveSuccess) {
+                        Add-Log " Auto-save (AI engines - JSON mode) | Iter:$iteration | Gen:$($genetic.Generation) | $($bandit.GetStatus())"
+                    }
+                }
+                $prophetLastAutosave = [DateTime]::Now
+                $prophetLastSavedSessions = $prophet.TotalSessions
+            }
+            # Rotacja ErrorLog co 600 iteracji (~20 minut)
+            if ($iteration % 600 -eq 0) {
+                Rotate-ErrorLog
+            }
+            try {
+                $networkStatsPath = Join-Path $Script:ConfigDir "NetworkStats.json"
+                $netStats = @{
+                    TotalDownloaded = $totalBytesRecv
+                    TotalUploaded = $totalBytesSent
+                    LastUpdate = (Get-Date).ToString("o")
+                }
+                $jsonNet = $netStats | ConvertTo-Json -Compress
+                [System.IO.File]::WriteAllText($networkStatsPath, $jsonNet, [System.Text.Encoding]::UTF8)
+            } catch {
+                # Ignore errors
+            }
+            # === SELF-OPTIMIZING RAM v40 ===
+            # Aggressive GC when memory usage exceeds threshold
+            $currentMemMB = [Math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+            $shouldOptimize = ($iteration - $lastGC -ge 100) -or ($currentMemMB -gt 150)
+            if ($shouldOptimize) {
+                $lastGC = $iteration
+                [System.GC]::Collect(2, [System.GCCollectionMode]::Optimized, $false)
+                [System.GC]::WaitForPendingFinalizers()
+                # Trim working set every 50 iterations or when memory high
+                if (($iteration % 50 -eq 0) -or ($currentMemMB -gt 200)) {
+                    try {
+                        $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+                        [Win32]::EmptyWorkingSet($proc.Handle) | Out-Null
+                    } catch { }
+                }
+                if ($Global:DebugMode) {
+                    $afterMemMB = [Math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+                    Add-Log "- GC: $currentMemMB MB -> $afterMemMB MB" -Debug
+                }
+            }
+            if ($iteration % 300 -eq 0 -and $iteration -gt 0) {
+                try {
+                    $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+                    [Win32]::EmptyWorkingSet($currentProcess.Handle) | Out-Null
+                    if ($Global:DebugMode) {
+                        $currentProcess.Refresh()
+                        $ramMB = [Math]::Round($currentProcess.WorkingSet64 / 1MB, 1)
+                        Add-Log " RAM Trim: $($ramMB)MB" -Debug
+                    }
+                } catch { }
+                # v43.14: Periodic save SharedAppKnowledge
+                try { $sharedKnowledge.SaveState($Script:ConfigDir) } catch {}
+            }
+            if ($iteration % 200 -eq 0) { 
+                $watcher.Refresh()
+                $priorityManager.RefreshProcessList()
+            }
+            if ($iteration % 100 -eq 0 -and $metrics.TempSource -eq "N/A") {
+                try {
+                    $metrics.InitializeFromDetectedSources()
+                    if ($metrics.TempSource -ne "N/A") {
+                        Add-Log "- Temperature source found: $($metrics.TempSource)"
+                    }
+                } catch {
+                    # Brak zrodla temperatury - kontynuuj bez bledu
+                }
+            }
+            # === WIDGET COMMAND HANDLING ===
+            $cmdFile = Join-Path $Script:ConfigDir 'WidgetCommand.txt'
+            if (Test-Path $cmdFile) {
+                try {
+                    $cmd = Get-Content $cmdFile -Raw -ErrorAction SilentlyContinue
+                    if ($cmd) {
+                        $cmd = $cmd.Trim().ToUpper()
+                        Remove-ExistingFiles @($cmdFile)
+                        switch ($cmd) {
+                            "SILENT" {
+                                # SILENT = AI uczy sie, ale tryb wymuszony na Silent
+                                $Global:AI_Active = $true
+                                $Script:UserForcedMode = "Silent"
+                                $manualMode = "Silent"
+                                $Script:SilentModeActive = $false
+                                $Script:SilentLockMode = $false
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                $brain.Evolve("Silent")
+                                Set-PowerMode -Mode "Silent" -CurrentCPU $currentMetrics.CPU
+                                Add-Log "- Widget: SILENT (AI learns, mode locked)"
+                            }
+                            "SILENT_LOCK" {
+                                # SILENT LOCK = AI wylaczone, totalna cisza
+                                $Global:AI_Active = $false
+                                $Script:UserForcedMode = "Silent"
+                                $manualMode = "Silent"
+                                $Script:SilentModeActive = $false
+                                $Script:SilentLockMode = $true
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                $brain.Evolve("Silent")
+                                Set-PowerMode -Mode "Silent" -CurrentCPU $currentMetrics.CPU
+                                Add-Log "- Widget: SILENT LOCK (AI off, total silence)"
+                            }
+                            "BALANCED" {
+                                # BALANCED = AI uczy sie, ale tryb wymuszony na Balanced
+                                $Global:AI_Active = $true
+                                $Script:UserForcedMode = "Balanced"
+                                $manualMode = "Balanced"
+                                $Script:SilentModeActive = $false
+                                $Script:SilentLockMode = $false
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                $brain.Evolve("Balanced")
+                                Set-PowerMode -Mode "Balanced" -CurrentCPU $currentMetrics.CPU
+                                Add-Log "- Widget: BALANCED (AI learns, mode locked)"
+                            }
+                            "TURBO" {
+                                # TURBO = AI uczy sie, ale tryb wymuszony na Turbo
+                                $Global:AI_Active = $true
+                                $Script:UserForcedMode = "Turbo"
+                                $manualMode = "Turbo"
+                                $Script:SilentModeActive = $false
+                                $Script:SilentLockMode = $false
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                $brain.Evolve("Turbo")
+                                Set-PowerMode -Mode "Turbo" -CurrentCPU $currentMetrics.CPU
+                                Add-Log " Widget: TURBO (AI learns, mode locked)"
+                            }
+                            "EXTREME" {
+                                # EXTREME = AI wylaczone, maksymalna wydajnosc
+                                $Global:AI_Active = $false
+                                $Script:UserForcedMode = "Turbo"
+                                $manualMode = "Turbo"
+                                $Script:SilentModeActive = $false
+                                $Script:SilentLockMode = $false
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                $brain.Evolve("Turbo")
+                                Set-PowerMode -Mode "Turbo" -CurrentCPU $currentMetrics.CPU
+                                Set-RyzenAdjMode "Turbo" | Out-Null
+                                Add-Log " Widget: EXTREME (AI off, max performance)"
+                            }
+                            "DEBUG" {
+                                $Global:DebugMode = -not $Global:DebugMode
+                                Add-Log "- Widget: Debug $(if($Global:DebugMode){'ON'}else{'OFF'})"
+                            }
+                            "ECO" {
+                                # - V35 NEW: Toggle EcoMode
+                                $Global:EcoMode = -not $Global:EcoMode
+                                Reset-TurboDelay
+                                if ($Global:EcoMode) {
+                                    Add-Log "- EcoMode: ON (aggressive Silent, delayed Turbo)"
+                                } else {
+                                    Add-Log " EcoMode: OFF (normal thresholds)"
+                                }
+                            }
+                            "SAVE" {
+                                $null = Save-State -Brain $brain -Prophet $prophet
+                                [void]$anomalyDetector.SaveProfiles($Script:ConfigDir)
+                                [void]$loadPredictor.SavePatterns($Script:ConfigDir)
+                                Add-Log " Widget: State saved"
+                            }
+                            "RESET" {
+                                if ($selfTuner) {
+                                    for ($h = 0; $h -lt 24; $h++) {
+                                        $selfTuner.HourlyProfiles[$h].TurboThreshold = 75.0
+                                        $selfTuner.HourlyProfiles[$h].BalancedThreshold = 30.0
+                                    }
+                                }
+                                $Script:UserApprovedBoosts.Clear()
+                                Add-Log "- Widget: AI reset"
+                            }
+                            "FORCE" {
+                                $Global:AI_Active = $false
+                                Add-Log "- Widget: Force mode locked"
+                            }
+                            "SHOW_CONSOLE" {
+                                try {
+                                    $consolePtr = [Console.Window]::GetConsoleWindow()
+                                    [Console.Window]::ShowWindow($consolePtr, 5) # SW_SHOW
+                                } catch { }
+                                Add-Log "- Widget: Console shown"
+                            }
+                            "HIDE_CONSOLE" {
+                                try {
+                                    $consolePtr = [Console.Window]::GetConsoleWindow()
+                                    [Console.Window]::ShowWindow($consolePtr, 0) # SW_HIDE
+                                } catch { }
+                                Add-Log "- Widget: Console hidden"
+                            }
+                            "AI" {
+                                $Global:AI_Active = -not $Global:AI_Active
+                                if ($Global:AI_Active) {
+                                    # AI wlaczone = pelna kontrola, wyczysc wymuszony tryb
+                                    $Script:UserForcedMode = ""
+                                }
+                                $Script:SilentModeActive = $false
+                                $Script:SilentLockMode = $false
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                Add-Log " Widget: AI $(if($Global:AI_Active){'ON (full control)'}else{'OFF'})"
+                            }
+                            "EXIT" {
+                                Add-Log "- Widget: EXIT requested"
+                                Request-Shutdown -Reason "Widget command EXIT"
+                            }
+                            default {
+                                if ($cmd -match '^PROBALANCETHRESHOLD:(\d+)$') {
+                                    $newThreshold = [int]$Matches[1]
+                                    if ($newThreshold -ge 20 -and $newThreshold -le 90) {
+                                        if ($proBalance) {
+                                            $proBalance.ThrottleThreshold = [double]$newThreshold
+                                            Add-Log "- ProBalance: Threshold changed to $newThreshold%"
+                                            # Zapisz do pliku konfiguracyjnego
+                                            $pbConfigPath = Join-Path $Script:ConfigDir "ProBalanceConfig.json"
+                                            $pbConfig = @{
+                                                ThrottleThreshold = $newThreshold
+                                                LastModified = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                                            }
+                                            $pbJson = $pbConfig | ConvertTo-Json -Depth 3 -Compress
+                                            try {
+                                                [System.IO.File]::WriteAllText($pbConfigPath, $pbJson, [System.Text.Encoding]::UTF8)
+                                            } catch { }
+                                        }
+                                    }
+                                }
+                            }
+                            "SHOW" {
+                                if ($desktopWidget -and -not $desktopWidget.IsRunning()) {
+                                    $desktopWidget.Start()
+                                    Add-Log "Widget: SHOW"
+                                }
+                            }
+                            "HIDE" {
+                                if ($desktopWidget -and $desktopWidget.IsRunning()) {
+                                    $desktopWidget.Stop()
+                                    Add-Log "Widget: HIDE"
+                                }
+                            }
+                            "TOGGLE" {
+                                if ($desktopWidget) {
+                                    $desktopWidget.Toggle()
+                                    Add-Log "Widget: TOGGLE"
+                                }
+                            }
+                            "PROFILE_GAMING" {
+                                # GAMING: Turbo + szybkie silniki AI
+                                $Global:AI_Active = $true
+                                $manualMode = "Turbo"
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                $brain.Evolve("Turbo")
+                                # Wlacz tylko szybkie silniki
+                                $Script:AIEngines = @{
+                                    QLearning = $true
+                                    Ensemble = $false
+                                    Prophet = $false
+                                    NeuralBrain = $true
+                                    AnomalyDetector = $true
+                                    SelfTuner = $false
+                                    ChainPredictor = $false
+                                    LoadPredictor = $true
+                                }
+                                Save-AIEnginesConfig | Out-Null
+                                Add-Log " PROFILE: GAMING (Turbo + Fast AI)"
+                            }
+                            "PROFILE_WORK" {
+                                # WORK: Balanced + wszystkie silniki AI
+                                $Global:AI_Active = $true
+                                $manualMode = "Balanced"
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                $brain.Evolve("Balanced")
+                                   Set-RyzenAdjMode "Balanced" | Out-Null
+                                # Wlacz wszystkie silniki
+                                $Script:AIEngines = @{
+                                    QLearning = $true
+                                    Ensemble = $true
+                                    Prophet = $true
+                                    NeuralBrain = $true
+                                    AnomalyDetector = $true
+                                    SelfTuner = $true
+                                    ChainPredictor = $true
+                                    LoadPredictor = $true
+                                }
+                                Save-AIEnginesConfig | Out-Null
+                                Add-Log "- PROFILE: WORK (Balanced + All AI)"
+                            }
+                            "PROFILE_MOVIE" {
+                                # MOVIE: Silent + minimalne AI
+                                $Global:AI_Active = $true
+                                $manualMode = "Silent"
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                $brain.Evolve("Silent")
+                                   Set-RyzenAdjMode "Silent" | Out-Null
+                                # Tylko podstawowe silniki
+                                $Script:AIEngines = @{
+                                    QLearning = $false
+                                    Ensemble = $false
+                                    Prophet = $false
+                                    NeuralBrain = $false
+                                    AnomalyDetector = $true
+                                    SelfTuner = $false
+                                    ChainPredictor = $false
+                                    LoadPredictor = $false
+                                }
+                                Save-AIEnginesConfig | Out-Null
+                                Add-Log "- PROFILE: MOVIE (Silent + Minimal AI)"
+                            }
+                            "CPU_AMD" {
+                                Set-CPUTypeManual "AMD"
+                                Add-Log "- CPU: Ustawiono AMD Ryzen"
+                            }
+                            "CPU_INTEL" {
+                                Set-CPUTypeManual "Intel"
+                                Add-Log "- CPU: Ustawiono Intel Core"
+                            }
+                            "RESET_LEARNING" {
+                                # - Reset wszystkich nauczonych profili per-app
+                                Add-Log "- RESET_LEARNING: Rozpoczynam reset profili..."
+                                # Reset ProphetMemory
+                                if ($prophet -and $prophet.Apps) {
+                                    foreach ($appKey in @($prophet.Apps.Keys)) {
+                                        $app = $prophet.Apps[$appKey]
+                                        if ($app.ManualOverride) { $app.ManualOverride = $false }
+                                        if ($app.ManualMode) { $app.ManualMode = "" }
+                                        if ($app.ManualTimestamp) { $app.ManualTimestamp = "" }
+                                        if ($app.ManualFeedback) { $app.ManualFeedback = @() }
+                                        if ($app.LearnedPreference) { $app.LearnedPreference = "" }
+                                        if ($app.ManualInterventions) { $app.ManualInterventions = 0 }
+                                    }
+                                }
+                                # Reset SelfTuner
+                                if ($selfTuner) {
+                                    for ($h = 0; $h -lt 24; $h++) {
+                                        $selfTuner.HourlyProfiles[$h].TurboThreshold = 75.0
+                                        $selfTuner.HourlyProfiles[$h].BalancedThreshold = 30.0
+                                        $selfTuner.HourlyProfiles[$h].AggressionBias = 0.0
+                                        $selfTuner.HourlyProfiles[$h].Samples = 0
+                                    }
+                                    $selfTuner.GoodDecisions = 0
+                                    $selfTuner.BadDecisions = 0
+                                    $selfTuner.TotalEvaluations = 0
+                                }
+                                # Zapisz zmiany
+                                $null = Save-State -Brain $brain -Prophet $prophet
+                                if ($selfTuner) { $selfTuner.SaveState($Script:ConfigDir) }
+                                Add-Log "- RESET_LEARNING: Wszystkie profile per-app wyczyszczone"
+                            }
+                            "AI_RESTORE" {
+                                #  Przywroc AI dla aktualnej aplikacji (bez toggle globalnego)
+                                $Global:AI_Active = $true
+                                $manualMode = ""
+                                $Script:LastPowerMode = ""
+                                $Script:LastPowerMax = -1
+                                # Wyczysc manual override dla aktualnej aplikacji
+                                if ($prophet -and $currentActiveApp) {
+                                    $appKey = $currentActiveApp.ToLower()
+                                    if ($prophet.Apps.ContainsKey($appKey)) {
+                                        $prophet.Apps[$appKey].ManualOverride = $false
+                                    }
+                                }
+                                Add-Log " AI_RESTORE: Przywrocono AI dla $currentActiveApp"
+                            }
+                        }
+                    }
+                } catch {
+                    if ($_.Exception.Message -eq "EXIT") { Request-Shutdown -Reason "Nested EXIT" }
+                }
+            }
+            if ([Console]::KeyAvailable) {
+                $key = [Console]::ReadKey($true)
+                switch ($key.KeyChar) {
+                    '1' { 
+                        # TURBO = AI uczy sie, tryb wymuszony
+                        $Global:AI_Active = $true
+                        $Script:UserForcedMode = "Turbo"
+                        $manualMode = "Turbo"
+                        $Script:LastPowerMode = ""
+                        $Script:LastPowerMax = -1
+                        $brain.Evolve("Turbo")
+                        Set-PowerMode -Mode "Turbo" -CurrentCPU $currentMetrics.CPU
+                        Add-Log " TURBO (AI learns, mode locked)" 
+                    }
+                    '2' { 
+                        # BALANCED = AI uczy sie, tryb wymuszony
+                        $Global:AI_Active = $true
+                        $Script:UserForcedMode = "Balanced"
+                        $manualMode = "Balanced"
+                        $Script:LastPowerMode = ""
+                        $Script:LastPowerMax = -1
+                        $brain.Evolve("Balanced")
+                        Set-PowerMode -Mode "Balanced" -CurrentCPU $currentMetrics.CPU
+                        Add-Log "- BALANCED (AI learns, mode locked)" 
+                    }
+                    '3' { 
+                        # SILENT = AI uczy sie, tryb wymuszony
+                        $Global:AI_Active = $true
+                        $Script:UserForcedMode = "Silent"
+                        $manualMode = "Silent"
+                        $Script:LastPowerMode = ""
+                        $Script:LastPowerMax = -1
+                        $brain.Evolve("Silent")
+                        Set-PowerMode -Mode "Silent" -CurrentCPU $currentMetrics.CPU
+                        Add-Log "- SILENT (AI learns, mode locked)" 
+                    }
+                    '5' { 
+                        $Global:AI_Active = -not $Global:AI_Active
+                        if ($Global:AI_Active) {
+                            $Script:UserForcedMode = ""
+                        }
+                        $Script:LastPowerMode = ""
+                        $Script:LastPowerMax = -1
+                        Add-Log " AI: $(if($Global:AI_Active){'ON (full control)'}else{'OFF'})" 
+                    }
+                    'd' { 
+                        $Global:DebugMode = -not $Global:DebugMode
+                        Add-Log "- Debug: $(if($Global:DebugMode){'ON'}else{'OFF'})" 
+                    }
+                    'D' { 
+                        $Global:DebugMode = -not $Global:DebugMode
+                        Add-Log "- Debug: $(if($Global:DebugMode){'ON'}else{'OFF'})" 
+                    }
+                    's' { 
+                        $manualSave = Save-State -Brain $brain -Prophet $prophet
+                        if ($manualSave) {
+                            $prophetLastAutosave = [DateTime]::Now
+                            $prophetLastSavedSessions = $prophet.TotalSessions
+                            $anomalyDetector.SaveProfiles($Script:ConfigDir)
+                            $loadPredictor.SavePatterns($Script:ConfigDir)
+                            Add-Log " Saved OK (all components)"
+                        } else {
+                            Add-Log "- Save failed"
+                        }
+                    }
+                    'S' { 
+                        $manualSave = Save-State -Brain $brain -Prophet $prophet
+                        if ($manualSave) {
+                            $prophetLastAutosave = [DateTime]::Now
+                            $prophetLastSavedSessions = $prophet.TotalSessions
+                            $anomalyDetector.SaveProfiles($Script:ConfigDir)
+                            $loadPredictor.SavePatterns($Script:ConfigDir)
+                            Add-Log " Saved OK (all components)"
+                        } else {
+                            Add-Log "- Save failed"
+                        }
+                    }
+                    't' {
+                        try { $metrics.InitializeFromDetectedSources() } catch {}
+                        Add-Log "- Temp source: $($metrics.TempSource) = $($metrics.CachedTemp)°C"
+                    }
+                    'T' {
+                        try { $metrics.InitializeFromDetectedSources() } catch {}
+                        Add-Log "- Temp source: $($metrics.TempSource) = $($metrics.CachedTemp)°C"
+                    }
+                    'p' {
+                        Add-Log " Predicted load: $([Math]::Round($predictedLoad))%"
+                        if ($predictedApps.Count -gt 0) {
+                            Add-Log "   Expected apps: $($predictedApps -join ', ')"
+                        }
+                    }
+                    'P' {
+                        Add-Log " Predicted load: $([Math]::Round($predictedLoad))%"
+                        if ($predictedApps.Count -gt 0) {
+                            Add-Log "   Expected apps: $($predictedApps -join ', ')"
+                        }
+                    }
+                    'a' {
+                        $status = $anomalyDetector.GetStatus()
+                        Add-Log "- Anomaly profiles: $($status.ProfileCount), Last check: $($status.LastCheck)"
+                    }
+                    'A' {
+                        $status = $anomalyDetector.GetStatus()
+                        Add-Log "- Anomaly profiles: $($status.ProfileCount), Last check: $($status.LastCheck)"
+                    }
+                    'c' {
+                        # Chain Predictor status
+                        Add-Log "- Chain: $($chainPredictor.GetRecentChainDisplay())"
+                        Add-Log "   Next: $($chainPredictor.GetPredictionStatus())"
+                        Add-Log "   Accuracy: $([Math]::Round($chainPredictor.GetAccuracy() * 100))% ($($chainPredictor.GetChainCount()) chains)"
+                    }
+                    'C' {
+                        Add-Log "- Chain: $($chainPredictor.GetRecentChainDisplay())"
+                        Add-Log "   Next: $($chainPredictor.GetPredictionStatus())"
+                        Add-Log "   Accuracy: $([Math]::Round($chainPredictor.GetAccuracy() * 100))% ($($chainPredictor.GetChainCount()) chains)"
+                    }
+                    'e' {
+                        # Self-Tuner efficiency
+                        $profile = $selfTuner.GetCurrentProfile()
+                        Add-Log "- Self-Tuner: $($selfTuner.GetStatus())"
+                        Add-Log "   Good: $($selfTuner.GoodDecisions) | Bad: $($selfTuner.BadDecisions)"
+                        Add-Log "   Hour profile: Samples=$($profile.Samples) AvgCPU=$([Math]::Round($profile.AvgCPU))%"
+                    }
+                    'E' {
+                        $profile = $selfTuner.GetCurrentProfile()
+                        Add-Log "- Self-Tuner: $($selfTuner.GetStatus())"
+                        Add-Log "   Good: $($selfTuner.GoodDecisions) | Bad: $($selfTuner.BadDecisions)"
+                        Add-Log "   Hour profile: Samples=$($profile.Samples) AvgCPU=$([Math]::Round($profile.AvgCPU))%"
+                    }
+                    'w' {
+                        # Open Web Dashboard
+                        Start-Process "http://localhost:$Global:WebDashboardPort" | Out-Null
+                        Add-Log "- Opening Dashboard in browser..."
+                    }
+                    'W' {
+                        Start-Process "http://localhost:$Global:WebDashboardPort" | Out-Null
+                        Add-Log "- Opening Dashboard in browser..."
+                    }
+                    '9' {
+                        # Toggle Auto-Start
+                        $exists = Test-CPUManagerTaskExists
+                        if ($exists) {
+                            Register-CPUManagerTask -ScriptPath $MyInvocation.MyCommand.Path -Remove
+                            Add-Log "- Auto-start DISABLED"
+                        } else {
+                            Register-CPUManagerTask -ScriptPath $MyInvocation.MyCommand.Path
+                            Add-Log "- Auto-start ENABLED"
+                        }
+                    }
+                    { $_ -eq 'h' -or $_ -eq 'H' } {
+                        # Toggle Desktop Widget (zewnetrzny)
+                        $widgetCmd = Join-Path $Script:ConfigDir 'WidgetCommand.txt'
+                        Start-BackgroundWrite $widgetCmd "TOGGLE" 'UTF8'
+                        Add-Log "- Desktop Widget: TOGGLE"
+                    }
+                    'x' {
+                        # Explainer and Thermal status
+                        Add-Log " DECISION EXPLAINER"
+                        Add-Log "   Current: $($explainer.GetExplanation())"
+                        $stats = $explainer.GetStats()
+                        Add-Log "   Stats: Silent=$($stats.Silent)% Balanced=$($stats.Balanced)% Turbo=$($stats.Turbo)%"
+                        Add-Log "- THERMAL GUARDIAN"
+                        Add-Log "   $($thermalGuard.GetStatus())"
+                        if ($thermalGuard.ThrottleActive) {
+                            Add-Log "   [WARN] THROTTLE ACTIVE: $($thermalGuard.ThrottleReason)"
+                        }
+                        if ($currentMetrics.GPU) {
+                            Add-Log " GPU: $($currentMetrics.GPU.Temp)C | $($currentMetrics.GPU.Load)% | $($currentMetrics.GPU.Power)W"
+                        }
+                        if ($currentMetrics.VRM -and $currentMetrics.VRM.Available) {
+                            Add-Log "- VRM: $($currentMetrics.VRM.Temp)C"
+                        }
+                    }
+                    'X' {
+                        Add-Log " DECISION EXPLAINER"
+                        Add-Log "   Current: $($explainer.GetExplanation())"
+                        $stats = $explainer.GetStats()
+                        Add-Log "   Stats: Silent=$($stats.Silent)% Balanced=$($stats.Balanced)% Turbo=$($stats.Turbo)%"
+                        Add-Log "- THERMAL GUARDIAN"
+                        Add-Log "   $($thermalGuard.GetStatus())"
+                        if ($thermalGuard.ThrottleActive) {
+                            Add-Log "   [WARN] THROTTLE ACTIVE: $($thermalGuard.ThrottleReason)"
+                        }
+                        if ($currentMetrics.GPU) {
+                            Add-Log " GPU: $($currentMetrics.GPU.Temp)C | $($currentMetrics.GPU.Load)% | $($currentMetrics.GPU.Power)W"
+                        }
+                        if ($currentMetrics.VRM -and $currentMetrics.VRM.Available) {
+                            Add-Log "- VRM: $($currentMetrics.VRM.Temp)C"
+                        }
+                    }
+                    'g' {
+                        # Genetic Algorithm status
+                        Add-Log "- Genetic: $($genetic.GetStatus())"
+                        $params = $genetic.GetCurrentParams()
+                        Add-Log "   TurboThr: $($params.TurboThreshold) | BalancedThr: $($params.BalancedThreshold)"
+                    }
+                    'G' {
+                        Add-Log "- Genetic: $($genetic.GetStatus())"
+                        $params = $genetic.GetCurrentParams()
+                        Add-Log "   TurboThr: $($params.TurboThreshold) | BalancedThr: $($params.BalancedThreshold)"
+                    }
+                    'b' {
+                        # Bandit status
+                        Add-Log "- Bandit: $($bandit.GetStatus())"
+                        Add-Log "   Total pulls: $($bandit.TotalPulls)"
+                    }
+                    'B' {
+                        Add-Log "- Bandit: $($bandit.GetStatus())"
+                        Add-Log "   Total pulls: $($bandit.TotalPulls)"
+                    }
+                    '0' {
+                        # Return to AUTO mode - pelna kontrola AI
+                        $Global:AI_Active = $true
+                        $Script:UserForcedMode = ""
+                        $Script:LastPowerMode = ""
+                        $Script:LastPowerMax = -1
+                        Add-Log " AUTO mode (AI full control)"
+                    }
+                    'i' {
+                        # Show detailed INFO
+                        Add-Log "# DETAILED AI INFO #"
+                        Add-Log " Brain: $($brain.GetCount()) weights"
+                        Add-Log " Prophet: $($prophet.GetAppCount()) apps, $($prophet.TotalSessions) sessions"
+                        Add-Log " Q-Learning: $($qLearning.GetStatus())"
+                        Add-Log "- Bandit: $($bandit.GetStatus())"
+                        Add-Log "- Genetic: $($genetic.GetStatus())"
+                        Add-Log " Ensemble: $($ensemble.GetStatus())"
+                        Add-Log "- Energy: $($energyTracker.GetStatus())"
+                        Add-Log " Context: $($contextDetector.GetStatus())"
+                        Add-Log "- Thermal: $($thermalPredictor.GetStatus())"
+                        Add-Log "- Chain: $($chainPredictor.GetChainCount()) chains"
+                        Add-Log "- Patterns: $($userPatterns.GetStatus())"
+                        Add-Log "- Self-Tune: $($selfTuner.GetStatus())"
+                        Add-Log "- ThermalGuard: $($thermalGuard.GetStatus())"
+                        Add-Log " Explainer: $($explainer.GetStatus())"
+                        Add-Log "#"
+                    }
+                    'I' {
+                        Add-Log "# DETAILED AI INFO #"
+                        Add-Log " Brain: $($brain.GetCount()) weights"
+                        Add-Log " Prophet: $($prophet.GetAppCount()) apps, $($prophet.TotalSessions) sessions"
+                        Add-Log " Q-Learning: $($qLearning.GetStatus())"
+                        Add-Log "- Bandit: $($bandit.GetStatus())"
+                        Add-Log "- Genetic: $($genetic.GetStatus())"
+                        Add-Log " Ensemble: $($ensemble.GetStatus())"
+                        Add-Log "- Energy: $($energyTracker.GetStatus())"
+                        Add-Log " Context: $($contextDetector.GetStatus())"
+                        Add-Log "- Thermal: $($thermalPredictor.GetStatus())"
+                        Add-Log "- Chain: $($chainPredictor.GetChainCount()) chains"
+                        Add-Log "- Patterns: $($userPatterns.GetStatus())"
+                        Add-Log "- Self-Tune: $($selfTuner.GetStatus())"
+                        Add-Log "- ThermalGuard: $($thermalGuard.GetStatus())"
+                        Add-Log " Explainer: $($explainer.GetStatus())"
+                        Add-Log "#"
+                    }
+                    'l' {
+                        # Show recent logs
+                        Add-Log "# RECENT LOGS #"
+                        $recentLogs = $Script:ActivityLog | Select-Object -Last 15
+                        foreach ($logEntry in $recentLogs) {
+                            Add-Log "  $logEntry"
+                        }
+                        Add-Log "#"
+                    }
+                    'L' {
+                        Add-Log "# RECENT LOGS #"
+                        $recentLogs = $Script:ActivityLog | Select-Object -Last 15
+                        foreach ($logEntry in $recentLogs) {
+                            Add-Log "  $logEntry"
+                        }
+                        Add-Log "#"
+                    }
+                    'r' {
+                        if (-not (Is-NeuralBrainEnabled)) { return }
+                        $path = Join-Path $dir "BrainState.json"
+                        $data = @{ Weights = $this.Weights; AggressionBias = $this.AggressionBias; ReactivityBias = $this.ReactivityBias; LastLearned = $this.LastLearned; LastLearnTime = $this.LastLearnTime; TotalDecisions = $this.TotalDecisions }
+                        [System.IO.File]::WriteAllText($path, ($data | ConvertTo-Json -Depth 4 -Compress), [System.Text.Encoding]::UTF8)
+                    }
+                    'R' {
+                        $brain.Weights.Clear()
+                        Add-Log " Neural Brain RESET - all weights cleared"
+                    }
+                    'q' { Request-Shutdown -Reason "Console key q" }
+                    'Q' { Request-Shutdown -Reason "Console key Q" }
+                }
+                # Handle special keys
+                if ($key.Key -eq [ConsoleKey]::F12) { 
+                    Show-Database -Prophet $prophet 
+                }
+                if ($key.Key -eq [ConsoleKey]::Escape) {
+                    Request-Shutdown -Reason "Console Escape"
+                }
+                # Ctrl+C
+                if ($key.Key -eq [ConsoleKey]::C -and $key.Modifiers -band [ConsoleModifiers]::Control) {
+                    Request-Shutdown -Reason "Ctrl+C"
+                }
+            }
+            # (W przyszlosci mozna podpiac pod rzeczywiste FPS z gier)
+            if ($Script:PerfMonitor) {
+                $estimatedFrameTime = 16.67  # 60 FPS baseline (ms)
+                # Przeciazenie CPU = dluzsze frame times
+                if ($currentMetrics.CPU -gt 90) {
+                    $estimatedFrameTime += 8.0
+                } elseif ($currentMetrics.CPU -gt 80) {
+                    $estimatedFrameTime += 5.0
+                } elseif ($currentMetrics.CPU -gt 70) {
+                    $estimatedFrameTime += 2.0
+                }
+                # Thermal throttling = spike w frame time
+                if ($currentMetrics.Temp -gt 90) {
+                    $estimatedFrameTime += 10.0
+                } elseif ($currentMetrics.Temp -gt 85) {
+                    $estimatedFrameTime += 5.0
+                } elseif ($currentMetrics.Temp -gt 80) {
+                    $estimatedFrameTime += 2.0
+                }
+                # Silent mode przy obciazeniu = mozliwe stuttery
+                #  SYNC: uses variables z config.json
+                if ($currentState -eq "Silent" -and $currentMetrics.CPU -gt $Script:TurboThreshold) {
+                    $estimatedFrameTime += 3.0
+                }
+                $Script:PerfMonitor.RecordFrame($estimatedFrameTime)
+            }
+            $elapsed = $stopwatch.ElapsedMilliseconds
+            $sleepTime = [Math]::Max(100, $dynamicInterval - $elapsed)
+            # Obsluga zdarzen tray icon - krotkie sleepy z DoEvents
+            $remaining = [int]$sleepTime
+            while ($remaining -gt 0 -and -not $Global:ExitRequested) {
+                [System.Windows.Forms.Application]::DoEvents()
+                Start-Sleep -Milliseconds ([Math]::Min(50, $remaining))
+                $remaining -= 50
+            }
+            if ($Global:ExitRequested) { break }
+        }
+        Write-Host "[DEBUG] Engine: main loop exited (ExitRequested=$Global:ExitRequested)" -ForegroundColor Yellow
+    } catch {
+        # Blok catch dodany automatycznie (naprawa krytycznego bledu skladni)
+        if ($_.Exception.Message -ne "EXIT") {
+            Write-Host "`nError: $_" -ForegroundColor Red
+            Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+        }
+    } finally {
+        # Przywroc normalny stan konsoli
+        try { [Console]::CursorVisible = $true } catch { }
+        try { [Console]::TreatControlCAsInput = $false } catch { }
+        try { $global:ErrorActionPreference = "Continue" } catch { }
+        # - Przywroc domyslne plany zasilania Windows
+        try { $powerRestored = Restore-DefaultPowerPlans } catch { $powerRestored = $false }
+        try { $priorityManager.ResetAllPriorities() } catch { }
+        try { $null = Save-State -Brain $brain -Prophet $prophet } catch { }
+        try { $anomalyDetector.SaveProfiles($Script:ConfigDir) } catch { }
+        try { $loadPredictor.SavePatterns($Script:ConfigDir) } catch { }
+        try { $selfTuner.SaveState($Script:ConfigDir) } catch { }
+        try { $userPatterns.SaveState($Script:ConfigDir) } catch { }
+        try { $chainPredictor.SaveState($Script:ConfigDir) } catch { }
+        #  MEGA AI components
+        try { $qLearning.SaveState($Script:ConfigDir) } catch { }
+        try { $ensemble.SaveState($Script:ConfigDir) } catch { }
+        try { $energyTracker.SaveState($Script:ConfigDir) } catch { }
+        #  ULTRA AI components
+        try { $bandit.SaveState($Script:ConfigDir) } catch { }
+        try { $genetic.SaveState($Script:ConfigDir) } catch { }
+        try { $aiCoordinator.SaveState($Script:ConfigDir) } catch { }
+        # - V35 NEW: RAMAnalyzer
+        try { $ramAnalyzer.SaveState($Script:ConfigDir) } catch { }
+        # - V37.8.2: Network Optimizer + Network AI
+        try { $networkOptimizer.SaveState($Script:ConfigDir) } catch { }
+        try { $networkAI.SaveState($Script:ConfigDir) } catch { }
+        # - V40 FIX: Brakujące komponenty w finally (ProcessAI, GPUAI, ContextDetector, etc.)
+        try { $processAI.SaveState($Script:ConfigDir) } catch { }
+        try { $gpuAI.SaveState($Script:ConfigDir) } catch { }
+        try { $contextDetector.SaveState($Script:ConfigDir) } catch { }
+        try { $phaseDetector.SaveState($Script:ConfigDir) } catch { }
+        try { $thermalPredictor.SaveState($Script:ConfigDir) } catch { }
+        try { $explainer.SaveState($Script:ConfigDir) } catch { }
+        try { $thermalGuard.SaveState($Script:ConfigDir) } catch { }
+        #  Zapisz ustawienia programu
+        try {
+            $programSettings = @{
+                AI_Active = $Global:AI_Active
+                DebugMode = $Global:DebugMode
+                EcoMode = $Global:EcoMode
+                ManualMode = $manualMode
+                LastSaved = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            }
+            $programSettings | ConvertTo-Json | Set-Content $Script:SettingsPath -Force
+        } catch { }
+        # - Stop Web Dashboard
+        try { $webDashboard.Stop() } catch { }
+        # - Zamknij zewnetrzne widgety
+        try {
+            Send-TrayCommand "EXIT"
+            Start-BackgroundWrite (Join-Path $Script:ConfigDir 'MiniWidgetCommand.txt') "EXIT" 'UTF8'
+        } catch { }
+        try { $metrics.Cleanup() } catch { }
+        try { $watcher.Cleanup() } catch { }
+        # Stop metrics timer if running
+        try {
+            if ($Script:MetricsTimer) {
+                try { $Script:MetricsTimer.Stop() } catch { }
+                try { $Script:MetricsTimer.Dispose() } catch { }
+                try { Add-Log "Metrics timer stopped" } catch { }
+            }
+        } catch { }
+        # Ukryj i usun tray icon glownego procesu
+        try {
+            if ($Script:MainTray) {
+                $Script:MainTray.Visible = $false
+                $Script:MainTray.Dispose()
+            }
+        } catch { }
+        # - V37.7.15: Restore all throttled processes
+        try { $proBalance.RestoreAll() } catch { }
+        try {
+            [System.GC]::Collect()
+            [System.GC]::WaitForPendingFinalizers()
+            [System.GC]::Collect()
+        } catch { }
+        Clear-Host
+        Write-Host "`n  CPU Manager AI ULTRA stopped." -ForegroundColor Yellow
+        Write-Host ""
+        # - Status przywrocenia planow zasilania
+        Write-Host "  - POWER PLANS" -ForegroundColor Yellow
+        if ($powerRestored) {
+            Write-Host "     Plan 'Balanced' przywrocony (CPU: 5-100%)" -ForegroundColor Green
+        } else {
+            Write-Host "     Nie udalo sie przywrocic planow" -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "   AI STATUS" -ForegroundColor Cyan
+        Write-Host "     Prophet: $($prophet.GetAppCount()) apps" -ForegroundColor Gray
+        Write-Host "     Brain: $($brain.GetCount()) weights" -ForegroundColor Gray
+        Write-Host "     Self-Tuner: $($selfTuner.GetStatus())" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "   MEGA AI STATUS" -ForegroundColor Magenta
+        Write-Host "     Q-Learning: $($qLearning.GetStatus())" -ForegroundColor Gray
+        Write-Host "     Ensemble: $($ensemble.GetStatus())" -ForegroundColor Gray
+        Write-Host "     Energy: $($energyTracker.GetStatus())" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "   ULTRA AI STATUS" -ForegroundColor Blue
+        Write-Host "     Bandit: $($bandit.GetStatus())" -ForegroundColor Gray
+        Write-Host "     Genetic: $($genetic.GetStatus())" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "   V40 AI STATUS" -ForegroundColor Green
+        Write-Host "     GPU AI: $($gpuAI.GetStatus())" -ForegroundColor Gray
+        Write-Host "     Process AI: $($processAI.GetStatus())" -ForegroundColor Gray
+        Write-Host "     Network AI: $($networkAI.GetStatus())" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  Files saved to: $Script:ConfigDir" -ForegroundColor DarkGray
+        Write-Host ""
+        # Pokaz konsole jesli byla ukryta
+        try {
+            $consolePtr = [ConsoleWindow]::GetConsoleWindow()
+            [ConsoleWindow]::ShowWindow($consolePtr, 5) | Out-Null
+        } catch { }
+        try { [Console]::CursorVisible = $true } catch { }
+    }
+}
+# Wywolanie glownej funkcji z error handling
+try {
+    Main
+    # Wyczysc konsole po wyjsciu i pokaz komunikat
+    Clear-Host
+Write-Host ""
+Write-Host "  ============================================" -ForegroundColor Cyan
+Write-Host "    CPU MANAGER AI - ZAMKNIETO" -ForegroundColor Cyan
+Write-Host "  ============================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Nacisnij dowolny klawisz aby zamknac okno..." -ForegroundColor Gray
+Write-Host ""
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+} catch {
+    # Fatal error - log i restart (chyba ze to normalne wyjscie)
+    if ($Script:ShutdownRequested -or $_.Exception.Message -eq "EXIT" -or $_.Exception.Message -match "break") {
+        break
+    }
+    $msg = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - FATAL ERROR: $($_.Exception.Message)`n$($_.ScriptStackTrace)`n"
+    try { Add-Content -Path $Script:ErrorLogPath -Value $msg } catch { }
+    Write-Host ""
+    Write-Host "  [WARN] Fatal Error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  Restarting in 5 seconds... (Ctrl+C to abort)" -ForegroundColor Yellow
+    Start-Sleep -Seconds 5
+}
+# Po wyjsciu z petli - przywroc normalny stan PowerShell
+try {
+    $global:ErrorActionPreference = "Continue"
+    [Console]::CursorVisible = $true
+    [Console]::TreatControlCAsInput = $false
+} catch { }
+# Pokaz konsole
+try {
+    $consolePtr = [ConsoleWindow]::GetConsoleWindow()
+    [ConsoleWindow]::ShowWindow($consolePtr, 5) | Out-Null
+} catch { }
+# Nie robimy Clear-Host - zachowujemy podsumowanie z finally
+Write-Host ""
+Write-Host "  ---------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  Program zakonczony. PowerShell gotowy." -ForegroundColor Green
+Write-Host ""
+Write-Host "  Nacisnij ENTER aby zamknac lub wpisz komendy..." -ForegroundColor DarkGray
+Read-Host
+# #
+# PODSUMOWANIE SESJI
+# #
+function Write-SessionSummary {
+    $SessionEndTime = Get-Date
+    $SessionDuration = $SessionEndTime - $Global:SessionStartTime
+    Write-Log "" "INFO"
+    Write-Log "#" "INFO"
+    Write-Log "-                 SESJA ZAKONCZONA - PODSUMOWANIE                                  ?" "INFO"
+    Write-Log "#" "INFO"
+    Write-Log "Czas trwania: $([Math]::Round($SessionDuration.TotalMinutes, 2)) minut" "INFO"
+    Write-Log "Zmian trybu: $($Global:ModeChangeCount)" "INFO"
+    Write-Log "Aktywacji BOOST: $($Global:BoostCount)" "INFO"
+    Write-Log "Log zapisany: $Global:LogFile" "INFO"
+}
+$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+    Write-SessionSummary
+}
