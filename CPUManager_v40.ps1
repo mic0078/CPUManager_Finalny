@@ -33,6 +33,11 @@
 # V42.5: TIMER-BASED HYSTERESIS - FIX PING-PONG!
 # 
 # PROBLEM v42.4:
+        # Ensure any buffered AI-learning entries are flushed before exit
+        try { Flush-AILearningBuffer -Force } catch {}
+        try { Stop-AILearningFlushTimer } catch {}
+        try { Stop-AILearningMaintenance } catch {}
+
 # - Entry: CPU<45%, Exit: CPU>45% (instant)
 # - Silent Hill: CPU skacze 40-55% → Mode ping-pong co 5 sekund! ❌
 # - Wentylator: 2500 RPM ↔ 4000 RPM → IRYTUJĄCE! ❌
@@ -116,7 +121,7 @@
 # #
 # TDP SAFETY LIMITS - KRYTYCZNE BEZPIECZNIKI
 # #
-$Script:TDP_HARD_LIMITS = @{
+$Script:TDP_HARD_LIMITS = @{ # (console sizing and priority moved below to avoid duplicate try blocks)
     MaxSTAPM = 28      # Absolutny maksymalny STAPM (W) - dopasowano do profilu Extreme
     MaxFast = 40       # Absolutny maksymalny Fast Boost (W)
     MaxSlow = 35       # Absolutny maksymalny Slow Boost (W)
@@ -125,6 +130,29 @@ $Script:TDP_HARD_LIMITS = @{
     MinTctl = 50       # Minimalna temperatura (zabezpieczenie)
     AutoAdjustTctl = $true  # Jesli $true -> automatycznie dopasowuje Tctl do zakresu [MinTctl, MaxTctl]; jesli $false -> tylko ostrzega przy MinTctl
 }
+try {
+    $raw = $Host.UI.RawUI
+    $desiredWidth = 157
+    $desiredWinHeight = 41
+    $desiredBufHeight = 9000
+
+    $buf = $raw.BufferSize
+    if ($buf.Width -ne $desiredWidth -or $buf.Height -lt $desiredBufHeight) {
+        $buf.Width = $desiredWidth
+        $buf.Height = [int]$desiredBufHeight
+        $raw.BufferSize = $buf
+    }
+
+    $win = $raw.WindowSize
+    if ($win.Width -ne $desiredWidth -or $win.Height -ne $desiredWinHeight) {
+        $win.Width = $desiredWidth
+        $win.Height = $desiredWinHeight
+        $raw.WindowSize = $win
+    }
+
+    $proc = Get-Process -Id $PID -ErrorAction Stop
+    if ($proc.PriorityClass -ne 'Idle') { $proc.PriorityClass = 'Idle' }
+} catch {}
 function Validate-TDP {
     param(
         [hashtable]$TDPProfile,
@@ -2095,9 +2123,9 @@ try {
 } catch { }
 # AUTOMATYCZNE USTAWIENIE ROZMIARU OKNA
 try {
-    # Wymagane wymiary: 100 kolumn x 45 wierszy (dopasowane do pelnego UI)
-    $targetWidth = 100
-    $targetHeight = 50
+    # Wymagane wymiary: ustawione zgodnie z preferencjami użytkownika
+    $targetWidth = 157
+    $targetHeight = 41
     # Pobierz maksymalny rozmiar okna
     $maxSize = $Host.UI.RawUI.MaxPhysicalWindowSize
     # Ogranicz do maksymalnego rozmiaru
@@ -2105,11 +2133,12 @@ try {
     $newHeight = [Math]::Min($targetHeight, $maxSize.Height)
     # Ustaw bufor (musi byc >= rozmiar okna)
     $bufferSize = $Host.UI.RawUI.BufferSize
+    $desiredBufHeight = 9000
     if ($bufferSize.Width -lt $newWidth) {
         $bufferSize.Width = $newWidth + 10
     }
-    if ($bufferSize.Height -lt 3000) {
-        $bufferSize.Height = 3000  # Duzy bufor dla scrollowania
+    if ($bufferSize.Height -lt $desiredBufHeight) {
+        $bufferSize.Height = [int]$desiredBufHeight  # Duzy bufor dla scrollowania
     }
     $Host.UI.RawUI.BufferSize = $bufferSize
     # Ustaw rozmiar okna
@@ -8228,6 +8257,10 @@ class SharedAppKnowledge {
         $p.AvgCPU = $avgCPU; $p.AvgGPU = $avgGPU
         $p.BestMode = $bestMode; $p.Sessions = $sessions
         $p.LastSeen = Get-Date; $p.UpdateCount++
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='SharedAppKnowledge'; Component='Prophet'; App=$app; AvgCPU=[double]$avgCPU; AvgGPU=[double]$avgGPU; BestMode=$bestMode; Sessions=[int]$sessions }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     [void] WriteFromQLearning([string]$app, [string]$bestAction, [double]$confidence, [string]$phase, [string]$phaseAction) {
@@ -8235,6 +8268,10 @@ class SharedAppKnowledge {
         $p.QBestAction = $bestAction; $p.QConfidence = $confidence
         if ($phase -and $phaseAction) { $p.QPhaseActions[$phase] = $phaseAction }
         $p.LastSeen = Get-Date; $p.UpdateCount++
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='SharedAppKnowledge'; Component='QLearning'; App=$app; QBestAction=$bestAction; Confidence=[double]$confidence; Phase=$phase; PhaseAction=$phaseAction }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     [void] WriteFromGPUAI([string]$app, [string]$preferredGPU, [bool]$isGPUBound, [double]$avgGPULoad, [string]$category) {
@@ -8242,6 +8279,10 @@ class SharedAppKnowledge {
         $p.PreferredGPU = $preferredGPU; $p.IsGPUBound = $isGPUBound
         $p.AvgGPULoad = $avgGPULoad; $p.GPUCategory = $category
         $p.LastSeen = Get-Date; $p.UpdateCount++
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='SharedAppKnowledge'; Component='GPUAI'; App=$app; PreferredGPU=$preferredGPU; IsGPUBound=[bool]$isGPUBound; AvgGPULoad=[double]$avgGPULoad; GPUCategory=$category }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     [void] WriteFromPhase([string]$app, [string]$dominantPhase, [hashtable]$phaseHistory) {
@@ -8249,6 +8290,10 @@ class SharedAppKnowledge {
         $p.DominantPhase = $dominantPhase
         if ($phaseHistory) { $p.PhaseHistory = $phaseHistory }
         $p.LastSeen = Get-Date; $p.UpdateCount++
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='SharedAppKnowledge'; Component='Phase'; App=$app; DominantPhase=$dominantPhase }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     [void] WriteFromThermal([string]$app, [double]$avgTemp, [double]$peakTemp, [string]$risk) {
@@ -8257,24 +8302,40 @@ class SharedAppKnowledge {
         if ($peakTemp -gt $p.PeakTemp) { $p.PeakTemp = $peakTemp }
         $p.ThermalRisk = $risk
         $p.LastSeen = Get-Date; $p.UpdateCount++
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='SharedAppKnowledge'; Component='Thermal'; App=$app; AvgTemp=[double]$avgTemp; PeakTemp=[double]$peakTemp; Risk=$risk }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     [void] WriteFromContext([string]$app, [string]$category, [int]$priority) {
         $p = $this.GetProfile($app)
         $p.Category = $category; $p.Priority = $priority
         $p.LastSeen = Get-Date; $p.UpdateCount++
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='SharedAppKnowledge'; Component='Context'; App=$app; Category=$category; Priority=[int]$priority }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     [void] WriteFromNetwork([string]$app, [string]$mode, [double]$dl, [double]$ul) {
         $p = $this.GetProfile($app)
         $p.NetworkMode = $mode; $p.AvgDownload = $dl; $p.AvgUpload = $ul
         $p.LastSeen = Get-Date; $p.UpdateCount++
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='SharedAppKnowledge'; Component='Network'; App=$app; Mode=$mode; AvgDL=[double]$dl; AvgUL=[double]$ul }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     [void] WriteFromEnergy([string]$app, [double]$efficiency) {
         $p = $this.GetProfile($app)
         $p.Efficiency = $efficiency
         $p.LastSeen = Get-Date; $p.UpdateCount++
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='SharedAppKnowledge'; Component='Energy'; App=$app; Efficiency=[double]$efficiency }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     # === READ - AICoordinator i inne silniki czytają pełny profil ===
@@ -12787,6 +12848,10 @@ class ProcessAI {
         
         $this.TotalLearnings++
         $this.LastLearnTime = [DateTime]::Now
+        try {
+            $entry = @{ Timestamp = (Get-Date).ToString('o'); Source='ProcessAI'; Event='Learn'; Process=$appLower; AvgCPU=[double]$cpu; AvgRAM=[double]$ram; Sessions=$this.ProcessProfiles[$appLower].Sessions }
+            Append-AILearningEntry $entry
+        } catch {}
     }
     
     # Klasyfikacja procesu na podstawie użycia zasobów
@@ -15647,6 +15712,188 @@ function Main {
     $initialCooldown = [Math]::Max(5, [int]$Script:BoostCooldown)
     $watcher = [ProcessWatcher]::new($initialCooldown)
     $Script:ProcessWatcherInstance = $watcher
+    # --------------------------- AILearning storage helpers ---------------------------
+    # Purpose: append-only NDJSON log + bounded rotation + periodic compacted snapshot
+    if (-not $Script:ConfigDir) { $Script:ConfigDir = "C:\CPUManager" }
+    if (-not $Script:AILearningLogPath) { $Script:AILearningLogPath = Join-Path $Script:ConfigDir 'AILearning.log' }
+    if (-not $Script:AILearningSnapshotPath) { $Script:AILearningSnapshotPath = Join-Path $Script:ConfigDir 'AILearningState.json' }
+    if (-not $Script:AILearningLogMaxMB) { $Script:AILearningLogMaxMB = 50 }
+    if (-not $Script:AILearningLogKeep) { $Script:AILearningLogKeep = 5 }
+    if (-not $Script:AILearningSnapshotLines) { $Script:AILearningSnapshotLines = 1000 }
+
+    function Append-AILearningEntry {
+        param(
+            [Parameter(Mandatory=$true)][object]$Entry
+        )
+        try {
+            # Initialize buffer structures if missing
+            if (-not $Script:AILearningBuffer) { $Script:AILearningBuffer = New-Object System.Collections.Generic.List[object] }
+            if (-not $Script:AILearningBufferLock) { $Script:AILearningBufferLock = New-Object Object }
+            if (-not $Script:AILearningAppendThreshold) { $Script:AILearningAppendThreshold = 5 }
+            if (-not $Script:AILearningFlushIntervalSeconds) { $Script:AILearningFlushIntervalSeconds = 10 }
+
+            # Add to in-memory buffer (fast, minimal work in hot path)
+            [System.Threading.Monitor]::Enter($Script:AILearningBufferLock)
+            try { $null = $Script:AILearningBuffer.Add($Entry) } finally { [System.Threading.Monitor]::Exit($Script:AILearningBufferLock) }
+
+            # If buffer reached threshold, flush synchronously (background timer will also flush periodically)
+            if ($Script:AILearningBuffer.Count -ge $Script:AILearningAppendThreshold) { Flush-AILearningBuffer }
+        } catch {
+            Write-DebugLog "Append-AILearningEntry ERROR: $_" "ERROR" "ENGINE"
+        }
+    }
+
+    function Flush-AILearningBuffer {
+        param([switch]$Force)
+        try {
+            if (-not $Script:AILearningBuffer) { return }
+            if (-not $Script:AILearningBufferLock) { return }
+
+            $toWrite = @()
+            [System.Threading.Monitor]::Enter($Script:AILearningBufferLock)
+            try {
+                if ($Script:AILearningBuffer.Count -eq 0) { return }
+                # If not forced and below threshold, skip
+                if (-not $Force -and $Script:AILearningBuffer.Count -lt $Script:AILearningAppendThreshold) { return }
+                foreach ($item in $Script:AILearningBuffer) { $toWrite += $item }
+                $Script:AILearningBuffer.Clear()
+            } finally { [System.Threading.Monitor]::Exit($Script:AILearningBufferLock) }
+
+            if ($toWrite.Count -eq 0) { return }
+
+            $dir = Split-Path $Script:AILearningLogPath -Parent
+            if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+
+            $lines = @()
+            foreach ($o in $toWrite) {
+                try { $lines += ($o | ConvertTo-Json -Depth 12 -Compress) } catch { }
+            }
+
+            if ($lines.Count -gt 0) {
+                Add-Content -Path $Script:AILearningLogPath -Value $lines -Encoding UTF8 -Force
+                $fi = Get-Item $Script:AILearningLogPath -ErrorAction SilentlyContinue
+                if ($fi -and $fi.Length -gt ($Script:AILearningLogMaxMB * 1MB)) { Rotate-AILearningLog }
+            }
+        } catch {
+            Write-DebugLog "Flush-AILearningBuffer ERROR: $_" "ERROR" "ENGINE"
+        }
+    }
+
+    function Start-AILearningFlushTimer {
+        param([int]$IntervalSeconds = 10)
+        try {
+            if ($Script:AILearningFlushTimer) { return }
+            $Script:AILearningFlushIntervalSeconds = $IntervalSeconds
+            $timer = New-Object System.Timers.Timer($IntervalSeconds * 1000)
+            $timer.AutoReset = $true
+            $event = [System.Timers.ElapsedEventHandler]{
+                param($sender,$args)
+                try { Flush-AILearningBuffer } catch {}
+            }
+            $timer.Add_Elapsed($event)
+            $timer.Start()
+            $Script:AILearningFlushTimer = $timer
+        } catch {
+            Write-DebugLog "Start-AILearningFlushTimer ERROR: $_" "ERROR" "ENGINE"
+        }
+    }
+
+    function Stop-AILearningFlushTimer {
+        try {
+            if ($Script:AILearningFlushTimer) { $Script:AILearningFlushTimer.Stop(); $Script:AILearningFlushTimer.Dispose(); $Script:AILearningFlushTimer = $null }
+        } catch { }
+    }
+
+    function Rotate-AILearningLog {
+        try {
+            if (-not (Test-Path $Script:AILearningLogPath)) { return }
+            $ts = (Get-Date).ToString('yyyyMMddHHmmss')
+            $archive = "$($Script:AILearningLogPath).$ts"
+            Move-Item -Path $Script:AILearningLogPath -Destination $archive -Force
+            New-Item -Path $Script:AILearningLogPath -ItemType File -Value "" | Out-Null
+            $archives = Get-ChildItem -Path "$($Script:AILearningLogPath).*" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+            if ($archives.Count -gt $Script:AILearningLogKeep) {
+                $toRemove = $archives | Select-Object -Skip $Script:AILearningLogKeep
+                foreach ($f in $toRemove) { Remove-Item -Path $f.FullName -Force -ErrorAction SilentlyContinue }
+            }
+        } catch {
+            Write-DebugLog "Rotate-AILearningLog ERROR: $_" "ERROR" "ENGINE"
+        }
+    }
+
+    function Save-AILearningSnapshot {
+        param(
+            [int]$Lines = $Script:AILearningSnapshotLines
+        )
+        try {
+            if (-not (Test-Path $Script:AILearningLogPath)) {
+                $tmp = "$($Script:AILearningSnapshotPath).tmp"
+                @() | ConvertTo-Json -Depth 5 | Set-Content -Path $tmp -Encoding UTF8 -Force
+                Move-Item -Path $tmp -Destination $Script:AILearningSnapshotPath -Force
+                return
+            }
+            $lines = Get-Content -Path $Script:AILearningLogPath -Tail $Lines -ErrorAction SilentlyContinue
+            $objs = @()
+            foreach ($l in $lines) {
+                if ($l.Trim() -eq '') { continue }
+                try { $o = $l | ConvertFrom-Json -ErrorAction Stop; $objs += $o } catch { }
+            }
+            $tmp = "$($Script:AILearningSnapshotPath).tmp"
+            $objs | ConvertTo-Json -Depth 12 | Set-Content -Path $tmp -Encoding UTF8 -Force
+            Move-Item -Path $tmp -Destination $Script:AILearningSnapshotPath -Force
+        } catch {
+            Write-DebugLog "Save-AILearningSnapshot ERROR: $_" "ERROR" "ENGINE"
+        }
+    }
+
+    function Start-AILearningMaintenance {
+        param(
+            [int]$IntervalMinutes = 10
+        )
+        try {
+            if ($Script:AILearningMaintJob -and (Get-Job -Id $Script:AILearningMaintJob.Id -ErrorAction SilentlyContinue)) { return }
+            $log = $Script:AILearningLogPath; $snapshot = $Script:AILearningSnapshotPath; $maxMB = $Script:AILearningLogMaxMB; $keep = $Script:AILearningLogKeep; $lines = $Script:AILearningSnapshotLines; $interval = $IntervalMinutes
+            $job = Start-Job -ScriptBlock {
+                param($log,$snapshot,$maxMB,$keep,$lines,$interval)
+                while ($true) {
+                    try {
+                        if (Test-Path $log) {
+                            $fi = Get-Item $log -ErrorAction SilentlyContinue
+                            if ($fi -and $fi.Length -gt ($maxMB * 1MB)) {
+                                $ts = (Get-Date).ToString('yyyyMMddHHmmss')
+                                Move-Item -Path $log -Destination "$log.$ts" -Force -ErrorAction SilentlyContinue
+                                New-Item -Path $log -ItemType File -Value "" | Out-Null
+                                $archives = Get-ChildItem -Path "$($log).*" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+                                if ($archives.Count -gt $keep) { $archives | Select-Object -Skip $keep | ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue } }
+                            }
+                            $linesArr = Get-Content -Path $log -Tail $lines -ErrorAction SilentlyContinue
+                            $objs = @()
+                            foreach ($l in $linesArr) { try { $o = $l | ConvertFrom-Json -ErrorAction Stop; $objs += $o } catch { } }
+                            $tmp = "$snapshot.tmp"
+                            $objs | ConvertTo-Json -Depth 12 | Set-Content -Path $tmp -Encoding UTF8 -Force
+                            Move-Item -Path $tmp -Destination $snapshot -Force -ErrorAction SilentlyContinue
+                        } else {
+                            if (-not (Test-Path $snapshot)) { @() | ConvertTo-Json -Depth 5 | Set-Content -Path $snapshot -Encoding UTF8 -Force }
+                        }
+                    } catch { }
+                    Start-Sleep -Seconds ($interval * 60)
+                }
+            } -ArgumentList $log,$snapshot,$maxMB,$keep,$lines,$interval
+            $Script:AILearningMaintJob = $job
+        } catch {
+            Write-DebugLog "Start-AILearningMaintenance ERROR: $_" "ERROR" "ENGINE"
+        }
+    }
+
+    function Stop-AILearningMaintenance {
+        try {
+            if ($Script:AILearningMaintJob) { Stop-Job -Job $Script:AILearningMaintJob -Force -ErrorAction SilentlyContinue; Remove-Job -Job $Script:AILearningMaintJob -Force -ErrorAction SilentlyContinue; $Script:AILearningMaintJob = $null }
+        } catch { }
+    }
+
+    # By default do not start maintenance automatically — caller may enable if desired.
+    # Example to enable maintenance in background: Start-AILearningMaintenance -IntervalMinutes 10
+
     $forecaster = [Forecaster]::new()
     $anomalyDetector = [AnomalyDetector]::new()
     $priorityManager = [SmartPriorityManager]::new()
@@ -15770,6 +16017,91 @@ function Main {
     }
     $networkAI.LoadState($Script:ConfigDir)
     $networkAI.SaveState($Script:ConfigDir)
+
+    # Merge any recent NDJSON-based AILearning snapshot/log into in-memory components
+    function Merge-AILearningSnapshot {
+        param(
+            $SharedKnowledge,
+            $ProcessAI,
+            $NetworkAI
+        )
+        try {
+            if (-not (Test-Path $Script:AILearningSnapshotPath)) { return }
+            $content = Get-Content -Path $Script:AILearningSnapshotPath -Raw -ErrorAction SilentlyContinue
+            if (-not $content) { return }
+            $items = $null
+            try { $items = $content | ConvertFrom-Json -ErrorAction Stop } catch { return }
+            if (-not $items) { return }
+            if ($items -isnot [System.Array]) { $items = @($items) }
+            foreach ($it in $items) {
+                # If entry contains SharedAppKnowledge snapshot
+                if ($it.SharedAppKnowledge -or $it.SharedKnowledge -or $it.Apps) {
+                    $src = $it.SharedAppKnowledge ? $it.SharedAppKnowledge : ($it.SharedKnowledge ? $it.SharedKnowledge : $it.Apps)
+                    foreach ($prop in $src.PSObject.Properties) {
+                        $appKey = $prop.Name.ToLower()
+                        $v = $prop.Value
+                        $p = $SharedKnowledge.GetProfile($appKey)
+                        if ($v.AvgCPU) { $p.AvgCPU = [double]$v.AvgCPU }
+                        if ($v.AvgGPU) { $p.AvgGPU = [double]$v.AvgGPU }
+                        if ($v.BestMode) { $p.BestMode = $v.BestMode }
+                        if ($v.Sessions) { $p.Sessions = [int]$v.Sessions }
+                        if ($v.QBestAction) { $p.QBestAction = $v.QBestAction }
+                        if ($v.QPhaseActions) { $v.QPhaseActions.PSObject.Properties | ForEach-Object { $p.QPhaseActions[$_.Name] = $_.Value } }
+                        if ($v.IsGPUBound -ne $null) { $p.IsGPUBound = [bool]$v.IsGPUBound }
+                        if ($v.Category) { $p.Category = $v.Category }
+                        if ($v.Priority) { $p.Priority = [int]$v.Priority }
+                        if ($v.UpdateCount) { $p.UpdateCount = [int]$v.UpdateCount }
+                        $p.LastSeen = (Get-Date)
+                        $SharedKnowledge.Apps[$appKey] = $p
+                    }
+                }
+
+                # If entry contains ProcessAI snapshot
+                if ($it.ProcessProfiles) {
+                    foreach ($prop in $it.ProcessProfiles.PSObject.Properties) {
+                        $proc = $prop.Name.ToLower()
+                        $src = $prop.Value
+                        if (-not $ProcessAI.ProcessProfiles.ContainsKey($proc)) {
+                            $ProcessAI.ProcessProfiles[$proc] = @{
+                                AvgCPU = [double]($src.AvgCPU -as [double])
+                                MaxCPU = [double]($src.MaxCPU -as [double])
+                                AvgRAM = [double]($src.AvgRAM -as [double])
+                                MaxRAM = [double]($src.MaxRAM -as [double])
+                                Priority = $src.Priority
+                                CanThrottle = $src.CanThrottle
+                                Sessions = [int]($src.Sessions -as [int])
+                                Category = $src.Category
+                                LastSeen = (Get-Date)
+                            }
+                        } else {
+                            $dst = $ProcessAI.ProcessProfiles[$proc]
+                            if ($src.AvgCPU) { $dst.AvgCPU = ($dst.AvgCPU * $dst.Sessions + [double]$src.AvgCPU * [int]$src.Sessions) / ([int]$dst.Sessions + [int]$src.Sessions) }
+                            if ($src.MaxCPU -and $src.MaxCPU -gt $dst.MaxCPU) { $dst.MaxCPU = $src.MaxCPU }
+                            if ($src.AvgRAM) { $dst.AvgRAM = ($dst.AvgRAM * $dst.Sessions + [double]$src.AvgRAM * [int]$src.Sessions) / ([int]$dst.Sessions + [int]$src.Sessions) }
+                            if ($src.MaxRAM -and $src.MaxRAM -gt $dst.MaxRAM) { $dst.MaxRAM = $src.MaxRAM }
+                            $dst.Sessions = [int]$dst.Sessions + ([int]($src.Sessions -as [int]))
+                            if ($src.Category) { $dst.Category = $src.Category }
+                            if ($src.CanThrottle -ne $null) { $dst.CanThrottle = $src.CanThrottle }
+                            $dst.LastSeen = (Get-Date)
+                            $ProcessAI.ProcessProfiles[$proc] = $dst
+                        }
+                    }
+                }
+
+                # NetworkAI or other component merges can be added similarly
+            }
+        } catch {
+            Write-DebugLog "Merge-AILearningSnapshot ERROR: $_" "ERROR" "ENGINE"
+        }
+    }
+
+    # Perform merge into live components so recent learning isn't lost
+    try { Merge-AILearningSnapshot -SharedKnowledge $sharedKnowledge -ProcessAI $processAI -NetworkAI $networkAI } catch {}
+
+    # Start background maintenance to keep NDJSON size bounded (safe to enable)
+    Start-AILearningMaintenance -IntervalMinutes 10
+    # Start periodic flusher to batch NDJSON writes and reduce I/O
+    Start-AILearningFlushTimer -IntervalSeconds 10
     # ═══════════════════════════════════════════════════════════════════════════
     # 1. MemoryAgressiveness (0-100) -> RAMAnalyzer SpikeThreshold
     # 0=conservative (threshold 12%), 50=neutral (8%), 100=aggressive (4%)
@@ -18361,6 +18693,33 @@ $Script:PreviousEnsembleEnabled = $false
                 [void]$processAI.SaveState($Script:ConfigDir)
                 # - V40: GPU AI - zapisz profile GPU dla aplikacji
                 [void]$gpuAI.SaveState($Script:ConfigDir)
+                # After saving all AI states, append lightweight NDJSON entries so learning events are persisted incrementally
+                function Write-AIAppendAfterSave {
+                    param([string]$Name, $Obj)
+                    try {
+                        $summary = @{}
+                        $summary.Timestamp = (Get-Date).ToString('o')
+                        if ($Obj -ne $null) {
+                            try { $summary.Status = if ($Obj.PSObject.Methods['GetStatus']) { $Obj.GetStatus() } else { $null } } catch { }
+                            try { $summary.AppCount = if ($Obj.PSObject.Methods['GetAppCount']) { $Obj.GetAppCount() } else { $null } } catch { }
+                            try { $summary.Total = if ($Obj.PSObject.Properties['TotalLearnings']) { $Obj.TotalLearnings } else { $null } } catch { }
+                        }
+                        $entry = @{ Source = 'AutoSave'; Component = $Name; Summary = $summary }
+                        Append-AILearningEntry $entry
+                    } catch {
+                        # ignore
+                    }
+                }
+
+                $components = @{
+                    'Prophet' = $prophet; 'Brain' = $brain; 'AnomalyDetector' = $anomalyDetector; 'LoadPredictor' = $loadPredictor;
+                    'SelfTuner' = $selfTuner; 'ChainPredictor' = $chainPredictor; 'UserPatterns' = $userPatterns; 'QLearning' = $qLearning;
+                    'Ensemble' = $ensemble; 'EnergyTracker' = $energyTracker; 'Bandit' = $bandit; 'Genetic' = $genetic;
+                    'ContextDetector' = $contextDetector; 'PhaseDetector' = $phaseDetector; 'ThermalPredictor' = $thermalPredictor;
+                    'Explainer' = $explainer; 'ThermalGuard' = $thermalGuard; 'AICoordinator' = $aiCoordinator; 'RAMAnalyzer' = $ramAnalyzer;
+                    'SharedKnowledge' = $sharedKnowledge; 'NetworkOptimizer' = $networkOptimizer; 'NetworkAI' = $networkAI; 'ProcessAI' = $processAI; 'GPUAI' = $gpuAI
+                }
+                foreach ($k in $components.Keys) { Write-AIAppendAfterSave -Name $k -Obj $components[$k] }
                 # #
                 # BACKUP WIDGETDATA - tylko w RAM/BOTH mode
                 # #
@@ -19271,3 +19630,4 @@ function Write-SessionSummary {
 $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
     Write-SessionSummary
 }
+

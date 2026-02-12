@@ -1,3 +1,8 @@
+try {
+    $proc = Get-Process -Id $PID -ErrorAction Stop
+    if ($proc.PriorityClass -ne 'Idle') { $proc.PriorityClass = 'Idle' }
+} catch {}
+
 # --- Funkcja pomocnicza do ustawiania HardLock dla aplikacji ---
 function Set-AppHardLock {
     param([string]$appName, [bool]$HardLock)
