@@ -1823,6 +1823,20 @@ if ($Script:StorageMode -eq "RAM" -or $Script:StorageMode -eq "BOTH") {
 } else {
     Write-Host "  [JSON] Storage mode: JSON (AI auto-save every 5 min)" -ForegroundColor Cyan
 }
+if (-not $Script:WarmCacheTimestamps) { $Script:WarmCacheTimestamps = @{} }
+if (-not $Script:WarmCacheCooldownSec) { $Script:WarmCacheCooldownSec = 300 }
+
+function SafeWarm {
+    param([string]$appName)
+    if ([string]::IsNullOrWhiteSpace($appName)) { return }
+    try {
+        $now = Get-Date
+        if (-not $Script:WarmCacheTimestamps.ContainsKey($appName) -or ((Get-Date) - $Script:WarmCacheTimestamps[$appName]).TotalSeconds -gt $Script:WarmCacheCooldownSec) {
+            try { [void]$performanceBooster.WarmDiskCache($appName) } catch {}
+            $Script:WarmCacheTimestamps[$appName] = $now
+        }
+    } catch { }
+}
 # ROTACJA LOGOW - limituj rozmiar do 5MB
 function Rotate-ErrorLog {
     try {
@@ -2124,7 +2138,7 @@ try {
 # AUTOMATYCZNE USTAWIENIE ROZMIARU OKNA
 try {
     # Wymagane wymiary: ustawione zgodnie z preferencjami użytkownika
-    $targetWidth = 157
+    $targetWidth = 161
     $targetHeight = 41
     # Pobierz maksymalny rozmiar okna
     $maxSize = $Host.UI.RawUI.MaxPhysicalWindowSize
@@ -5703,6 +5717,326 @@ class Forecaster {
         $lastValue = $this.Buffer[$lastIdx]
         $predicted = $lastValue + ($trend * $stepsAhead)
         return [Math]::Max(0, [Math]::Min(100, $predicted))
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM GOVERNOR v44.0 - ENGINE przejmuje kontrolę od Windows
+# Zarządza: CPU power, GPU/iGPU preferences, procesami, power planami
+# Połączony z AILearning: uczy się GPU preferencji per-app, zapisuje do snapshot
+# ═══════════════════════════════════════════════════════════════════════════════
+class SystemGovernor {
+    [string] $CurrentMode = "Balanced"
+    [bool] $IsOverloaded = $false
+    [bool] $IsGoverning = $true
+    [datetime] $LastGovernAction = [datetime]::MinValue
+    [int] $GovernIntervalSeconds = 3
+    [int] $TotalGovernActions = 0
+    [bool] $HasiGPU = $false
+    [bool] $HasdGPU = $false
+    [string] $iGPUName = ""
+    [string] $dGPUName = ""
+    [hashtable] $GPUPreferences = @{}
+    [hashtable] $LearnedGPUPrefs = @{}
+    [string] $GPUPrefsRegPath = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    [string] $GraphicsSettingsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GraphicsSettings"
+    [int] $GPUPrefChanges = 0
+    [bool] $PowerOverrideActive = $false
+    [string] $EnginePowerPlanGUID = ""
+    [bool] $CoreParkingDisabled = $false
+    [hashtable] $ActiveOverrides = @{}
+    [hashtable] $AppBehaviorHistory = @{}
+    [double] $OverloadThreshold = 85.0
+    [int] $MaxAffinityProcesses = 15
+    [System.Collections.Generic.List[string]] $GovernLog
+
+    SystemGovernor() {
+        $this.GovernLog = [System.Collections.Generic.List[string]]::new()
+    }
+
+    [void] Initialize([bool]$hasiGPU, [bool]$hasdGPU, [string]$iGPUName, [string]$dGPUName) {
+        $this.HasiGPU = $hasiGPU; $this.HasdGPU = $hasdGPU
+        $this.iGPUName = $iGPUName; $this.dGPUName = $dGPUName
+        $this.TakeOverPowerPlan()
+        $this.DisableCoreParkingIfNeeded()
+        $this.Log("SystemGovernor INIT: iGPU=$hasiGPU dGPU=$hasdGPU")
+    }
+
+    # ─── GŁÓWNA METODA - wywoływana co 3s z main loop ───
+    [hashtable] Govern([double]$cpuPct, [double]$gpuLoad, [double]$temp, [string]$fgApp, [string]$mode, [hashtable]$procMetrics) {
+        $result = @{ ModeOverride = $null; ProcessActions = @(); GPUAction = $null; IsOverloaded = $false; OverloadReason = ""; GovernedProcesses = 0 }
+        if (((Get-Date) - $this.LastGovernAction).TotalSeconds -lt $this.GovernIntervalSeconds) { return $result }
+        $this.LastGovernAction = Get-Date; $this.CurrentMode = $mode
+
+        # 1. OVERLOAD DETECTION
+        $ovr = $this.DetectOverload($cpuPct, $gpuLoad, $temp, $fgApp, $procMetrics)
+        $result.IsOverloaded = $ovr.IsOverloaded; $result.OverloadReason = $ovr.Reason; $this.IsOverloaded = $ovr.IsOverloaded
+        if ($ovr.IsOverloaded) { $result.ModeOverride = $ovr.SuggestedMode; $result.ProcessActions = $ovr.Actions }
+
+        # 2. GPU/iGPU GOVERNANCE
+        if ($this.HasiGPU -or $this.HasdGPU) {
+            $gpuR = $this.GovernGPU($fgApp, $cpuPct, $gpuLoad)
+            if ($gpuR.Action) { $result.GPUAction = $gpuR }
+        }
+
+        # 3. PROCESS GOVERNANCE (priorytety, affinity)
+        $procR = $this.GovernProcesses($fgApp, $cpuPct, $mode, $procMetrics)
+        $result.ProcessActions += $procR.Actions; $result.GovernedProcesses = $procR.GovernedCount
+
+        # 4. POWER PLAN ENFORCEMENT (core parking per mode)
+        $this.EnforcePowerSettings($mode, $cpuPct, $temp)
+
+        # 5. LEARN (zbieraj dane o zachowaniu aplikacji)
+        $this.LearnAppBehavior($fgApp, $cpuPct, $gpuLoad)
+
+        $this.TotalGovernActions++
+        return $result
+    }
+
+    # ─── OVERLOAD DETECTION ───
+    [hashtable] DetectOverload([double]$cpu, [double]$gpuLoad, [double]$temp, [string]$fgApp, [hashtable]$procMetrics) {
+        $r = @{ IsOverloaded = $false; Reason = ""; SuggestedMode = $null; Actions = @() }
+        # THERMAL EMERGENCY: >92°C → force Silent
+        if ($temp -gt 92) {
+            $r.IsOverloaded = $true; $r.Reason = "THERMAL: ${temp}C"; $r.SuggestedMode = "Silent"
+            $r.Actions += @{ Type = "ThrottleAll"; Exclude = $fgApp; Priority = "Idle" }
+            $this.Log("[CRITICAL] THERMAL $temp C"); return $r
+        }
+        # CPU OVERLOAD: >85% → throttle hogs
+        if ($cpu -gt $this.OverloadThreshold) {
+            $r.IsOverloaded = $true; $r.Reason = "CPU: $([int]$cpu)%"
+            if ($procMetrics) {
+                foreach ($k in $procMetrics.Keys) {
+                    $pm = $procMetrics[$k]
+                    if ($pm.Name -ne $fgApp -and $pm.CPU -gt 50) {
+                        $r.Actions += @{ Type = "ThrottleProcess"; Name = $pm.Name; PID = $pm.PID; Priority = "BelowNormal" }
+                    }
+                }
+            }
+            if ($cpu -gt 90) { $r.SuggestedMode = "Turbo"; $r.Actions += @{ Type = "ThrottleAll"; Exclude = $fgApp; Priority = "BelowNormal" } }
+        }
+        # COMBINED: CPU>70 + GPU>85 + Temp>80
+        if ($cpu -gt 70 -and $gpuLoad -gt 85 -and $temp -gt 80) {
+            $r.IsOverloaded = $true; $r.Reason = "COMBINED: CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% T=${temp}C"
+            if (-not $r.SuggestedMode) { $r.SuggestedMode = "Balanced" }
+        }
+        return $r
+    }
+
+    # ─── GPU/iGPU GOVERNANCE ───
+    [hashtable] GovernGPU([string]$fgApp, [double]$cpu, [double]$gpuLoad) {
+        $r = @{ Action = $null; App = $fgApp; GPU = ""; Reason = "" }
+        if ([string]::IsNullOrWhiteSpace($fgApp) -or $fgApp -in @("Desktop","explorer","ShellExperienceHost")) { return $r }
+        $al = $fgApp.ToLower()
+        if (-not ($this.HasdGPU -and $this.HasiGPU)) { return $r }
+        $targetGPU = "Auto"; $reason = ""
+
+        # 1. Learned preference (confidence > 0.7, sessions > 5)
+        $learned = if ($this.LearnedGPUPrefs.ContainsKey($al)) { $this.LearnedGPUPrefs[$al] } else { $null }
+        if ($learned -and $learned.Confidence -gt 0.7 -and $learned.Sessions -gt 5) {
+            $targetGPU = $learned.Pref; $reason = "Learned: $targetGPU"
+        } else {
+            # 2. Behavior-based AI decision
+            $beh = if ($this.AppBehaviorHistory.ContainsKey($al)) { $this.AppBehaviorHistory[$al] } else { $null }
+            if ($beh -and $beh.Sessions -gt 3) {
+                if ($beh.NeedsGPU -and $beh.AvgGPU -gt 40) { $targetGPU = "dGPU"; $reason = "AI: High GPU → dGPU" }
+                elseif ($beh.AvgGPU -lt 15 -and $beh.AvgCPU -lt 30) { $targetGPU = "iGPU"; $reason = "AI: Light → iGPU" }
+            } else {
+                # 3. Heuristic fallback
+                $browsers = @("chrome","firefox","msedge","opera","brave")
+                if ($al -in $browsers) { $targetGPU = if ($gpuLoad -gt 50) { "dGPU" } else { "iGPU" }; $reason = "Browser heuristic" }
+            }
+        }
+
+        if ($targetGPU -ne "Auto") {
+            $cur = if ($this.GPUPreferences.ContainsKey($al)) { $this.GPUPreferences[$al] } else { "Auto" }
+            if ($cur -ne $targetGPU) {
+                $r.Action = "SetGPUPreference"; $r.GPU = $targetGPU; $r.Reason = $reason
+                $this.ApplyGPUPreference($fgApp, $targetGPU)
+                $this.GPUPreferences[$al] = $targetGPU
+            }
+        }
+        return $r
+    }
+
+    [void] ApplyGPUPreference([string]$appName, [string]$gpuPref) {
+        try {
+            $exePath = $null
+            try { $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue | Select-Object -First 1; if ($proc) { $exePath = $proc.Path; $proc.Dispose() } } catch {}
+            if (-not $exePath) { return }
+            $gpuVal = switch ($gpuPref) { "iGPU" { 1 } "dGPU" { 2 } default { 0 } }
+            try {
+                if (-not (Test-Path $this.GraphicsSettingsPath)) { New-Item -Path $this.GraphicsSettingsPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                Set-ItemProperty -Path $this.GraphicsSettingsPath -Name $exePath -Value "GpuPreference=$gpuVal" -Type String -Force -ErrorAction SilentlyContinue
+            } catch {}
+            try {
+                if (-not (Test-Path $this.GPUPrefsRegPath)) { New-Item -Path $this.GPUPrefsRegPath -Force -ErrorAction SilentlyContinue | Out-Null }
+                Set-ItemProperty -Path $this.GPUPrefsRegPath -Name $exePath -Value "GpuPreference=$gpuVal;" -Type String -Force -ErrorAction SilentlyContinue
+            } catch {}
+            $this.GPUPrefChanges++; $this.Log("[GPU] $appName → $gpuPref")
+        } catch {}
+    }
+
+    # ─── PROCESS GOVERNANCE ───
+    [hashtable] GovernProcesses([string]$fgApp, [double]$cpu, [string]$mode, [hashtable]$procMetrics) {
+        $r = @{ Actions = @(); GovernedCount = 0 }
+        try {
+            # Foreground boost
+            if ($fgApp -and $fgApp -notin @("Desktop","explorer","ShellExperienceHost","SearchHost")) {
+                $tgt = switch ($mode) { "Turbo" { [System.Diagnostics.ProcessPriorityClass]::High } "Silent" { [System.Diagnostics.ProcessPriorityClass]::Normal } default { [System.Diagnostics.ProcessPriorityClass]::AboveNormal } }
+                $fps = Get-Process -Name $fgApp -ErrorAction SilentlyContinue
+                foreach ($fp in $fps) { try { if ($fp.PriorityClass -ne $tgt) { $fp.PriorityClass = $tgt; $r.GovernedCount++ }; $fp.Dispose() } catch { try { $fp.Dispose() } catch {} } }
+            }
+            # Background demotion in overload/Silent
+            if ($this.IsOverloaded -or $mode -eq "Silent") {
+                $bgPri = if ($this.IsOverloaded) { [System.Diagnostics.ProcessPriorityClass]::Idle } else { [System.Diagnostics.ProcessPriorityClass]::BelowNormal }
+                $protected = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                foreach ($p in @("System","Idle","Registry","smss","csrss","wininit","services","lsass","winlogon","svchost","dwm","explorer","audiodg","ctfmon","MsMpEng","powershell","pwsh","CPUManager","RuntimeBroker")) { [void]$protected.Add($p) }
+                $bgs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -ne $fgApp -and -not $protected.Contains($_.ProcessName) -and $_.WorkingSet64 -gt 50MB -and $_.PriorityClass -notin @([System.Diagnostics.ProcessPriorityClass]::Idle,[System.Diagnostics.ProcessPriorityClass]::BelowNormal) } | Sort-Object WorkingSet64 -Descending | Select-Object -First 10
+                foreach ($bp in $bgs) { try { $bp.PriorityClass = $bgPri; $this.ActiveOverrides[$bp.Id] = @{ Name = $bp.ProcessName; AppliedAt = Get-Date }; $r.GovernedCount++; $bp.Dispose() } catch { try { $bp.Dispose() } catch {} } }
+            }
+            # Restore when calm
+            if (-not $this.IsOverloaded -and $mode -ne "Silent" -and $this.ActiveOverrides.Count -gt 0) {
+                foreach ($pid in @($this.ActiveOverrides.Keys)) {
+                    try { $p = Get-Process -Id $pid -ErrorAction SilentlyContinue; if ($p) { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal; $p.Dispose() } } catch {}
+                    $this.ActiveOverrides.Remove($pid)
+                }
+            }
+        } catch {}
+        return $r
+    }
+
+    # ─── WINDOWS POWER TAKEOVER ───
+    [void] TakeOverPowerPlan() {
+        try {
+            $out = powercfg /getactivescheme 2>$null
+            if ($out -match '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})') { $this.EnginePowerPlanGUID = $matches[1] }
+            if ($this.EnginePowerPlanGUID) {
+                $g = $this.EnginePowerPlanGUID; $s = "54533251-82be-4824-96c1-47b60b740d00"
+                # CRITICAL FIX: Autonomous Mode musi byc ON (1) dla Intel Speed Shift!
+                # Gdy OFF (0), procesor NIE schodzi ponizej bazowej czestotliwosci
+                powercfg /setacvalueindex $g $s "8baa4a8a-14c6-4451-8e8b-14bdbd197537" 1 2>$null  # Autonomous mode ON
+                powercfg /setdcvalueindex $g $s "8baa4a8a-14c6-4451-8e8b-14bdbd197537" 1 2>$null
+                powercfg /setacvalueindex $g $s "4d2b0152-7d5c-498b-88e2-34345392a2c5" 5000 2>$null  # Check interval 5s
+                powercfg /setacvalueindex $g $s "619b7505-003b-4e82-b7a6-4dd29c300971" 0 2>$null  # Latency = performance
+                powercfg /setactive $g 2>$null
+                $this.PowerOverrideActive = $true; $this.Log("[POWER] Autonomous mode ENABLED - Intel Speed Shift active")
+            }
+        } catch {}
+    }
+
+    [void] DisableCoreParkingIfNeeded() {
+        # Core parking jest teraz zarządzane dynamicznie przez EnforcePowerSettings() per-mode
+        # Nie wymuszamy 100% na starcie - to blokowałoby oszczędzanie energii w Silent
+        $this.CoreParkingDisabled = $false
+    }
+
+    [void] EnforcePowerSettings([string]$mode, [double]$cpu, [double]$temp) {
+        if (-not $this.EnginePowerPlanGUID) { return }
+        try {
+            $g = $this.EnginePowerPlanGUID; $s = "54533251-82be-4824-96c1-47b60b740d00"
+            # Min cores per mode: Silent=25% (pozwól na parkowanie), Balanced=50%, Turbo/Extreme=100%
+            $mc = switch ($mode) { "Silent" { 25 } "Balanced" { 50 } "Turbo" { 100 } "Extreme" { 100 } default { 50 } }
+            powercfg /setacvalueindex $g $s "0cc5b647-c1df-4637-891a-dec35c318583" $mc 2>$null
+            powercfg /setdcvalueindex $g $s "0cc5b647-c1df-4637-891a-dec35c318583" $mc 2>$null
+            # Processor idle disable in Turbo/Extreme
+            $idle = if ($mode -in @("Turbo","Extreme")) { 1 } else { 0 }
+            powercfg /setacvalueindex $g $s "5d76a2ca-e8c0-402f-a133-2158492d58ad" $idle 2>$null
+            powercfg /setdcvalueindex $g $s "5d76a2ca-e8c0-402f-a133-2158492d58ad" $idle 2>$null
+            powercfg /setactive $g 2>$null
+        } catch {}
+    }
+
+    # ─── LEARNING ───
+    [void] LearnAppBehavior([string]$app, [double]$cpu, [double]$gpuLoad) {
+        if ([string]::IsNullOrWhiteSpace($app) -or $app -in @("Desktop","explorer","ShellExperienceHost")) { return }
+        $al = $app.ToLower()
+        if (-not $this.AppBehaviorHistory.ContainsKey($al)) {
+            $this.AppBehaviorHistory[$al] = @{ AvgCPU=$cpu; AvgGPU=$gpuLoad; MaxCPU=$cpu; MaxGPU=$gpuLoad; NeedsGPU=($gpuLoad -gt 20); PrefersiGPU=$false; Sessions=1; LastSeen=[datetime]::Now }
+        } else {
+            $h = $this.AppBehaviorHistory[$al]; $sess = $h.Sessions + 1; $a = 1.0 / [Math]::Min(100, $sess)
+            $h.AvgCPU = $h.AvgCPU * (1-$a) + $cpu * $a; $h.AvgGPU = $h.AvgGPU * (1-$a) + $gpuLoad * $a
+            if ($cpu -gt $h.MaxCPU) { $h.MaxCPU = $cpu }; if ($gpuLoad -gt $h.MaxGPU) { $h.MaxGPU = $gpuLoad }
+            $h.NeedsGPU = ($h.AvgGPU -gt 20 -or $h.MaxGPU -gt 50); $h.PrefersiGPU = ($h.AvgGPU -lt 15 -and $h.AvgCPU -lt 30)
+            $h.Sessions = $sess; $h.LastSeen = [datetime]::Now
+            # Auto-learn GPU preference when enough sessions
+            if ($sess -gt 10 -and ($this.HasiGPU -and $this.HasdGPU)) {
+                $pref = if ($h.NeedsGPU -and $h.AvgGPU -gt 40) { "dGPU" } elseif ($h.PrefersiGPU) { "iGPU" } else { "Auto" }
+                $this.LearnedGPUPrefs[$al] = @{ Pref=$pref; Confidence=[Math]::Min(1.0,$sess/50.0); Sessions=$sess }
+            }
+        }
+    }
+
+    # ─── PERSISTENCE ───
+    [void] SaveState([string]$configDir) {
+        try {
+            $state = @{
+                GPUPreferences = $this.GPUPreferences
+                LearnedGPUPrefs = $this.LearnedGPUPrefs
+                AppBehaviorHistory = $this.AppBehaviorHistory
+                TotalGovernActions = $this.TotalGovernActions
+                GPUPrefChanges = $this.GPUPrefChanges
+            }
+            $json = $state | ConvertTo-Json -Depth 5 -Compress
+            [System.IO.File]::WriteAllText((Join-Path $configDir "SystemGovernor.json"), $json, [System.Text.Encoding]::UTF8)
+        } catch {}
+    }
+
+    [void] LoadState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "SystemGovernor.json"
+            if (-not (Test-Path $path)) { return }
+            $state = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            if ($state.GPUPreferences) { $state.GPUPreferences.PSObject.Properties | ForEach-Object { $this.GPUPreferences[$_.Name] = $_.Value } }
+            if ($state.LearnedGPUPrefs) {
+                $state.LearnedGPUPrefs.PSObject.Properties | ForEach-Object {
+                    $v = $_.Value; $this.LearnedGPUPrefs[$_.Name] = @{ Pref=$v.Pref; Confidence=[double]$v.Confidence; Sessions=[int]$v.Sessions }
+                }
+            }
+            if ($state.AppBehaviorHistory) {
+                $state.AppBehaviorHistory.PSObject.Properties | ForEach-Object {
+                    $v = $_.Value; $this.AppBehaviorHistory[$_.Name] = @{
+                        AvgCPU=[double]$v.AvgCPU; AvgGPU=[double]$v.AvgGPU; MaxCPU=[double]$v.MaxCPU; MaxGPU=[double]$v.MaxGPU
+                        NeedsGPU=[bool]$v.NeedsGPU; PrefersiGPU=[bool]$v.PrefersiGPU; Sessions=[int]$v.Sessions; LastSeen=[datetime]::Now
+                    }
+                }
+            }
+            $this.TotalGovernActions = if ($state.TotalGovernActions) { [int]$state.TotalGovernActions } else { 0 }
+            $this.GPUPrefChanges = if ($state.GPUPrefChanges) { [int]$state.GPUPrefChanges } else { 0 }
+            $this.Log("Loaded: $($this.AppBehaviorHistory.Count) apps, $($this.LearnedGPUPrefs.Count) GPU prefs")
+        } catch {}
+    }
+
+    # ─── CLEANUP (przywróć domyślne Windows) ───
+    [void] RestoreWindowsDefaults() {
+        try {
+            if ($this.EnginePowerPlanGUID) {
+                $g = $this.EnginePowerPlanGUID; $s = "54533251-82be-4824-96c1-47b60b740d00"
+                powercfg /setacvalueindex $g $s "8baa4a8a-14c6-4451-8e8b-14bdbd197537" 1 2>$null  # Autonomous ON
+                powercfg /setdcvalueindex $g $s "8baa4a8a-14c6-4451-8e8b-14bdbd197537" 1 2>$null
+                powercfg /setacvalueindex $g $s "0cc5b647-c1df-4637-891a-dec35c318583" 50 2>$null
+                powercfg /setacvalueindex $g $s "5d76a2ca-e8c0-402f-a133-2158492d58ad" 0 2>$null
+                powercfg /setactive $g 2>$null
+            }
+            foreach ($pid in @($this.ActiveOverrides.Keys)) {
+                try { $p = Get-Process -Id $pid -ErrorAction SilentlyContinue; if ($p) { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal; $p.Dispose() } } catch {}
+            }
+            $this.ActiveOverrides.Clear()
+        } catch {}
+    }
+
+    [hashtable] GetStatus() {
+        return @{
+            IsGoverning = $this.IsGoverning; IsOverloaded = $this.IsOverloaded
+            ActiveOverrides = $this.ActiveOverrides.Count; GPUPrefs = $this.LearnedGPUPrefs.Count
+            AppProfiles = $this.AppBehaviorHistory.Count; TotalActions = $this.TotalGovernActions
+            GPUChanges = $this.GPUPrefChanges; PowerOverride = $this.PowerOverrideActive
+        }
+    }
+
+    [void] Log([string]$msg) {
+        $this.GovernLog.Add("[$(Get-Date -Format 'HH:mm:ss')] GOV: $msg")
+        if ($this.GovernLog.Count -gt 200) { $this.GovernLog.RemoveAt(0) }
     }
 }
 
@@ -9445,6 +9779,10 @@ class PerformanceBooster {
     [int] $TotalCacheWarms = 0
     [datetime] $LastPreemptiveBoost = [datetime]::MinValue
     [string] $LastBoostReason = ""
+    [string] $CacheFilePath = ""
+    [bool] $CacheDirty = $false
+    [datetime] $LastCacheSave = [datetime]::MinValue
+    [datetime] $CacheLastChange = [datetime]::MinValue
     # Protected processes - nigdy nie freeze
     [hashtable] $ProtectedProcesses = @{
         "System" = $true; "Idle" = $true; "svchost" = $true; "csrss" = $true
@@ -9489,6 +9827,10 @@ class PerformanceBooster {
         $this.AppExecutablePaths = @{}
         $this.FrozenProcesses = @{}
         $this.BoostedProcesses = @{}
+        $this.CacheFilePath = ""
+        $this.CacheDirty = $false
+        $this.LastCacheSave = [datetime]::MinValue
+        $this.CacheLastChange = [datetime]::MinValue
     }
     # 1. PREEMPTIVE BOOST - Boost PRZED uruchomieniem ciężkiej aplikacji
     [hashtable] CheckPreemptiveBoost([ProphetMemory]$prophet, $chainPredictor) {
@@ -9748,8 +10090,41 @@ class PerformanceBooster {
                     PeakCPU = $peakCPU
                     PeakRAM = $peakRAM
                 }
+                # Mark cache dirty so caller can persist (debounced)
+                $this.CacheDirty = $true
+                $this.CacheLastChange = Get-Date
             }
         }
+    }
+
+    [void] SaveCache([string]$path) {
+        try {
+            if ([string]::IsNullOrWhiteSpace($path)) { return }
+            $data = @{ KnownHeavyApps = $this.KnownHeavyApps; AppExecutablePaths = $this.AppExecutablePaths }
+            $json = $data | ConvertTo-Json -Depth 10 -Compress
+            $tmp = "$path.tmp"
+            [System.IO.File]::WriteAllText($tmp, $json, [System.Text.Encoding]::UTF8)
+            try { Move-Item -Path $tmp -Destination $path -Force -ErrorAction Stop } catch { Copy-Item -Path $tmp -Destination $path -Force; Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+            $this.CacheFilePath = $path
+            $this.CacheDirty = $false
+            $this.LastCacheSave = Get-Date
+        } catch { }
+    }
+
+    [void] LoadCache([string]$path) {
+        try {
+            if (-not (Test-Path $path)) { return }
+            $json = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+            $data = $json | ConvertFrom-Json
+            if ($data -and $data.KnownHeavyApps) {
+                $data.KnownHeavyApps.PSObject.Properties | ForEach-Object { $this.KnownHeavyApps[$_.Name] = $_.Value }
+            }
+            if ($data -and $data.AppExecutablePaths) {
+                $data.AppExecutablePaths.PSObject.Properties | ForEach-Object { $this.AppExecutablePaths[$_.Name] = $_.Value }
+            }
+            $this.CacheFilePath = $path
+            $this.CacheDirty = $false
+        } catch { }
     }
     [void] RestoreAllPriorities() {
         foreach ($processId in @($this.BoostedProcesses.Keys)) {
@@ -15025,14 +15400,16 @@ function Set-PowerMode {
         if ($Script:PowerPlanGUID) {
             $guid = $Script:PowerPlanGUID
             $subgroup = "54533251-82be-4824-96c1-47b60b740d00"
-            # Processor Min/Max state
+            # Processor Min/Max state - AC (zasilacz) I DC (bateria)
             powercfg /setacvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $minValue 2>$null
             powercfg /setacvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxValue 2>$null
+            powercfg /setdcvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $minValue 2>$null
+            powercfg /setdcvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxValue 2>$null
             # - Intel Speed Shift EPP (Energy Performance Preference)
             # 0=Performance, 50=Balanced, 100=Power Saving
             if ($Script:CPUType -eq "Intel") {
                 $eppValue = switch ($Mode) {
-                    "Silent"   { 60  }  # Max power saving (zlagodzone z 100 -> 60, by uniknac ekstremalnego throttlingu)
+                    "Silent"   { 100 }  # Max power saving (100 = pełna oszczędność, wymusza niskie zegary)
                     "Balanced" { 50  }  # Balanced
                     "Turbo"    { 0   }  # Max performance
                     "Extreme"  { 0   }  # Max performance
@@ -15040,6 +15417,7 @@ function Set-PowerMode {
                 }
                 # EPP setting GUID: 36687f9e-e3a5-4dbf-b1dc-15eb381c6863
                 powercfg /setacvalueindex $guid $subgroup "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $eppValue 2>$null
+                powercfg /setdcvalueindex $guid $subgroup "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $eppValue 2>$null
                 # Processor performance boost mode (0=Disabled, 1=Enabled, 2=Aggressive, 4=Efficient Aggressive)
                 $boostMode = switch ($Mode) {
                     "Silent"   { 0 }  # Disabled
@@ -15049,6 +15427,7 @@ function Set-PowerMode {
                     default    { 1 }
                 }
                 powercfg /setacvalueindex $guid $subgroup "be337238-0d82-4146-a960-4f3749d470c7" $boostMode 2>$null
+                powercfg /setdcvalueindex $guid $subgroup "be337238-0d82-4146-a960-4f3749d470c7" $boostMode 2>$null
             }
             # Logowanie zastosowanych ustawien Intel (EPP + BoostMode)
             if ($Script:CPUType -eq "Intel") {
@@ -15718,7 +16097,7 @@ function Main {
     if (-not $Script:AILearningLogPath) { $Script:AILearningLogPath = Join-Path $Script:ConfigDir 'AILearning.log' }
     if (-not $Script:AILearningSnapshotPath) { $Script:AILearningSnapshotPath = Join-Path $Script:ConfigDir 'AILearningState.json' }
     if (-not $Script:AILearningLogMaxMB) { $Script:AILearningLogMaxMB = 50 }
-    if (-not $Script:AILearningLogKeep) { $Script:AILearningLogKeep = 5 }
+    if (-not $Script:AILearningLogKeep) { $Script:AILearningLogKeep = 3 }          # v44: 3 archiwa
     if (-not $Script:AILearningSnapshotLines) { $Script:AILearningSnapshotLines = 1000 }
 
     function Append-AILearningEntry {
@@ -15899,6 +16278,13 @@ function Main {
     $priorityManager = [SmartPriorityManager]::new()
     $proBalance = [ProBalance]::new($Script:TotalThreads)  # v39.15: ProBalance (CPU hog restraint)
     $performanceBooster = [PerformanceBooster]::new()  # V38 NEW: Advanced performance booster
+    # Load persisted performance cache (KnownHeavyApps, AppExecutablePaths)
+    try {
+        $performanceCachePath = Join-Path $Script:ConfigDir "PerformanceCache.json"
+        $performanceBooster.LoadCache($performanceCachePath)
+        $Script:PerformanceCachePath = $performanceCachePath
+        if (-not $Script:PerformanceCacheDebounceSec) { $Script:PerformanceCacheDebounceSec = 60 }
+    } catch { }
     try {
         $pbConfigPath = Join-Path $Script:ConfigDir "ProBalanceConfig.json"
         if (Test-Path $pbConfigPath) {
@@ -15950,6 +16336,11 @@ function Main {
     $processAI = [ProcessAI]::new()
     # Zapisz stan ProcessAI od razu aby CONFIGURATOR mógł go odczytać bez czekania 5 minut
     [void]$processAI.SaveState($Script:ConfigDir)
+    # v44.0: SystemGovernor - centralne zarządzanie CPU/GPU/procesami
+    $systemGovernor = [SystemGovernor]::new()
+    $systemGovernor.Initialize($Script:HasiGPU, $Script:HasdGPU, $Script:iGPUName, $Script:dGPUName)
+    $systemGovernor.LoadState($Script:ConfigDir)
+    Write-Host "  - SystemGovernor: ACTIVE (GPU/iGPU/Process/Power control)" -ForegroundColor Green
     # - V40 NEW: GPU AI - inteligentne zarządzanie GPU (iGPU/dGPU + power control)
     $gpuAI = [GPUAI]::new($Script:HasiGPU, $Script:HasdGPU, $Script:iGPUName, $Script:dGPUName, $Script:dGPUVendor)
     # V40.3 FIX: Nie zapisuj stanu od razu - najpierw załaduj stare dane!
@@ -16613,14 +17004,14 @@ $Script:PreviousEnsembleEnabled = $false
                 }
                 [void]$userPatterns.RecordAppUsage($currentForeground)
                 $lastForegroundApp = $currentForeground
-                if ($performanceBooster.IsHeavyApp($currentForeground) -or 
+                    if ($performanceBooster.IsHeavyApp($currentForeground) -or 
                     ($prophet.Apps.ContainsKey($currentForeground) -and $prophet.Apps[$currentForeground].IsHeavy)) {
                     # 1. Priority Boost
                     [void]$performanceBooster.BoostProcessPriority($currentForeground)
                     # 2. Memory pre-allocation
                     [void]$performanceBooster.PreallocateMemory($currentForeground)
-                    # 3. Disk cache warming
-                    [void]$performanceBooster.WarmDiskCache($currentForeground)
+                    # 3. Disk cache warming (safe wrapper to avoid duplicates)
+                    SafeWarm $currentForeground
                     # 4. Freeze background processes (aggressive mode for games)
                     if ($performanceBooster.BackgroundFreezeEnabled) {
                         $frozenCount = $performanceBooster.FreezeBackgroundProcesses($currentForeground)
@@ -16639,7 +17030,7 @@ $Script:PreviousEnsembleEnabled = $false
                 if ($preemptiveResult.ShouldBoost) {
                     # Pre-boost: przygotuj system PRZED uruchomieniem
                     [void]$performanceBooster.PreallocateMemory($preemptiveResult.App)
-                    [void]$performanceBooster.WarmDiskCache($preemptiveResult.App)
+                    SafeWarm $preemptiveResult.App
                     # Jeśli AI aktywne, włącz Turbo preemptively
                     if ($Global:AI_Active -and $currentState -ne "Turbo") {
                         Set-PowerMode -Mode "Balanced" -CurrentCPU $currentMetrics.CPU
@@ -16776,11 +17167,11 @@ $Script:PreviousEnsembleEnabled = $false
                     [void]$loadPredictor.RecordAppLaunch($watcher.BoostProcessName)
                     $isHeavy = $performanceBooster.IsHeavyApp($watcher.BoostProcessName) -or 
                                ($prophet.Apps.ContainsKey($watcher.BoostProcessName) -and $prophet.Apps[$watcher.BoostProcessName].IsHeavy)
-                    if ($isHeavy) {
+                        if ($isHeavy) {
                         # Heavy app: High priority + affinity + cache + memory + freeze
                         [void]$performanceBooster.BoostProcessPriority($watcher.BoostProcessName)
                         [void]$performanceBooster.PreallocateMemory($watcher.BoostProcessName)
-                        [void]$performanceBooster.WarmDiskCache($watcher.BoostProcessName)
+                        SafeWarm $watcher.BoostProcessName
                         [void]$performanceBooster.FreezeBackgroundProcesses($watcher.BoostProcessName)
                     } else {
                         # Normal app: AboveNormal priority only
@@ -17916,6 +18307,28 @@ $Script:PreviousEnsembleEnabled = $false
                 
                 $currentState = $newMode
                 
+                # v44.0: SYSTEM GOVERNOR - przejęcie kontroli od Windows
+                if ($systemGovernor -and $systemGovernor.IsGoverning) {
+                    try {
+                        $govPM = @{}
+                        if ($proBalance -and $proBalance.ProcessCPU.Count -gt 0) {
+                            foreach ($pid in $proBalance.ProcessCPU.Keys) {
+                                $pD = $proBalance.ProcessCPU[$pid]
+                                if ($pD.History.Count -gt 0) {
+                                    $govPM[$pid] = @{ Name = $pD.Name; PID = $pid; CPU = $pD.History[$pD.History.Count - 1] }
+                                }
+                            }
+                        }
+                        $govR = $systemGovernor.Govern($currentMetrics.CPU, $gpuLoad, $currentMetrics.Temp, $currentForeground, $currentState, $govPM)
+                        if ($govR.ModeOverride -and $govR.IsOverloaded -and -not $hardLockBlocked) {
+                            $prevSt = $currentState; $currentState = $govR.ModeOverride; $newMode = $currentState; $Script:V42_PrevMode = $newMode
+                            $aiDecision.Reason = "GOVERNOR: $($govR.OverloadReason)"
+                            if ($prevSt -ne $currentState) { Add-Log "- GOVERNOR: $prevSt → $currentState | $($govR.OverloadReason)" }
+                        }
+                        if ($govR.GPUAction -and $govR.GPUAction.Action) { Add-Log " GOV-GPU: $($govR.GPUAction.App) → $($govR.GPUAction.GPU) ($($govR.GPUAction.Reason))" }
+                    } catch {}
+                }
+                
                 # v42.6 FIX BUG #3: Energy Tracker - zapisuj efektywność decyzji
                 if ($energyTracker -and (Is-EnergyEnabled)) {
                     $energyTracker.Record($newMode, $currentMetrics.CPU, $currentMetrics.Temp, $isUserActive)
@@ -18644,6 +19057,19 @@ $Script:PreviousEnsembleEnabled = $false
                     }
                 }
             }
+            # Debounced save for PerformanceBooster cache (learned heavy apps)
+            try {
+                if ($Script:PerformanceCachePath -and $performanceBooster.CacheDirty) {
+                    $now = Get-Date
+                    $lastChange = $performanceBooster.CacheLastChange
+                    if ($lastChange -ne [datetime]::MinValue) {
+                        $elapsed = ($now - $lastChange).TotalSeconds
+                        if ($elapsed -ge $Script:PerformanceCacheDebounceSec) {
+                            try { $performanceBooster.SaveCache($Script:PerformanceCachePath) } catch {}
+                        }
+                    }
+                }
+            } catch { }
             # (Zostaje tylko szybki zapis co iteracje ponizej)
             # Iteracja trwa ~800ms-1s, wiec 300 iteracji = ~5 minut
             $backupInterval = switch ($Script:StorageMode) {
@@ -18693,6 +19119,24 @@ $Script:PreviousEnsembleEnabled = $false
                 [void]$processAI.SaveState($Script:ConfigDir)
                 # - V40: GPU AI - zapisz profile GPU dla aplikacji
                 [void]$gpuAI.SaveState($Script:ConfigDir)
+                # v44.0: SystemGovernor save + learned GPU prefs → AILearning
+                try { $systemGovernor.SaveState($Script:ConfigDir) } catch {}
+                if ($systemGovernor -and $systemGovernor.LearnedGPUPrefs.Count -gt 0) {
+                    try {
+                        foreach ($appKey in $systemGovernor.LearnedGPUPrefs.Keys) {
+                            $gp = $systemGovernor.LearnedGPUPrefs[$appKey]
+                            if ($gp.Sessions -gt 5) {
+                                Append-AILearningEntry @{
+                                    Timestamp = (Get-Date).ToString('o')
+                                    Source = 'SharedAppKnowledge'; Component = 'Governor'
+                                    App = $appKey; PreferredGPU = $gp.Pref
+                                    GPUConfidence = [Math]::Round($gp.Confidence, 2)
+                                    Sessions = $gp.Sessions
+                                }
+                            }
+                        }
+                    } catch {}
+                }
                 # After saving all AI states, append lightweight NDJSON entries so learning events are persisted incrementally
                 function Write-AIAppendAfterSave {
                     param([string]$Name, $Obj)
@@ -19460,6 +19904,9 @@ $Script:PreviousEnsembleEnabled = $false
         # - Przywroc domyslne plany zasilania Windows
         try { $powerRestored = Restore-DefaultPowerPlans } catch { $powerRestored = $false }
         try { $priorityManager.ResetAllPriorities() } catch { }
+        # v44.0: Governor - przywróć Windows defaults i zapisz stan
+        try { $systemGovernor.RestoreWindowsDefaults() } catch { }
+        try { $systemGovernor.SaveState($Script:ConfigDir) } catch { }
         try { $null = Save-State -Brain $brain -Prophet $prophet } catch { }
         try { $anomalyDetector.SaveProfiles($Script:ConfigDir) } catch { }
         try { $loadPredictor.SavePatterns($Script:ConfigDir) } catch { }
@@ -19630,4 +20077,3 @@ function Write-SessionSummary {
 $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
     Write-SessionSummary
 }
-
