@@ -16094,180 +16094,56 @@ function Main {
     # --------------------------- AILearning storage helpers ---------------------------
     # Purpose: append-only NDJSON log + bounded rotation + periodic compacted snapshot
     if (-not $Script:ConfigDir) { $Script:ConfigDir = "C:\CPUManager" }
-    if (-not $Script:AILearningLogPath) { $Script:AILearningLogPath = Join-Path $Script:ConfigDir 'AILearning.log' }
+    #if (-not $Script:AILearningLogPath) { $Script:AILearningLogPath = Join-Path $Script:ConfigDir 'AILearning.log' }
+    $Script:AILearningLogPath = $null  # AILearning.log disabled
     if (-not $Script:AILearningSnapshotPath) { $Script:AILearningSnapshotPath = Join-Path $Script:ConfigDir 'AILearningState.json' }
     if (-not $Script:AILearningLogMaxMB) { $Script:AILearningLogMaxMB = 50 }
     if (-not $Script:AILearningLogKeep) { $Script:AILearningLogKeep = 3 }          # v44: 3 archiwa
     if (-not $Script:AILearningSnapshotLines) { $Script:AILearningSnapshotLines = 1000 }
 
     function Append-AILearningEntry {
-        param(
-            [Parameter(Mandatory=$true)][object]$Entry
-        )
-        try {
-            # Initialize buffer structures if missing
-            if (-not $Script:AILearningBuffer) { $Script:AILearningBuffer = New-Object System.Collections.Generic.List[object] }
-            if (-not $Script:AILearningBufferLock) { $Script:AILearningBufferLock = New-Object Object }
-            if (-not $Script:AILearningAppendThreshold) { $Script:AILearningAppendThreshold = 5 }
-            if (-not $Script:AILearningFlushIntervalSeconds) { $Script:AILearningFlushIntervalSeconds = 10 }
-
-            # Add to in-memory buffer (fast, minimal work in hot path)
-            [System.Threading.Monitor]::Enter($Script:AILearningBufferLock)
-            try { $null = $Script:AILearningBuffer.Add($Entry) } finally { [System.Threading.Monitor]::Exit($Script:AILearningBufferLock) }
-
-            # If buffer reached threshold, flush synchronously (background timer will also flush periodically)
-            if ($Script:AILearningBuffer.Count -ge $Script:AILearningAppendThreshold) { Flush-AILearningBuffer }
-        } catch {
-            Write-DebugLog "Append-AILearningEntry ERROR: $_" "ERROR" "ENGINE"
-        }
+        param([Parameter(Mandatory=$true)][object]$Entry)
+        # Disabled: do nothing, AILearning.log removed
+        return
     }
 
     function Flush-AILearningBuffer {
         param([switch]$Force)
-        try {
-            if (-not $Script:AILearningBuffer) { return }
-            if (-not $Script:AILearningBufferLock) { return }
-
-            $toWrite = @()
-            [System.Threading.Monitor]::Enter($Script:AILearningBufferLock)
-            try {
-                if ($Script:AILearningBuffer.Count -eq 0) { return }
-                # If not forced and below threshold, skip
-                if (-not $Force -and $Script:AILearningBuffer.Count -lt $Script:AILearningAppendThreshold) { return }
-                foreach ($item in $Script:AILearningBuffer) { $toWrite += $item }
-                $Script:AILearningBuffer.Clear()
-            } finally { [System.Threading.Monitor]::Exit($Script:AILearningBufferLock) }
-
-            if ($toWrite.Count -eq 0) { return }
-
-            $dir = Split-Path $Script:AILearningLogPath -Parent
-            if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
-
-            $lines = @()
-            foreach ($o in $toWrite) {
-                try { $lines += ($o | ConvertTo-Json -Depth 12 -Compress) } catch { }
-            }
-
-            if ($lines.Count -gt 0) {
-                Add-Content -Path $Script:AILearningLogPath -Value $lines -Encoding UTF8 -Force
-                $fi = Get-Item $Script:AILearningLogPath -ErrorAction SilentlyContinue
-                if ($fi -and $fi.Length -gt ($Script:AILearningLogMaxMB * 1MB)) { Rotate-AILearningLog }
-            }
-        } catch {
-            Write-DebugLog "Flush-AILearningBuffer ERROR: $_" "ERROR" "ENGINE"
-        }
+        # Disabled: do nothing, AILearning.log removed
+        return
     }
 
     function Start-AILearningFlushTimer {
         param([int]$IntervalSeconds = 10)
-        try {
-            if ($Script:AILearningFlushTimer) { return }
-            $Script:AILearningFlushIntervalSeconds = $IntervalSeconds
-            $timer = New-Object System.Timers.Timer($IntervalSeconds * 1000)
-            $timer.AutoReset = $true
-            $event = [System.Timers.ElapsedEventHandler]{
-                param($sender,$args)
-                try { Flush-AILearningBuffer } catch {}
-            }
-            $timer.Add_Elapsed($event)
-            $timer.Start()
-            $Script:AILearningFlushTimer = $timer
-        } catch {
-            Write-DebugLog "Start-AILearningFlushTimer ERROR: $_" "ERROR" "ENGINE"
-        }
+        # Disabled: do nothing
+        return
     }
 
     function Stop-AILearningFlushTimer {
-        try {
-            if ($Script:AILearningFlushTimer) { $Script:AILearningFlushTimer.Stop(); $Script:AILearningFlushTimer.Dispose(); $Script:AILearningFlushTimer = $null }
-        } catch { }
+        # Disabled: do nothing
+        return
     }
 
     function Rotate-AILearningLog {
-        try {
-            if (-not (Test-Path $Script:AILearningLogPath)) { return }
-            $ts = (Get-Date).ToString('yyyyMMddHHmmss')
-            $archive = "$($Script:AILearningLogPath).$ts"
-            Move-Item -Path $Script:AILearningLogPath -Destination $archive -Force
-            New-Item -Path $Script:AILearningLogPath -ItemType File -Value "" | Out-Null
-            $archives = Get-ChildItem -Path "$($Script:AILearningLogPath).*" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
-            if ($archives.Count -gt $Script:AILearningLogKeep) {
-                $toRemove = $archives | Select-Object -Skip $Script:AILearningLogKeep
-                foreach ($f in $toRemove) { Remove-Item -Path $f.FullName -Force -ErrorAction SilentlyContinue }
-            }
-        } catch {
-            Write-DebugLog "Rotate-AILearningLog ERROR: $_" "ERROR" "ENGINE"
-        }
+        # Disabled: do nothing
+        return
     }
 
     function Save-AILearningSnapshot {
-        param(
-            [int]$Lines = $Script:AILearningSnapshotLines
-        )
-        try {
-            if (-not (Test-Path $Script:AILearningLogPath)) {
-                $tmp = "$($Script:AILearningSnapshotPath).tmp"
-                @() | ConvertTo-Json -Depth 5 | Set-Content -Path $tmp -Encoding UTF8 -Force
-                Move-Item -Path $tmp -Destination $Script:AILearningSnapshotPath -Force
-                return
-            }
-            $lines = Get-Content -Path $Script:AILearningLogPath -Tail $Lines -ErrorAction SilentlyContinue
-            $objs = @()
-            foreach ($l in $lines) {
-                if ($l.Trim() -eq '') { continue }
-                try { $o = $l | ConvertFrom-Json -ErrorAction Stop; $objs += $o } catch { }
-            }
-            $tmp = "$($Script:AILearningSnapshotPath).tmp"
-            $objs | ConvertTo-Json -Depth 12 | Set-Content -Path $tmp -Encoding UTF8 -Force
-            Move-Item -Path $tmp -Destination $Script:AILearningSnapshotPath -Force
-        } catch {
-            Write-DebugLog "Save-AILearningSnapshot ERROR: $_" "ERROR" "ENGINE"
-        }
+        param([int]$Lines = $Script:AILearningSnapshotLines)
+        # Disabled: do nothing
+        return
     }
 
     function Start-AILearningMaintenance {
-        param(
-            [int]$IntervalMinutes = 10
-        )
-        try {
-            if ($Script:AILearningMaintJob -and (Get-Job -Id $Script:AILearningMaintJob.Id -ErrorAction SilentlyContinue)) { return }
-            $log = $Script:AILearningLogPath; $snapshot = $Script:AILearningSnapshotPath; $maxMB = $Script:AILearningLogMaxMB; $keep = $Script:AILearningLogKeep; $lines = $Script:AILearningSnapshotLines; $interval = $IntervalMinutes
-            $job = Start-Job -ScriptBlock {
-                param($log,$snapshot,$maxMB,$keep,$lines,$interval)
-                while ($true) {
-                    try {
-                        if (Test-Path $log) {
-                            $fi = Get-Item $log -ErrorAction SilentlyContinue
-                            if ($fi -and $fi.Length -gt ($maxMB * 1MB)) {
-                                $ts = (Get-Date).ToString('yyyyMMddHHmmss')
-                                Move-Item -Path $log -Destination "$log.$ts" -Force -ErrorAction SilentlyContinue
-                                New-Item -Path $log -ItemType File -Value "" | Out-Null
-                                $archives = Get-ChildItem -Path "$($log).*" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
-                                if ($archives.Count -gt $keep) { $archives | Select-Object -Skip $keep | ForEach-Object { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue } }
-                            }
-                            $linesArr = Get-Content -Path $log -Tail $lines -ErrorAction SilentlyContinue
-                            $objs = @()
-                            foreach ($l in $linesArr) { try { $o = $l | ConvertFrom-Json -ErrorAction Stop; $objs += $o } catch { } }
-                            $tmp = "$snapshot.tmp"
-                            $objs | ConvertTo-Json -Depth 12 | Set-Content -Path $tmp -Encoding UTF8 -Force
-                            Move-Item -Path $tmp -Destination $snapshot -Force -ErrorAction SilentlyContinue
-                        } else {
-                            if (-not (Test-Path $snapshot)) { @() | ConvertTo-Json -Depth 5 | Set-Content -Path $snapshot -Encoding UTF8 -Force }
-                        }
-                    } catch { }
-                    Start-Sleep -Seconds ($interval * 60)
-                }
-            } -ArgumentList $log,$snapshot,$maxMB,$keep,$lines,$interval
-            $Script:AILearningMaintJob = $job
-        } catch {
-            Write-DebugLog "Start-AILearningMaintenance ERROR: $_" "ERROR" "ENGINE"
-        }
+        param([int]$IntervalMinutes = 10)
+        # Disabled: do nothing
+        return
     }
 
     function Stop-AILearningMaintenance {
-        try {
-            if ($Script:AILearningMaintJob) { Stop-Job -Job $Script:AILearningMaintJob -Force -ErrorAction SilentlyContinue; Remove-Job -Job $Script:AILearningMaintJob -Force -ErrorAction SilentlyContinue; $Script:AILearningMaintJob = $null }
-        } catch { }
+        # Disabled: do nothing
+        return
     }
 
     # By default do not start maintenance automatically — caller may enable if desired.
