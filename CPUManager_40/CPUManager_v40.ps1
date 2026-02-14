@@ -33,11 +33,6 @@
 # V42.5: TIMER-BASED HYSTERESIS - FIX PING-PONG!
 # 
 # PROBLEM v42.4:
-        # Ensure any buffered AI-learning entries are flushed before exit
-        try { Flush-AILearningBuffer -Force } catch {}
-        try { Stop-AILearningFlushTimer } catch {}
-        try { Stop-AILearningMaintenance } catch {}
-
 # - Entry: CPU<45%, Exit: CPU>45% (instant)
 # - Silent Hill: CPU skacze 40-55% → Mode ping-pong co 5 sekund! ❌
 # - Wentylator: 2500 RPM ↔ 4000 RPM → IRYTUJĄCE! ❌
@@ -5783,8 +5778,9 @@ class SystemGovernor {
         $procR = $this.GovernProcesses($fgApp, $cpuPct, $mode, $procMetrics)
         $result.ProcessActions += $procR.Actions; $result.GovernedProcesses = $procR.GovernedCount
 
-        # 4. POWER PLAN ENFORCEMENT (core parking per mode)
-        $this.EnforcePowerSettings($mode, $cpuPct, $temp)
+        # 4. POWER PLAN - USUNIĘTE: Set-PowerMode jest jedynym autorytetem dla powercfg
+        # EnforcePowerSettings powodowało konflikty - nadpisywało EPP, Min/Max CPU%,
+        # boost mode ustawione przez Set-PowerMode, co blokowało poprawne działanie
 
         # 5. LEARN (zbieraj dane o zachowaniu aplikacji)
         $this.LearnAppBehavior($fgApp, $cpuPct, $gpuLoad)
@@ -12250,12 +12246,20 @@ class AICoordinator {
         }
         
         # Oblicz ważoną średnią score
+        # CRITICAL: Silniki ze score=50 (neutralnym/domyślnym) NIE głosują!
+        # Bez tego: 10 silników z "brak danych=50" rozmywa decyzje aktywnych silników
+        # Wynik: IDLE daje Balanced zamiast Silent (efekt placebo)
         $totalWeight = 0.0
         $weightedScore = 0.0
         foreach ($engine in $modelScores.Keys) {
             $w = if ($weights.ContainsKey($engine)) { $weights[$engine] } else { 0.5 }
             $score = $modelScores[$engine]
             if ($score -ne $null -and $score -ge 0) {
+                # Silnik z realnym sygnałem (odchylenie >5 od neutralnego 50) głosuje normalnie
+                # Silnik bez danych (score=50 ±5) ma zredukowaną wagę do 10%
+                if ([Math]::Abs($score - 50) -le 5) {
+                    $w = $w * 0.1  # Prawie brak wpływu na decyzję
+                }
                 $weightedScore += $score * $w
                 $totalWeight += $w
             }
@@ -16092,59 +16096,98 @@ function Main {
     $watcher = [ProcessWatcher]::new($initialCooldown)
     $Script:ProcessWatcherInstance = $watcher
     # --------------------------- AILearning storage helpers ---------------------------
-    # Purpose: append-only NDJSON log + bounded rotation + periodic compacted snapshot
+    # Kompaktowa pamięć AI — zbiera wiedzę ze WSZYSTKICH silników do jednego pliku
+    # AILearningState.json = per-app profil (BestMode, AvgCPU, GPU, Phase, Thermal...)
+    # Bufor w RAM → flush przy auto-save (co 5 min) i shutdown. ZERO timerów.
     if (-not $Script:ConfigDir) { $Script:ConfigDir = "C:\CPUManager" }
-    #if (-not $Script:AILearningLogPath) { $Script:AILearningLogPath = Join-Path $Script:ConfigDir 'AILearning.log' }
-    $Script:AILearningLogPath = $null  # AILearning.log disabled
     if (-not $Script:AILearningSnapshotPath) { $Script:AILearningSnapshotPath = Join-Path $Script:ConfigDir 'AILearningState.json' }
-    if (-not $Script:AILearningLogMaxMB) { $Script:AILearningLogMaxMB = 50 }
-    if (-not $Script:AILearningLogKeep) { $Script:AILearningLogKeep = 3 }          # v44: 3 archiwa
-    if (-not $Script:AILearningSnapshotLines) { $Script:AILearningSnapshotLines = 1000 }
+    if (-not $Script:AILearningMaxApps) { $Script:AILearningMaxApps = 200 }
+
+    $Script:AILearningBuffer = @{}
+    $Script:AILearningDirty = $false
+
+    # Załaduj istniejący stan przy starcie
+    try {
+        if (Test-Path $Script:AILearningSnapshotPath) {
+            $existingData = Get-Content $Script:AILearningSnapshotPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($existingData.Apps) {
+                foreach ($prop in $existingData.Apps.PSObject.Properties) {
+                    $v = $prop.Value
+                    $Script:AILearningBuffer[$prop.Name] = @{
+                        AvgCPU=[double]$(if($v.AvgCPU){$v.AvgCPU}else{0}); AvgGPU=[double]$(if($v.AvgGPU){$v.AvgGPU}else{0})
+                        AvgTemp=[double]$(if($v.AvgTemp){$v.AvgTemp}else{0}); BestMode=$(if($v.BestMode){$v.BestMode}else{""})
+                        Sessions=[int]$(if($v.Sessions){$v.Sessions}else{0}); Category=$(if($v.Category){$v.Category}else{""})
+                        ThermalRisk=$(if($v.ThermalRisk){$v.ThermalRisk}else{"Low"}); PeakTemp=[double]$(if($v.PeakTemp){$v.PeakTemp}else{0})
+                        PreferredGPU=$(if($v.PreferredGPU){$v.PreferredGPU}else{""}); IsGPUBound=[bool]$(if($v.IsGPUBound){$v.IsGPUBound}else{$false})
+                        DominantPhase=$(if($v.DominantPhase){$v.DominantPhase}else{""}); Efficiency=[double]$(if($v.Efficiency){$v.Efficiency}else{0})
+                        QBestAction=$(if($v.QBestAction){$v.QBestAction}else{""}); QConfidence=[double]$(if($v.QConfidence){$v.QConfidence}else{0})
+                        NetworkMode=$(if($v.NetworkMode){$v.NetworkMode}else{""}); UpdateCount=[int]$(if($v.UpdateCount){$v.UpdateCount}else{0})
+                        LastSeen=$(if($v.LastSeen){$v.LastSeen}else{""})
+                    }
+                }
+                Write-Host "  [AILearning] Loaded $($Script:AILearningBuffer.Count) app profiles" -ForegroundColor Green
+            }
+        }
+    } catch { }
 
     function Append-AILearningEntry {
         param([Parameter(Mandatory=$true)][object]$Entry)
-        # Disabled: do nothing, AILearning.log removed
-        return
+        try {
+            $app = $Entry.App
+            if ([string]::IsNullOrWhiteSpace($app) -or $app -eq "Desktop") { return }
+            $key = $app.ToLower()
+            if (-not $Script:AILearningBuffer.ContainsKey($key)) {
+                $Script:AILearningBuffer[$key] = @{
+                    AvgCPU=0; AvgGPU=0; AvgTemp=0; BestMode=""; Sessions=0; Category=""
+                    ThermalRisk="Low"; PeakTemp=0; PreferredGPU=""; IsGPUBound=$false
+                    DominantPhase=""; Efficiency=0; QBestAction=""; QConfidence=0
+                    NetworkMode=""; UpdateCount=0; LastSeen=""
+                }
+            }
+            $p = $Script:AILearningBuffer[$key]
+            $p.LastSeen = (Get-Date).ToString('o')
+            $p.UpdateCount++
+            switch ($Entry.Component) {
+                "Prophet"   { if($Entry.AvgCPU){$p.AvgCPU=[Math]::Round([double]$Entry.AvgCPU,1)}; if($Entry.AvgGPU){$p.AvgGPU=[Math]::Round([double]$Entry.AvgGPU,1)}; if($Entry.BestMode){$p.BestMode=$Entry.BestMode}; if($Entry.Sessions){$p.Sessions=[int]$Entry.Sessions} }
+                "QLearning" { if($Entry.QBestAction){$p.QBestAction=$Entry.QBestAction}; if($Entry.Confidence){$p.QConfidence=[Math]::Round([double]$Entry.Confidence,2)} }
+                "GPUAI"     { if($Entry.PreferredGPU){$p.PreferredGPU=$Entry.PreferredGPU}; if($null-ne$Entry.IsGPUBound){$p.IsGPUBound=[bool]$Entry.IsGPUBound}; if($Entry.GPUCategory){$p.Category=$Entry.GPUCategory} }
+                "Phase"     { if($Entry.DominantPhase){$p.DominantPhase=$Entry.DominantPhase} }
+                "Thermal"   { if($Entry.AvgTemp){$p.AvgTemp=[Math]::Round([double]$Entry.AvgTemp,1)}; if($Entry.PeakTemp-and[double]$Entry.PeakTemp-gt$p.PeakTemp){$p.PeakTemp=[Math]::Round([double]$Entry.PeakTemp,1)}; if($Entry.Risk){$p.ThermalRisk=$Entry.Risk} }
+                "Context"   { if($Entry.Category){$p.Category=$Entry.Category} }
+                "Network"   { if($Entry.Mode){$p.NetworkMode=$Entry.Mode} }
+                "Energy"    { if($Entry.Efficiency){$p.Efficiency=[Math]::Round([double]$Entry.Efficiency,2)} }
+                "Governor"  { if($Entry.PreferredGPU){$p.PreferredGPU=$Entry.PreferredGPU} }
+            }
+            $Script:AILearningDirty = $true
+        } catch { }
     }
 
     function Flush-AILearningBuffer {
         param([switch]$Force)
-        # Disabled: do nothing, AILearning.log removed
-        return
+        if (-not $Script:AILearningDirty -and -not $Force) { return }
+        try {
+            $buf = $Script:AILearningBuffer
+            if (-not $buf -or $buf.Count -eq 0) { return }
+            # Ogranicz do max apps — usuń najstarsze
+            if ($buf.Count -gt $Script:AILearningMaxApps) {
+                $sorted = $buf.GetEnumerator() | Sort-Object { $_.Value.LastSeen } -Descending | Select-Object -First $Script:AILearningMaxApps
+                $newBuf = @{}; foreach ($item in $sorted) { $newBuf[$item.Key] = $item.Value }
+                $Script:AILearningBuffer = $newBuf; $buf = $newBuf
+            }
+            $snapshot = @{ Version = "1.0"; SavedAt = (Get-Date).ToString('o'); TotalApps = $buf.Count; Apps = $buf }
+            $json = $snapshot | ConvertTo-Json -Depth 4 -Compress
+            [System.IO.File]::WriteAllText($Script:AILearningSnapshotPath, $json, [System.Text.Encoding]::UTF8)
+            $Script:AILearningDirty = $false
+        } catch { }
     }
 
-    function Start-AILearningFlushTimer {
-        param([int]$IntervalSeconds = 10)
-        # Disabled: do nothing
-        return
-    }
-
-    function Stop-AILearningFlushTimer {
-        # Disabled: do nothing
-        return
-    }
-
-    function Rotate-AILearningLog {
-        # Disabled: do nothing
-        return
-    }
-
-    function Save-AILearningSnapshot {
-        param([int]$Lines = $Script:AILearningSnapshotLines)
-        # Disabled: do nothing
-        return
-    }
-
-    function Start-AILearningMaintenance {
-        param([int]$IntervalMinutes = 10)
-        # Disabled: do nothing
-        return
-    }
-
-    function Stop-AILearningMaintenance {
-        # Disabled: do nothing
-        return
-    }
+    # Stub-y zachowane dla kompatybilności — nic nie robią, zero timerów
+    function Start-AILearningFlushTimer { param([int]$IntervalSeconds = 10) }
+    function Stop-AILearningFlushTimer { }
+    function Rotate-AILearningLog { }
+    function Save-AILearningSnapshot { param([int]$Lines = 0); Flush-AILearningBuffer -Force }
+    function Start-AILearningMaintenance { param([int]$IntervalMinutes = 10) }
+    function Stop-AILearningMaintenance { }
 
     # By default do not start maintenance automatically — caller may enable if desired.
     # Example to enable maintenance in background: Start-AILearningMaintenance -IntervalMinutes 10
@@ -16285,90 +16328,40 @@ function Main {
     $networkAI.LoadState($Script:ConfigDir)
     $networkAI.SaveState($Script:ConfigDir)
 
-    # Merge any recent NDJSON-based AILearning snapshot/log into in-memory components
+    # Merge AILearningState.json → SharedAppKnowledge (uzupełnij wiedzę z poprzedniej sesji)
     function Merge-AILearningSnapshot {
-        param(
-            $SharedKnowledge,
-            $ProcessAI,
-            $NetworkAI
-        )
+        param($SharedKnowledge, $ProcessAI, $NetworkAI)
         try {
-            if (-not (Test-Path $Script:AILearningSnapshotPath)) { return }
-            $content = Get-Content -Path $Script:AILearningSnapshotPath -Raw -ErrorAction SilentlyContinue
-            if (-not $content) { return }
-            $items = $null
-            try { $items = $content | ConvertFrom-Json -ErrorAction Stop } catch { return }
-            if (-not $items) { return }
-            if ($items -isnot [System.Array]) { $items = @($items) }
-            foreach ($it in $items) {
-                # If entry contains SharedAppKnowledge snapshot
-                if ($it.SharedAppKnowledge -or $it.SharedKnowledge -or $it.Apps) {
-                    $src = $it.SharedAppKnowledge ? $it.SharedAppKnowledge : ($it.SharedKnowledge ? $it.SharedKnowledge : $it.Apps)
-                    foreach ($prop in $src.PSObject.Properties) {
-                        $appKey = $prop.Name.ToLower()
-                        $v = $prop.Value
-                        $p = $SharedKnowledge.GetProfile($appKey)
-                        if ($v.AvgCPU) { $p.AvgCPU = [double]$v.AvgCPU }
-                        if ($v.AvgGPU) { $p.AvgGPU = [double]$v.AvgGPU }
-                        if ($v.BestMode) { $p.BestMode = $v.BestMode }
-                        if ($v.Sessions) { $p.Sessions = [int]$v.Sessions }
-                        if ($v.QBestAction) { $p.QBestAction = $v.QBestAction }
-                        if ($v.QPhaseActions) { $v.QPhaseActions.PSObject.Properties | ForEach-Object { $p.QPhaseActions[$_.Name] = $_.Value } }
-                        if ($v.IsGPUBound -ne $null) { $p.IsGPUBound = [bool]$v.IsGPUBound }
-                        if ($v.Category) { $p.Category = $v.Category }
-                        if ($v.Priority) { $p.Priority = [int]$v.Priority }
-                        if ($v.UpdateCount) { $p.UpdateCount = [int]$v.UpdateCount }
-                        $p.LastSeen = (Get-Date)
-                        $SharedKnowledge.Apps[$appKey] = $p
-                    }
-                }
-
-                # If entry contains ProcessAI snapshot
-                if ($it.ProcessProfiles) {
-                    foreach ($prop in $it.ProcessProfiles.PSObject.Properties) {
-                        $proc = $prop.Name.ToLower()
-                        $src = $prop.Value
-                        if (-not $ProcessAI.ProcessProfiles.ContainsKey($proc)) {
-                            $ProcessAI.ProcessProfiles[$proc] = @{
-                                AvgCPU = [double]($src.AvgCPU -as [double])
-                                MaxCPU = [double]($src.MaxCPU -as [double])
-                                AvgRAM = [double]($src.AvgRAM -as [double])
-                                MaxRAM = [double]($src.MaxRAM -as [double])
-                                Priority = $src.Priority
-                                CanThrottle = $src.CanThrottle
-                                Sessions = [int]($src.Sessions -as [int])
-                                Category = $src.Category
-                                LastSeen = (Get-Date)
-                            }
-                        } else {
-                            $dst = $ProcessAI.ProcessProfiles[$proc]
-                            if ($src.AvgCPU) { $dst.AvgCPU = ($dst.AvgCPU * $dst.Sessions + [double]$src.AvgCPU * [int]$src.Sessions) / ([int]$dst.Sessions + [int]$src.Sessions) }
-                            if ($src.MaxCPU -and $src.MaxCPU -gt $dst.MaxCPU) { $dst.MaxCPU = $src.MaxCPU }
-                            if ($src.AvgRAM) { $dst.AvgRAM = ($dst.AvgRAM * $dst.Sessions + [double]$src.AvgRAM * [int]$src.Sessions) / ([int]$dst.Sessions + [int]$src.Sessions) }
-                            if ($src.MaxRAM -and $src.MaxRAM -gt $dst.MaxRAM) { $dst.MaxRAM = $src.MaxRAM }
-                            $dst.Sessions = [int]$dst.Sessions + ([int]($src.Sessions -as [int]))
-                            if ($src.Category) { $dst.Category = $src.Category }
-                            if ($src.CanThrottle -ne $null) { $dst.CanThrottle = $src.CanThrottle }
-                            $dst.LastSeen = (Get-Date)
-                            $ProcessAI.ProcessProfiles[$proc] = $dst
-                        }
-                    }
-                }
-
-                # NetworkAI or other component merges can be added similarly
+            if (-not $Script:AILearningBuffer -or $Script:AILearningBuffer.Count -eq 0) { return }
+            if (-not $SharedKnowledge) { return }
+            $merged = 0
+            foreach ($key in $Script:AILearningBuffer.Keys) {
+                $v = $Script:AILearningBuffer[$key]
+                $p = $SharedKnowledge.GetProfile($key)
+                if ($v.AvgCPU -and $p.AvgCPU -eq 0) { $p.AvgCPU = [double]$v.AvgCPU }
+                if ($v.AvgGPU -and $p.AvgGPU -eq 0) { $p.AvgGPU = [double]$v.AvgGPU }
+                if ($v.BestMode -and -not $p.BestMode) { $p.BestMode = $v.BestMode }
+                if ($v.Sessions -and $p.Sessions -eq 0) { $p.Sessions = [int]$v.Sessions }
+                if ($v.QBestAction -and -not $p.QBestAction) { $p.QBestAction = $v.QBestAction }
+                if ($v.QConfidence -and $p.QConfidence -eq 0) { $p.QConfidence = [double]$v.QConfidence }
+                if ($v.Category -and -not $p.Category) { $p.Category = $v.Category }
+                if ($v.PreferredGPU -and -not $p.PreferredGPU) { $p.PreferredGPU = $v.PreferredGPU }
+                if ($v.DominantPhase -and -not $p.DominantPhase) { $p.DominantPhase = $v.DominantPhase }
+                if ($v.ThermalRisk -and $v.ThermalRisk -ne "Low") { $p.ThermalRisk = $v.ThermalRisk }
+                if ($v.PeakTemp -and [double]$v.PeakTemp -gt $p.PeakTemp) { $p.PeakTemp = [double]$v.PeakTemp }
+                if ($v.Efficiency -and $p.Efficiency -eq 0) { $p.Efficiency = [double]$v.Efficiency }
+                $SharedKnowledge.Apps[$key] = $p
+                $merged++
             }
-        } catch {
-            Write-DebugLog "Merge-AILearningSnapshot ERROR: $_" "ERROR" "ENGINE"
-        }
+            if ($merged -gt 0) {
+                Write-Host "  [AILearning] Merged $merged app profiles into SharedKnowledge" -ForegroundColor Green
+            }
+        } catch { }
     }
 
-    # Perform merge into live components so recent learning isn't lost
+    # Merge przy starcie — uzupełnij SharedKnowledge wiedzą z AILearningState.json
     try { Merge-AILearningSnapshot -SharedKnowledge $sharedKnowledge -ProcessAI $processAI -NetworkAI $networkAI } catch {}
 
-    # Start background maintenance to keep NDJSON size bounded (safe to enable)
-    Start-AILearningMaintenance -IntervalMinutes 10
-    # Start periodic flusher to batch NDJSON writes and reduce I/O
-    Start-AILearningFlushTimer -IntervalSeconds 10
     # ═══════════════════════════════════════════════════════════════════════════
     # 1. MemoryAgressiveness (0-100) -> RAMAnalyzer SpikeThreshold
     # 0=conservative (threshold 12%), 50=neutral (8%), 100=aggressive (4%)
@@ -17869,30 +17862,26 @@ $Script:PreviousEnsembleEnabled = $false
                     $aiDecision.Score = 90
                 } else {
                 # ═══════════════════════════════════════════════════════════════════════════
-                # V42 SIMPLE: PROSTA HIERARCHIA DECYZJI + STABILNOŚĆ
-                # FIX: Prophet SUGERUJE, nie WYMUSZA - rzeczywiste CPU ma priorytet
+                # V42 → V45: AI-FIRST DECISION + SAFETY OVERRIDES
+                # AI Coordinator waży 18 silników ZAWSZE, hardcoded reguły tylko jako safety net
                 # ═══════════════════════════════════════════════════════════════════════════
                 
                 $gpuLoad = if ($currentMetrics.GPU) { $currentMetrics.GPU.Load } else { 0 }
                 $ioTotal = $diskReadMB + $diskWriteMB
                 
-                # Inicjalizacja zmiennej Script jeśli nie istnieje
                 if (-not $Script:V42_PrevMode) { $Script:V42_PrevMode = "Balanced" }
                 if (-not $Script:LastHardLockApp) { $Script:LastHardLockApp = $null }
                 
-                # STABILNOŚĆ: Różne progi w zależności od obecnego trybu (hysteresis)
-                # v43.10: Używaj wartości z Config.json (slidery w Settings) zamiast hardcoded!
                 $silentExitThreshold = if ($null -ne $Script:BalancedThreshold) { $Script:BalancedThreshold } else { 35 }
                 $turboEntryThreshold = if ($null -ne $Script:TurboThreshold) { $Script:TurboThreshold } else { 70 }
-                $turboExitThreshold = [Math]::Max(30, $turboEntryThreshold - 30)  # Hysteresis: 30% niżej niż entry
+                $turboExitThreshold = [Math]::Max(30, $turboEntryThreshold - 30)
                 
                 $prevMode = $Script:V42_PrevMode
                 $newMode = "Balanced"
                 $reason = "DEFAULT"
                 
                 # ═══════════════════════════════════════════════════════════════════════════
-                # 0. HARDLOCK - ABSOLUTNY PRIORYTET (przed GPU-BOUND, THERMAL, HIGH, wszystkim)
-                # Jedyny wyjątek: THERMAL >95°C jako safety override
+                # 0. HARDLOCK - ABSOLUTNY PRIORYTET (user wymusza tryb per-app)
                 # ═══════════════════════════════════════════════════════════════════════════
                 $hardLockBlocked = $false
                 if ($currentForeground -and $currentForeground -notin @("Desktop", "explorer", "Explorer", "ShellExperienceHost", "StartMenuExperienceHost", "SearchHost", "Widgets")) {
@@ -17923,156 +17912,52 @@ $Script:PreviousEnsembleEnabled = $false
                                 $newMode = $hardLockMode
                                 $reason = "HARDLOCK: $currentForeground=$hardLockMode key=$key bias=$([Math]::Round($hardLockBias,2))"
                                 $hardLockBlocked = $true
-                                # Safety: THERMAL >95°C override HardLock (ochrona sprzętu)
                                 if ($currentMetrics.Temp -gt 95 -and $hardLockMode -ne "Silent") {
                                     $newMode = "Silent"
                                     $reason = "THERMAL-SAFETY: $([int]$currentMetrics.Temp)C overrides HARDLOCK ($hardLockMode)"
                                 }
-                                # v43.14 FIX: I/O LOADING NIE overriduje HardLock!
-                                # HardLock = user WYMUSZA tryb = ABSOLUTNY priorytet
-                                # Jedyny wyjątek: thermal safety >95°C
                                 break
                             }
                         }
                     }
                 }
                 
-                # v42.5 FIX: Flaga czy GPU-BOUND obsłużone (żeby nie duplikować Detect())
+                # v42.5 FIX: GPU-BOUND detection
                 $gpuBoundHandled = $false
                 $gpuBoundResult = $null
                 
-                # v42.5: Sprawdź GPU-BOUND gdy IsConfident - ale NIE gdy HardLock aktywne
                 if (-not $hardLockBlocked -and $gpuBound -and $gpuBound.IsConfident) {
                     try {
                         $gpuType = "dGPU"
-                        if ($Script:HasiGPU -and -not $Script:HasdGPU) {
-                            $gpuType = "iGPU"
-                        } elseif ($Script:HasiGPU -and $Script:HasdGPU) {
-                            $gpuType = if ($gpuLoad -gt 50) { "dGPU" } else { "iGPU" }
-                        }
-                        
-                        # v43.12: Przekaż Phase do GPU-BOUND (phase-aware exit delay)
+                        if ($Script:HasiGPU -and -not $Script:HasdGPU) { $gpuType = "iGPU" }
+                        elseif ($Script:HasiGPU -and $Script:HasdGPU) { $gpuType = if ($gpuLoad -gt 50) { "dGPU" } else { "iGPU" } }
                         $gpuBound.CurrentPhase = $phaseDetector.CurrentPhase
-                        # Wywołaj Detect() żeby sprawdzić EXIT condition
                         $gpuBoundResult = $gpuBound.Detect($currentMetrics.CPU, $gpuLoad, ($Script:HasiGPU -or $Script:HasdGPU), $gpuType)
                         $gpuBoundHandled = $true
-                        
-                        # Ustaw mode jeśli nadal GPU-BOUND
                         if ($gpuBoundResult.IsGPUBound) {
                             $newMode = $gpuBoundResult.SuggestedMode
                             $reason = $gpuBoundResult.Reason
                         }
-                    }
-                    catch {
-                        Write-ErrorLog -Component "GPU-BOUND" -ErrorMessage "PRE-CHECK GPU-Bound failed" -Details $_.Exception.Message
-                        $gpuBoundHandled = $false
-                    }
+                    } catch { $gpuBoundHandled = $false }
                 }
                 
                 # ═══════════════════════════════════════════════════════════════════════════
-                # HIERARCHIA DECYZJI - RZECZYWISTE METRYKI MAJĄ PRIORYTET!
-                # FIX v42.5: Skipuj hierarchię jeśli GPU-BOUND aktywne (obsłużone w PRE-CHECK)
+                # GŁÓWNA DECYZJA: AI COORDINATOR — waży WSZYSTKIE 18 silników
+                # Safety overrides interweniują TYLKO w ekstremalnych sytuacjach
                 # ═══════════════════════════════════════════════════════════════════════════
-                
-                # Jeśli HardLock wymusza tryb - skipuj CAŁĄ hierarchię (THERMAL, HIGH, itd.)
-                if (-not $hardLockBlocked) {
-                    # 1. THERMAL (>90°C) - ZAWSZE (nawet gdy GPU-BOUND!)
+                if (-not $hardLockBlocked -and -not ($gpuBoundHandled -and $gpuBoundResult -and $gpuBoundResult.IsGPUBound)) {
+                    
+                    # SAFETY OVERRIDE 1: THERMAL EMERGENCY (>90°C) — bezpieczeństwo sprzętu
                     if ($currentMetrics.Temp -gt 90) {
                         $newMode = "Silent"
                         $reason = "THERMAL: $([int]$currentMetrics.Temp)C"
                     }
-                    # 2. LOADING (I/O + aktywność) - INTELIGENTNE: Turbo tylko gdy naprawdę potrzeba
-                    # v43.10: Balanced dla umiarkowanego I/O, Turbo tylko dla ciężkiego
-                    elseif ($ioTotal -gt 80 -and ($currentMetrics.CPU -gt 25 -or $gpuLoad -gt 25)) {
-                        # Ciężkie I/O (>150MB/s) + wysokie CPU → Turbo
-                        # Umiarkowane I/O (80-150MB/s) → Balanced (szybko ale cicho)
-                        if ($ioTotal -gt 150 -and $currentMetrics.CPU -gt 50) {
-                            $newMode = "Turbo"
-                            $reason = "HEAVY LOADING: IO=$([int]$ioTotal)MB CPU=$([int]$currentMetrics.CPU)%"
-                        } else {
-                            $newMode = "Balanced"
-                            $reason = "LOADING: IO=$([int]$ioTotal)MB (Balanced for quiet)"
-                        }
+                    # SAFETY OVERRIDE 2: HEAVY I/O BURST (>150MB/s + CPU>50%) — nie blokuj dysków
+                    elseif ($ioTotal -gt 150 -and $currentMetrics.CPU -gt 50) {
+                        $newMode = "Turbo"
+                        $reason = "HEAVY I/O: $([int]$ioTotal)MB CPU=$([int]$currentMetrics.CPU)%"
                     }
-                    # 2.5 GPU-BOUND MAINTAIN - jeśli PRE-CHECK ustawił mode, skipuj resztę
-                    elseif ($gpuBoundHandled -and $gpuBoundResult -and $gpuBoundResult.IsGPUBound) {
-                        # Mode już ustawiony w PRE-CHECK
-                    }
-                    # 3. HIGH CPU LOAD (>TurboThreshold%) - TYLKO CPU decyduje o Turbo!
-                    # v43.13: GPU load NIE jest powodem do Turbo CPU. GPU pracuje niezależnie.
-                    # Jeśli GPU=95% a CPU=30% → CPU nie potrzebuje Turbo, AICoordinator zdecyduje.
-                    elseif ($currentMetrics.CPU -gt $turboEntryThreshold) {
-                        # Nawet przy wysokim CPU - sprawdź czy to GPU-BOUND scenario
-                        $isGPUBoundScenario = (($currentMetrics.CPU -lt 50 -and $gpuLoad -gt 75) -or ($gpuBound -and $gpuBound.IsConfident))
-                    
-                    if ($isGPUBoundScenario -and $gpuBound) {
-                        try {
-                            $gpuType = "dGPU"
-                            if ($Script:HasiGPU -and -not $Script:HasdGPU) {
-                                $gpuType = "iGPU"
-                            } elseif ($Script:HasiGPU -and $Script:HasdGPU) {
-                                $gpuType = if ($gpuLoad -gt 50) { "dGPU" } else { "iGPU" }
-                            }
-                            
-                            $gpuBound.CurrentPhase = $phaseDetector.CurrentPhase
-                            $gpuBoundResult = $gpuBound.Detect($currentMetrics.CPU, $gpuLoad, ($Script:HasiGPU -or $Script:HasdGPU), $gpuType)
-                            
-                            if ($gpuBoundResult.IsGPUBound) {
-                                $newMode = $gpuBoundResult.SuggestedMode
-                                $reason = $gpuBoundResult.Reason
-                                if ($gpuBoundResult.Confidence -ge 100) {
-                                    Add-Log "GPU-BOUND detected: Reducing CPU TDP by $($gpuBoundResult.CPUReduction)W for better GPU thermal headroom"
-                                }
-                            } else {
-                                $newMode = "Turbo"
-                                $reason = "HIGH: CPU=$([int]$currentMetrics.CPU)%"
-                            }
-                        }
-                        catch {
-                            Write-ErrorLog -Component "GPU-BOUND" -ErrorMessage "GPU-Bound detection failed" -Details $_.Exception.Message
-                            $newMode = "Turbo"
-                            $reason = "HIGH: CPU=$([int]$currentMetrics.CPU)%"
-                        }
-                    } else {
-                        # v43.14 FIX: Sprawdź czy GPU-BOUND cooldown aktywny LUB GPU nadal wysoki
-                        $gpuBoundCooldownActive = $false
-                        if ($gpuBound -and $gpuBound.LastExitTime -ne [datetime]::MinValue) {
-                            $sinceBoundExit = ((Get-Date) - $gpuBound.LastExitTime).TotalSeconds
-                            if ($sinceBoundExit -lt $gpuBound.ReEntryCooldownSeconds) { $gpuBoundCooldownActive = $true }
-                        }
-                        if ($gpuBoundCooldownActive -or $gpuLoad -gt 75) {
-                            # GPU-BOUND cooldown lub GPU nadal wysoki - Balanced zamiast Turbo
-                            $newMode = "Balanced"
-                            $reason = "HIGH+GPU-PROTECT: CPU=$([int]$currentMetrics.CPU)% GPU=$([int]$gpuLoad)% (GPU active, no Turbo)"
-                        } else {
-                            # Normalny HIGH CPU - Turbo uzasadniony
-                            $newMode = "Turbo"
-                            $reason = "HIGH: CPU=$([int]$currentMetrics.CPU)%"
-                        }
-                    }
-                }
-                # 4. UTRZYMAJ TURBO jeśli już w Turbo i CPU > exit threshold
-                # v43.14 FIX: NIE utrzymuj Turbo gdy GPU>75% (GPU-bound → Balanced wystarczy)
-                elseif ($prevMode -eq "Turbo" -and $currentMetrics.CPU -gt $turboExitThreshold) {
-                        if ($gpuLoad -gt 75) {
-                            $newMode = "Balanced"
-                            $reason = "HOLD→BALANCED: CPU=$([int]$currentMetrics.CPU)% GPU=$([int]$gpuLoad)% (GPU active)"
-                        } else {
-                            $newMode = "Turbo"
-                            $reason = "HOLD TURBO: CPU=$([int]$currentMetrics.CPU)%"
-                        }
-                    }
-                    # 5. UTRZYMAJ SILENT jeśli już w Silent i CPU < exit threshold
-                    # v43.13: TYLKO CPU decyduje (GPU może być wysoki w Silent - to normalne)
-                    elseif ($prevMode -eq "Silent" -and $currentMetrics.CPU -lt $silentExitThreshold) {
-                        $newMode = "Silent"
-                        $reason = "HOLD SILENT: CPU=$([int]$currentMetrics.CPU)%"
-                    }
-                    # ═══════════════════════════════════════════════════════════════
-                    # 6. AI COORDINATOR - WAŻONE GŁOSOWANIE WSZYSTKICH SILNIKÓW
-                    # Zamiast hardcoded hierarchii, AICoordinator waży 18 silników
-                    # i podejmuje decyzję na podstawie ich zbiorowej mądrości
-                    # ═══════════════════════════════════════════════════════════════
+                    # AI COORDINATOR — pełna inteligencja 18 silników
                     else {
                         try {
                             $coordResult = $aiCoordinator.DecideMode(
@@ -18088,14 +17973,13 @@ $Script:PreviousEnsembleEnabled = $false
                             $newMode = $coordResult.Mode
                             $reason = $coordResult.Reason
                         } catch {
-                            # Fallback przy błędzie AICoordinator + LOG
                             try { Add-Content -Path "$Script:ConfigDir\ErrorLog.txt" -Value "[AI-COORD ERROR] $($_.Exception.Message)" -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
-                            if ($currentMetrics.CPU -gt 65) { $newMode = "Turbo"; $reason = "FALLBACK-HIGH" }
+                            if ($currentMetrics.CPU -gt $turboEntryThreshold) { $newMode = "Turbo"; $reason = "FALLBACK-HIGH" }
                             elseif ($currentMetrics.CPU -lt 20) { $newMode = "Silent"; $reason = "FALLBACK-LOW" }
                             else { $newMode = "Balanced"; $reason = "FALLBACK-ERR" }
                         }
                     }
-                }  # KONIEC BLOKU if (-not $hardLockBlocked)
+                }
                 
                 # ═══════════════════════════════════════════════════════════════
                 # MODE STABILITY SYSTEM - anty-pingpong debounce
@@ -19040,6 +18924,8 @@ $Script:PreviousEnsembleEnabled = $false
                     'SharedKnowledge' = $sharedKnowledge; 'NetworkOptimizer' = $networkOptimizer; 'NetworkAI' = $networkAI; 'ProcessAI' = $processAI; 'GPUAI' = $gpuAI
                 }
                 foreach ($k in $components.Keys) { Write-AIAppendAfterSave -Name $k -Obj $components[$k] }
+                # AILearning: flush kompaktowej pamięci do AILearningState.json
+                try { Flush-AILearningBuffer -Force } catch { }
                 # #
                 # BACKUP WIDGETDATA - tylko w RAM/BOTH mode
                 # #
@@ -19810,6 +19696,8 @@ $Script:PreviousEnsembleEnabled = $false
         try { $thermalPredictor.SaveState($Script:ConfigDir) } catch { }
         try { $explainer.SaveState($Script:ConfigDir) } catch { }
         try { $thermalGuard.SaveState($Script:ConfigDir) } catch { }
+        # AILearning: ostateczny zapis pamięci przy zamykaniu
+        try { Flush-AILearningBuffer -Force } catch { }
         #  Zapisz ustawienia programu
         try {
             $programSettings = @{
