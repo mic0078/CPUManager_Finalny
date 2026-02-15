@@ -17815,6 +17815,11 @@ $Script:PreviousEnsembleEnabled = $false
                 # #
                 #  HOT-RELOAD: ForceMode z konfiguratora
                 # #
+                # Inicjalizacja zmiennych dostępnych we WSZYSTKICH ścieżkach (ForceMode, I/O, AI)
+                if (-not $Script:V42_PrevMode) { $Script:V42_PrevMode = "Balanced" }
+                $prevMode = $Script:V42_PrevMode
+                $newMode = $prevMode  # Domyślnie: trzymaj obecny tryb
+                $reason = ""
                 # Sprawdz czy I/O moze nadpisac ForceMode
                 $currentIOTotal = $diskReadMB + $diskWriteMB
                 $ioCanOverride = $Script:IOOverrideForceMode -and $currentIOTotal -gt $Script:IOTurboThreshold
@@ -17839,21 +17844,33 @@ $Script:PreviousEnsembleEnabled = $false
                 if ($forceModeAllowed) {
                     if ($forceModeUpper -eq "SILENT LOCK") {
                         $currentState = "Silent"
+                        $newMode = "Silent"
                         $aiDecision.Mode = "Silent"
                         $aiDecision.Reason = "ForceMode: Silent Lock (total)"
                         $Script:SilentLockMode = $true
                     }
+                    # Balanced Lock
+                    elseif ($forceModeUpper -eq "BALANCED LOCK") {
+                        $currentState = "Balanced"
+                        $newMode = "Balanced"
+                        $aiDecision.Mode = "Balanced"
+                        $aiDecision.Reason = "ForceMode: Balanced Lock (total)"
+                        $Script:BalancedLockMode = $true
+                    }
                     # Extreme = staly Turbo (max wydajnosc)
                     elseif ($forceModeUpper -eq "EXTREME") {
                         $currentState = "Turbo"
+                        $newMode = "Turbo"
                         $aiDecision.Mode = "Turbo"
                         $aiDecision.Reason = "ForceMode: Extreme (Turbo)"
                     } else {
                         $currentState = $Script:ForceModeFromConfig
+                        $newMode = $Script:ForceModeFromConfig
                         $aiDecision.Mode = $Script:ForceModeFromConfig
                         $aiDecision.Reason = "ForceMode: $($Script:ForceModeFromConfig)"
                     }
                     $aiDecision.Score = 50
+                    # SKIP: AI decision + debounce — ForceMode jest absolutny
                 } elseif ($ioCanOverride) {
                     # - I/O OVERRIDE: Wysoki I/O nadpisuje ForceMode!
                     $currentState = "Turbo"
@@ -17985,7 +18002,9 @@ $Script:PreviousEnsembleEnabled = $false
                 # MODE STABILITY SYSTEM - anty-pingpong debounce
                 # Zapobiega: Silent→Balanced→Turbo→Silent co 1-2 sekundy
                 # Typowe przy przeglądaniu stron (CPU skacze 15-40%)
+                # SKIP: Nie stosuj debounce gdy ForceMode/I/O override aktywne!
                 # ═══════════════════════════════════════════════════════════════
+                if (-not $forceModeAllowed -and -not $ioCanOverride) {
                 if (-not $Script:ModeHoldStart) { $Script:ModeHoldStart = [DateTime]::UtcNow }
                 if (-not $Script:ModeHoldConfirmCount) { $Script:ModeHoldConfirmCount = 0 }
                 if (-not $Script:ModeHoldCandidate) { $Script:ModeHoldCandidate = $null }
@@ -18036,14 +18055,12 @@ $Script:PreviousEnsembleEnabled = $false
                 # ═══════════════════════════════════════════════════════════════
                 
                 # v43.14: GLOBAL MINIMUM HOLD TIME - zapobiega ping-pong
-                # Po zmianie trybu, TRZYMAJ minimum 12s zanim następna zmiana
-                # WYJĄTKI: HIGH CPU, THERMAL, GPU-BOUND, HARDLOCK (safety ma priorytet)
+                # WYJĄTKI: THERMAL, HARDLOCK, safety overrides
                 if (-not $Script:LastModeChangeTime) { $Script:LastModeChangeTime = [datetime]::MinValue }
                 if ($newMode -ne $prevMode) {
                     $holdElapsed = ((Get-Date) - $Script:LastModeChangeTime).TotalSeconds
-                    $isSafetyOverride = ($reason -match "THERMAL|HIGH|HARDLOCK|GPU-BOUND|IO-LOADING|HEAVY LOADING|PAUSED")
+                    $isSafetyOverride = ($reason -match "THERMAL|HIGH|HARDLOCK|GPU-BOUND|IO-LOADING|HEAVY|PAUSED|ForceMode")
                     if ($holdElapsed -lt 12 -and -not $isSafetyOverride) {
-                        # Za wcześnie - zostań przy obecnym trybie
                         $newMode = $prevMode
                         $reason = "HOLD-MIN-TIME: $([int]$holdElapsed)/12s (blocked: $reason)"
                     } else {
@@ -18054,11 +18071,11 @@ $Script:PreviousEnsembleEnabled = $false
                 $aiDecision.Mode = $newMode
                 $aiDecision.Reason = $reason
                 $aiDecision.Score = switch ($newMode) { "Turbo"{85} "Silent"{25} default{50} }
+                }  # KONIEC if (-not $forceModeAllowed -and -not $ioCanOverride)
                 
                 # Log tylko przy ZMIANIE trybu
                 if ($newMode -ne $prevMode) { 
                     Add-Log "V42: $prevMode -> $newMode | $reason"
-                    # DEBUG: Log mode changes
                     Write-DebugLog "MODE CHANGE: $prevMode -> $newMode | Reason: $reason | CPU=$([int]$currentMetrics.CPU)%, GPU=$([int]$gpuLoad)% | Phase=$($phaseDetector.CurrentPhase) Suggest=$($phaseDetector.GetRecommendedMode())" "MODE"
                 }
                 
@@ -18164,7 +18181,8 @@ $Script:PreviousEnsembleEnabled = $false
             else {
                 Set-PowerMode -Mode $currentState -CurrentCPU $currentMetrics.CPU -HardLock:$hardLockBlocked
             }
-            $Script:BalancedLockMode = $false
+            # UWAGA: NIE resetuj BalancedLockMode/SilentLockMode tutaj!
+            # Te flagi są zarządzane TYLKO przez config reload (linie 3243-3267)
             
             # v43.14: FAN CONTROLLER - szybkie zbijanie RPM przy Silent/Paused
             if ($fanController -and $fanController.Enabled) {
