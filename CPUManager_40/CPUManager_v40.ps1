@@ -15102,6 +15102,153 @@ class NetworkAI {
         } catch { }
     }
 }
+# ═══════════════════════════════════════════════════════════════════════════════
+# DISK WRITE CACHE - PrimoCache-like Write-Back Cache
+# Zamiast 27 plików JSON zapisywanych na dysk NARAZ co 5 min,
+# cache trzyma dane w RAM i flushuje 1-2 pliki na tick (co ~2s).
+# Efekt: rozłożenie I/O w czasie, mniej spike'ów dyskowych, szybsze SaveState.
+# ═══════════════════════════════════════════════════════════════════════════════
+class DiskWriteCache {
+    [hashtable] $Cache            # filename → json string (dane w RAM)
+    [hashtable] $DirtyFlags       # filename → $true jeśli zmieniony od ostatniego flush
+    [hashtable] $LastFlushTime    # filename → datetime ostatniego zapisu na dysk
+    [string] $BaseDir             # katalog docelowy (C:\CPUManager)
+    [int] $FlushBatchSize         # ile plików flushować per tick
+    [int] $MinFlushIntervalSec    # min sekund między flush tego samego pliku
+    [int] $TotalWrites            # łączna liczba zapisów z cache do dysku
+    [int] $TotalCacheHits         # ile razy uniknięto zapisu (dane nie zmienione)
+    [int] $TotalBytesWritten      # łączny rozmiar danych zapisanych
+    [datetime] $LastTickTime      # kiedy ostatni tick
+    [System.Collections.Generic.Queue[string]] $FlushQueue  # kolejka FIFO plików do zapisu
+
+    DiskWriteCache([string]$baseDir) {
+        $this.Cache = @{}
+        $this.DirtyFlags = @{}
+        $this.LastFlushTime = @{}
+        $this.BaseDir = $baseDir
+        $this.FlushBatchSize = 2       # 2 pliki per tick (co ~2s = ~1 plik/s)
+        $this.MinFlushIntervalSec = 30 # min 30s między flush tego samego pliku
+        $this.TotalWrites = 0
+        $this.TotalCacheHits = 0
+        $this.TotalBytesWritten = 0
+        $this.LastTickTime = [datetime]::Now
+        $this.FlushQueue = [System.Collections.Generic.Queue[string]]::new()
+    }
+
+    # WRITE: Zapisz dane do cache (RAM) — natychmiastowe, zero I/O
+    [void] Write([string]$filename, [string]$jsonContent) {
+        if ([string]::IsNullOrEmpty($filename) -or [string]::IsNullOrEmpty($jsonContent)) { return }
+        $prev = $null
+        if ($this.Cache.ContainsKey($filename)) { $prev = $this.Cache[$filename] }
+        # Nie zapisuj jeśli dane się nie zmieniły
+        if ($prev -eq $jsonContent) {
+            $this.TotalCacheHits++
+            return
+        }
+        $this.Cache[$filename] = $jsonContent
+        # Oznacz jako dirty i dodaj do kolejki flush (jeśli jeszcze nie w kolejce)
+        if (-not $this.DirtyFlags.ContainsKey($filename) -or -not $this.DirtyFlags[$filename]) {
+            $this.DirtyFlags[$filename] = $true
+            $this.FlushQueue.Enqueue($filename)
+        }
+    }
+
+    # READ: Odczytaj z cache (RAM) — jeśli brak, odczytaj z dysku
+    [string] Read([string]$filename) {
+        if ($this.Cache.ContainsKey($filename)) {
+            return $this.Cache[$filename]
+        }
+        # Fallback: odczytaj z dysku i załaduj do cache
+        $path = Join-Path $this.BaseDir $filename
+        if (Test-Path $path) {
+            try {
+                $content = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+                $this.Cache[$filename] = $content
+                $this.DirtyFlags[$filename] = $false
+                return $content
+            } catch { return $null }
+        }
+        return $null
+    }
+
+    # TICK: Wywoływany co iterację main loop (~2s). Flushuje 1-2 dirty pliki na dysk.
+    [hashtable] Tick() {
+        $flushed = 0
+        $errors = 0
+        $now = [datetime]::Now
+        $this.LastTickTime = $now
+        $attempts = [Math]::Min($this.FlushQueue.Count, $this.FlushBatchSize)
+        for ($i = 0; $i -lt $attempts; $i++) {
+            if ($this.FlushQueue.Count -eq 0) { break }
+            $filename = $this.FlushQueue.Dequeue()
+            # Sprawdź czy nadal dirty
+            if (-not $this.DirtyFlags.ContainsKey($filename) -or -not $this.DirtyFlags[$filename]) {
+                continue
+            }
+            # Sprawdź min interval
+            if ($this.LastFlushTime.ContainsKey($filename)) {
+                $elapsed = ($now - $this.LastFlushTime[$filename]).TotalSeconds
+                if ($elapsed -lt $this.MinFlushIntervalSec) {
+                    # Za wcześnie — wrzuć z powrotem na koniec kolejki
+                    $this.FlushQueue.Enqueue($filename)
+                    continue
+                }
+            }
+            # FLUSH na dysk
+            try {
+                $path = Join-Path $this.BaseDir $filename
+                $content = $this.Cache[$filename]
+                [System.IO.File]::WriteAllText($path, $content, [System.Text.Encoding]::UTF8)
+                $this.DirtyFlags[$filename] = $false
+                $this.LastFlushTime[$filename] = $now
+                $this.TotalWrites++
+                $this.TotalBytesWritten += $content.Length
+                $flushed++
+            } catch {
+                $errors++
+                # Retry: wrzuć z powrotem do kolejki
+                $this.FlushQueue.Enqueue($filename)
+            }
+        }
+        return @{ Flushed = $flushed; Errors = $errors; Pending = $this.FlushQueue.Count }
+    }
+
+    # FLUSH ALL: Wymuś zapis WSZYSTKICH dirty plików (shutdown, emergency)
+    [int] FlushAll() {
+        $flushed = 0
+        foreach ($filename in @($this.Cache.Keys)) {
+            if ($this.DirtyFlags.ContainsKey($filename) -and $this.DirtyFlags[$filename]) {
+                try {
+                    $path = Join-Path $this.BaseDir $filename
+                    [System.IO.File]::WriteAllText($path, $this.Cache[$filename], [System.Text.Encoding]::UTF8)
+                    $this.DirtyFlags[$filename] = $false
+                    $this.LastFlushTime[$filename] = [datetime]::Now
+                    $this.TotalWrites++
+                    $this.TotalBytesWritten += $this.Cache[$filename].Length
+                    $flushed++
+                } catch { }
+            }
+        }
+        return $flushed
+    }
+
+    # STATS: Statystyki cache
+    [hashtable] GetStats() {
+        $dirty = 0; $cached = $this.Cache.Count
+        foreach ($f in $this.DirtyFlags.Keys) { if ($this.DirtyFlags[$f]) { $dirty++ } }
+        return @{
+            CachedFiles = $cached
+            DirtyFiles = $dirty
+            PendingQueue = $this.FlushQueue.Count
+            TotalWrites = $this.TotalWrites
+            CacheHits = $this.TotalCacheHits
+            BytesWritten = $this.TotalBytesWritten
+            HitRate = if (($this.TotalWrites + $this.TotalCacheHits) -gt 0) {
+                [Math]::Round($this.TotalCacheHits / ($this.TotalWrites + $this.TotalCacheHits) * 100, 1)
+            } else { 0 }
+        }
+    }
+}
 class DesktopWidget {
     [string] $DataFile
     [bool] $Running
@@ -16556,6 +16703,13 @@ function Main {
 $Script:CachedNetAdapters = $null
 $Script:PreviousNeuralBrainEnabled = $false
 $Script:PreviousEnsembleEnabled = $false
+    # ═══════════════════════════════════════════════════════════════
+    # DISK WRITE CACHE — PrimoCache-like write-back
+    # Wszystkie SaveState trafiają do RAM, flush 1-2 pliki/tick
+    # ═══════════════════════════════════════════════════════════════
+    $diskCache = [DiskWriteCache]::new($Script:ConfigDir)
+    $Script:DiskWriteCache = $diskCache
+    Write-Host "  [CACHE] DiskWriteCache: RAM write-back enabled (flush every 30s per file)" -ForegroundColor Cyan
     try {
         Write-Host "[DEBUG] Engine: starting main loop" -ForegroundColor Yellow
         while (-not $Global:ExitRequested) {
@@ -18231,6 +18385,9 @@ $Script:PreviousEnsembleEnabled = $false
                      -ExplainerReason $aiDecision.Reason
             $iteration++
             
+            # DISK WRITE CACHE: Flush 1-2 dirty plików na dysk (rozłożone I/O)
+            try { $diskCache.Tick() | Out-Null } catch { }
+            
             # DEBUG: Log metrics snapshot every 100 iterations (~3-4 minutes)
             if ($Script:DebugLogEnabled -and $iteration % 100 -eq 0) {
                 $gpuLoadCurrent = if ($currentMetrics.GPU) { [int]$currentMetrics.GPU.Load } else { 0 }
@@ -18879,38 +19036,50 @@ $Script:PreviousEnsembleEnabled = $false
                 # Poprzednio: prophet.SaveState() + brain.SaveState() + Save-State() = 3x zapis!
                 # Teraz: tylko Save-State() = 1x zapis
                 $saveSuccess = Save-State -Brain $brain -Prophet $prophet
-                # Core AI Components
-                [void]$anomalyDetector.SaveProfiles($Script:ConfigDir)
-                [void]$loadPredictor.SavePatterns($Script:ConfigDir)
-                try { $selfTuner.SaveState($Script:ConfigDir) } catch { }
-                [void]$chainPredictor.SaveState($Script:ConfigDir)
-                [void]$userPatterns.SaveState($Script:ConfigDir)
-                #  MEGA AI Components
-                [void]$qLearning.SaveState($Script:ConfigDir)
-                [void]$ensemble.SaveState($Script:ConfigDir)
-                [void]$energyTracker.SaveState($Script:ConfigDir)
-                #  ULTRA AI Components
-                [void]$bandit.SaveState($Script:ConfigDir)
-                [void]$genetic.SaveState($Script:ConfigDir)
-                [void]$contextDetector.SaveState($Script:ConfigDir)
-                [void]$phaseDetector.SaveState($Script:ConfigDir)
-                [void]$thermalPredictor.SaveState($Script:ConfigDir)
-                [void]$explainer.SaveState($Script:ConfigDir)
-                [void]$thermalGuard.SaveState($Script:ConfigDir)
-                [void]$aiCoordinator.SaveState($Script:ConfigDir)
-                [void]$ramAnalyzer.SaveState($Script:ConfigDir)
-                [void]$sharedKnowledge.SaveState($Script:ConfigDir)
-                # - V37.8.2: Network Optimizer + Network AI
-                [void]$networkOptimizer.SaveState($Script:ConfigDir)
-                # - V40: NetworkAI.Train() - ucz sie wzorcow sieciowych (co 5 min)
-                try { $networkAI.Train() } catch { }
-                [void]$networkAI.SaveState($Script:ConfigDir)
-                # - V40: ProcessAI - zapisz wyuczone profile procesow
-                [void]$processAI.SaveState($Script:ConfigDir)
-                # - V40: GPU AI - zapisz profile GPU dla aplikacji
-                [void]$gpuAI.SaveState($Script:ConfigDir)
-                # v44.0: SystemGovernor save + learned GPU prefs → AILearning
-                try { $systemGovernor.SaveState($Script:ConfigDir) } catch {}
+                # ═══════════════════════════════════════════════════════════════
+                # DISK WRITE CACHE: Zapisz wszystkie komponenty AI do RAM cache
+                # Cache flushuje 1-2 pliki/tick zamiast 27 naraz
+                # ═══════════════════════════════════════════════════════════════
+                try {
+                    # Helper: serializuj i zapisz do cache
+                    $cacheWrite = {
+                        param([string]$file, [object]$data, [int]$depth = 5)
+                        try {
+                            $json = $data | ConvertTo-Json -Depth $depth -Compress
+                            $diskCache.Write($file, $json)
+                        } catch {}
+                    }
+                    # Core AI
+                    & $cacheWrite "AnomalyProfiles.json" @{ Profiles = $anomalyDetector.Profiles } 4
+                    & $cacheWrite "LoadPatterns.json" @{ Patterns = $loadPredictor.HourlyPatterns; DayPatterns = $loadPredictor.DayOfWeekPatterns } 4
+                    & $cacheWrite "SelfTuner.json" @{ History = $selfTuner.TuningHistory; CurrentParams = $selfTuner.CurrentParams }
+                    & $cacheWrite "ChainPredictor.json" @{ TransitionMatrix = $chainPredictor.TransitionMatrix }
+                    & $cacheWrite "UserPatterns.json" @{ HourlyPatterns = $userPatterns.HourlyPatterns; DayOfWeekPatterns = $userPatterns.DayOfWeekPatterns; AppUsagePatterns = $userPatterns.AppUsagePatterns }
+                    # Mega AI
+                    & $cacheWrite "QLearning.json" @{ QTable = $qLearning.QTable; ExplorationRate = $qLearning.ExplorationRate; TotalUpdates = $qLearning.TotalUpdates }
+                    & $cacheWrite "EnsembleWeights.json" @{ Weights = $ensemble.Weights; Accuracy = $ensemble.Accuracy }
+                    & $cacheWrite "EnergyStats.json" @{ ModeStats = $energyTracker.ModeStats; HourlyStats = $energyTracker.HourlyStats }
+                    # Ultra AI
+                    & $cacheWrite "Bandit.json" @{ Successes = $bandit.Successes; Failures = $bandit.Failures; TotalPulls = $bandit.TotalPulls }
+                    & $cacheWrite "Genetic.json" @{ Population = $genetic.Population; Generation = $genetic.Generation }
+                    & $cacheWrite "ContextPatterns.json" @{ ContextPatterns = $contextDetector.ContextPatterns }
+                    # Phase, Thermal, Explainer, ThermalGuard, AICoordinator, RAMAnalyzer
+                    try { $phaseDetector.SaveState($Script:ConfigDir) } catch {}
+                    try { $thermalPredictor.SaveState($Script:ConfigDir) } catch {}
+                    try { $explainer.SaveState($Script:ConfigDir) } catch {}
+                    try { $thermalGuard.SaveState($Script:ConfigDir) } catch {}
+                    try { $aiCoordinator.SaveState($Script:ConfigDir) } catch {}
+                    try { $ramAnalyzer.SaveState($Script:ConfigDir) } catch {}
+                    # Shared knowledge + Network
+                    try { $sharedKnowledge.SaveState($Script:ConfigDir) } catch {}
+                    try { $networkOptimizer.SaveState($Script:ConfigDir) } catch {}
+                    try { $networkAI.Train() } catch {}
+                    try { $networkAI.SaveState($Script:ConfigDir) } catch {}
+                    # Process AI, GPU AI, SystemGovernor
+                    try { $processAI.SaveState($Script:ConfigDir) } catch {}
+                    try { $gpuAI.SaveState($Script:ConfigDir) } catch {}
+                    try { $systemGovernor.SaveState($Script:ConfigDir) } catch {}
+                } catch { }
                 if ($systemGovernor -and $systemGovernor.LearnedGPUPrefs.Count -gt 0) {
                     try {
                         foreach ($appKey in $systemGovernor.LearnedGPUPrefs.Keys) {
@@ -19689,6 +19858,12 @@ $Script:PreviousEnsembleEnabled = $false
             Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
         }
     } finally {
+        # DISK WRITE CACHE: Flush wszystkich pending plików na dysk (shutdown)
+        try {
+            $flushed = $diskCache.FlushAll()
+            $stats = $diskCache.GetStats()
+            Write-Host "[CACHE] Shutdown flush: $flushed files | Total writes: $($stats.TotalWrites) | Cache hits: $($stats.CacheHits) ($($stats.HitRate)%)" -ForegroundColor Cyan
+        } catch { }
         # Przywroc normalny stan konsoli
         try { [Console]::CursorVisible = $true } catch { }
         try { [Console]::TreatControlCAsInput = $false } catch { }
