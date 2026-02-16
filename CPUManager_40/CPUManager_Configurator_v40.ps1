@@ -2096,7 +2096,6 @@ function Show-NetworkAIHourlyChart {
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.Clear($Script:Colors.Panel)
-    # Margines dla etykiet
     $marginBottom = 18
     $marginLeft = 5
     $chartHeight = $h - $marginBottom - 5
@@ -2108,63 +2107,60 @@ function Show-NetworkAIHourlyChart {
         $y = [int](5 + $chartHeight * $i / 4)
         $g.DrawLine($gridPen, $marginLeft, $y, $w - 5, $y)
     }
-    # Rysuj slupki dla kazdej godziny
+    # KROK 1: Zbierz wartości dla normalizacji
+    $hourValues = @()
+    $hasGaming = $false
+    for ($hour = 0; $hour -lt 24; $hour++) {
+        $val = 0.0; $gaming = 0.0
+        if ($HourlyData -and $HourlyData.ContainsKey($hour.ToString())) {
+            $hd = $HourlyData[$hour.ToString()]
+            # Samples = liczba próbek sieciowych w tej godzinie (najlepsza miara aktywności)
+            $samples = if ($null -ne $hd.Samples) { [double]$hd.Samples } else { 0 }
+            $avgDL = if ($null -ne $hd.AvgDownload) { [double]$hd.AvgDownload } else { 0 }
+            $gaming = if ($null -ne $hd.GamingProbability) { [double]$hd.GamingProbability } else { 0 }
+            if ($gaming -gt 0.01) { $hasGaming = $true }
+            # Wartość: kombinacja samples + download (samples ważniejsze)
+            $val = $samples + ($avgDL / 100000.0)  # download jako drobny bonus
+        }
+        $hourValues += @{ Value = $val; Gaming = $gaming }
+    }
+    # KROK 2: Auto-normalizacja do max wartości (dynamiczny zakres)
+    $maxVal = ($hourValues | ForEach-Object { $_.Value } | Measure-Object -Maximum).Maximum
+    if ($maxVal -le 0) { $maxVal = 1 }
+    # KROK 3: Rysuj słupki
     $currentHour = (Get-Date).Hour
     for ($hour = 0; $hour -lt 24; $hour++) {
-        $probability = 0
-        $isGaming = $false
-        # Pobierz dane aktywności dla tej godziny
-        if ($HourlyData -and $HourlyData.ContainsKey($hour.ToString())) {
-            $hourData = $HourlyData[$hour.ToString()]
-            # Pokaż GamingProbability jeśli jest, inaczej normalizuj AvgDownload
-            if ($null -ne $hourData.GamingProbability -and [double]$hourData.GamingProbability -gt 0.01) {
-                $probability = [Math]::Min(1.0, [Math]::Max(0.0, [double]$hourData.GamingProbability))
-                $isGaming = $true
-            } elseif ($null -ne $hourData.AvgDownload -and [double]$hourData.AvgDownload -gt 0) {
-                # Normalizuj download do 0-1 (max ~10MB/s = pełny słupek)
-                $probability = [Math]::Min(1.0, [double]$hourData.AvgDownload / 10485760.0)
-                $isGaming = $false
-            } elseif ($null -ne $hourData.Samples -and [int]$hourData.Samples -gt 0) {
-                # Minimalna aktywność — pokaż że próbki istnieją
-                $probability = 0.05
-                $isGaming = $false
-            }
-        }
+        $normalized = [Math]::Min(1.0, $hourValues[$hour].Value / $maxVal)
+        $gaming = $hourValues[$hour].Gaming
         $x = $marginLeft + ($hour * ($barWidth + 1))
-        $barHeight = [int]($chartHeight * $probability)
+        $barHeight = [int]($chartHeight * $normalized)
+        if ($barHeight -lt 2 -and $normalized -gt 0) { $barHeight = 2 }
         $y = 5 + $chartHeight - $barHeight
-        # Kolor slupka
+        # Kolor
         if ($hour -eq $currentHour) {
-            $barColor = [System.Drawing.Color]::FromArgb(255, 0, 200, 255)
-        } elseif ($isGaming) {
-            # Gaming: gradient zielony → pomarańczowy → czerwony
-            if ($probability -gt 0.5) {
-                $r = 255
-                $green = [int](255 * (1 - ($probability - 0.5) * 2))
-                $barColor = [System.Drawing.Color]::FromArgb(200, $r, $green, 50)
-            } elseif ($probability -gt 0.2) {
-                $green = [int](150 + 105 * ($probability / 0.5))
-                $barColor = [System.Drawing.Color]::FromArgb(200, 100, $green, 50)
-            } else {
-                $barColor = [System.Drawing.Color]::FromArgb(100, 50, 150, 50)
-            }
+            $barColor = [System.Drawing.Color]::FromArgb(255, 0, 200, 255)  # Cyan = teraz
+        } elseif ($gaming -gt 0.3) {
+            # Gaming: pomarańczowy → czerwony
+            $r = 255; $green = [int](200 * (1 - $gaming))
+            $barColor = [System.Drawing.Color]::FromArgb(220, $r, $green, 30)
+        } elseif ($gaming -gt 0.05) {
+            # Trochę gamingu: żółto-zielony
+            $barColor = [System.Drawing.Color]::FromArgb(180, 180, 220, 50)
+        } elseif ($normalized -gt 0.5) {
+            # Wysoka aktywność: jasny zielony
+            $barColor = [System.Drawing.Color]::FromArgb(200, 50, 220, 100)
+        } elseif ($normalized -gt 0.2) {
+            # Średnia: zielony
+            $barColor = [System.Drawing.Color]::FromArgb(180, 40, 180, 80)
         } else {
-            # Network activity: gradient ciemnoniebieski → jasnoniebieski
-            $blue = [int](100 + 155 * $probability)
-            $green = [int](60 + 100 * $probability)
-            $barColor = [System.Drawing.Color]::FromArgb(180, 30, $green, $blue)
+            # Niska: ciemny zielony
+            $barColor = [System.Drawing.Color]::FromArgb(120, 30, 120, 60)
         }
-        # Rysuj slupek
+        # Rysuj
         if ($barHeight -gt 0) {
             $brush = New-Object System.Drawing.SolidBrush($barColor)
             $g.FillRectangle($brush, $x, $y, $barWidth, $barHeight)
             $brush.Dispose()
-        }
-        # Minimalna wysokosc dla widocznosci
-        if ($barHeight -lt 2 -and $probability -gt 0) {
-            $minBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(100, 100, 100, 100))
-            $g.FillRectangle($minBrush, $x, 5 + $chartHeight - 2, $barWidth, 2)
-            $minBrush.Dispose()
         }
     }
     # Etykiety godzin (co 4 godziny)
@@ -2219,18 +2215,23 @@ function Update-NetworkAI {
             $Script:lblNetAIAccuracy.Text = "Accuracy:       $($Script:NetworkAIData.Accuracy)%"
             $Script:lblNetAIPredictions.Text = "Predictions:    $($Script:NetworkAIData.TotalPredictions)"
             $Script:lblNetAIQStates.Text = "Q-Table States: $($Script:NetworkAIData.QStates)"
-            # Znajdz szczytowe godziny gamingu
+            # Znajdz szczytowe godziny aktywności
             $peakHours = @()
             $maxProb = 0
+            $bestHour = -1; $bestSamples = 0
             if ($Script:NetworkAIData.HourlyPatterns.Count -gt 0) {
                 foreach ($hourKey in $Script:NetworkAIData.HourlyPatterns.Keys) {
                     $hourData = $Script:NetworkAIData.HourlyPatterns[$hourKey]
+                    # Gaming peaks
                     if ($null -ne $hourData.GamingProbability -and [double]$hourData.GamingProbability -gt 0.3) {
                         $peakHours += [int]$hourKey
                         if ([double]$hourData.GamingProbability -gt $maxProb) {
                             $maxProb = [double]$hourData.GamingProbability
                         }
                     }
+                    # Activity peaks (samples)
+                    $samples = if ($null -ne $hourData.Samples) { [int]$hourData.Samples } else { 0 }
+                    if ($samples -gt $bestSamples) { $bestSamples = $samples; $bestHour = [int]$hourKey }
                 }
             }
             if ($peakHours.Count -gt 0) {
@@ -2238,23 +2239,10 @@ function Update-NetworkAI {
                 $peakStart = $peakHours[0]
                 $peakEnd = $peakHours[-1]
                 $Script:lblNetAIPeak.Text = "Peak Gaming: ${peakStart}:00-${peakEnd}:00 ($([Math]::Round($maxProb * 100))%)"
+            } elseif ($bestHour -ge 0 -and $bestSamples -gt 0) {
+                $Script:lblNetAIPeak.Text = "Peak Activity: ${bestHour}:00 ($bestSamples samples)"
             } else {
-                # Sprawdź najaktywniejsze godziny po download
-                $bestHour = -1; $bestDL = 0
-                if ($Script:NetworkAIData.HourlyPatterns.Count -gt 0) {
-                    foreach ($hk in $Script:NetworkAIData.HourlyPatterns.Keys) {
-                        $hd = $Script:NetworkAIData.HourlyPatterns[$hk]
-                        if ($null -ne $hd.AvgDownload -and [double]$hd.AvgDownload -gt $bestDL) {
-                            $bestDL = [double]$hd.AvgDownload; $bestHour = [int]$hk
-                        }
-                    }
-                }
-                if ($bestHour -ge 0 -and $bestDL -gt 0) {
-                    $dlMB = [Math]::Round($bestDL / 1048576.0, 1)
-                    $Script:lblNetAIPeak.Text = "Peak Activity: ${bestHour}:00 (${dlMB} MB/s)"
-                } else {
-                    $Script:lblNetAIPeak.Text = "Peak: Learning..."
-                }
+                $Script:lblNetAIPeak.Text = "Peak: Learning..."
             }
             # Rysuj wykres hourly patterns
             Show-NetworkAIHourlyChart -PictureBox $Script:picNetAIHourly -HourlyData $Script:NetworkAIData.HourlyPatterns
@@ -2313,7 +2301,7 @@ function Update-NetworkAIStatus {
                 if ($app.Sessions -and [int]$app.Sessions -gt $maxSessions) {
                     $maxSessions = [int]$app.Sessions
                     $lastApp = $prop.Name
-                    $lastType = if ($app.Type) { $app.Type } else { "Unknown" }
+                    $lastType = if ($app.Type -and $app.Type -ne "Browser") { $app.Type } else { "Normal" }
                 }
             }
             if ($lastApp) {
