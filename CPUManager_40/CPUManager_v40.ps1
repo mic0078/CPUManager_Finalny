@@ -641,6 +641,39 @@ public static class ConsoleWindow {
     public const uint SC_CLOSE = 0xF060;
     public const uint MF_BYCOMMAND = 0x00000000;
 }
+public static class IntelPowerAPI {
+    // === Power Throttling (EcoQoS / Efficiency Mode) ===
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetProcessInformation(
+        IntPtr hProcess, int ProcessInformationClass,
+        IntPtr ProcessInformation, uint ProcessInformationSize);
+    
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+    
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+    
+    // === Job Object CPU Rate Control ===
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+    
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetInformationJobObject(
+        IntPtr hJob, int JobObjectInfoClass,
+        IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+    
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+    
+    // Constants
+    public const int ProcessPowerThrottling = 4;
+    public const uint PROCESS_SET_INFORMATION = 0x0200;
+    public const uint PROCESS_ALL_ACCESS = 0x1F0FFF;
+    public const int JobObjectCpuRateControlInformation = 15;
+    public const uint JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1;
+    public const uint JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4;
+}
 '@
 Add-Type -Language CSharp -TypeDefinition $win32SignatureEarly -ErrorAction Stop
 }
@@ -3186,6 +3219,199 @@ function Set-CPUTypeManual {
 }
 # Wykryj przy starcie
 Detect-CPUType | Out-Null
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTEL POWER MANAGER — własny mechanizm ENGINE (odpowiednik RyzenAdj dla Intel)
+# Function-based (nie class) bo wymaga [Win32] z Add-Type
+# Kontroluje: Affinity rdzeni, EcoQoS/Priority, Frequency cap (MHz)
+# ═══════════════════════════════════════════════════════════════════════════════
+function New-IntelPowerManager {
+    $pm = @{
+        Available = $false; CurrentMode = "Balanced"; LastMode = ""
+        TotalCores = 0; PhysicalCores = 0; PerformanceCores = 0; EfficiencyCores = 0
+        HasHybridArch = $false; MaxFreqMHz = 0; BaseFreqMHz = 0
+        FullAffinityMask = 0L; SilentAffinityMask = 0L; BalancedAffinityMask = 0L
+        ThrottledProcesses = @{}; ModeStats = @{ Silent=0; Balanced=0; Turbo=0; Extreme=0 }
+        PowerPlanGUID = $null
+    }
+    try {
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        $pm.TotalCores = [Environment]::ProcessorCount
+        $pm.PhysicalCores = [int]$cpu.NumberOfCores
+        $pm.MaxFreqMHz = [int]$cpu.MaxClockSpeed
+        $cpuName = $cpu.Name
+        if ($cpuName -match "12th|13th|14th|Core Ultra|i[3579]-1[2-5]") {
+            $pm.HasHybridArch = $true
+            $pm.PerformanceCores = [Math]::Max(2, [int]($pm.PhysicalCores * 0.4))
+            $pm.EfficiencyCores = $pm.PhysicalCores - $pm.PerformanceCores
+        } else { $pm.PerformanceCores = $pm.PhysicalCores }
+        $pm.BaseFreqMHz = [int]($pm.MaxFreqMHz * 0.5)
+        $pm.FullAffinityMask = (1L -shl $pm.TotalCores) - 1
+        $silentCores = [Math]::Max(2, [int]($pm.TotalCores / 2))
+        $pm.SilentAffinityMask = (1L -shl $silentCores) - 1
+        $balancedCores = [Math]::Max(4, [int]($pm.TotalCores * 0.75))
+        $pm.BalancedAffinityMask = (1L -shl $balancedCores) - 1
+        # Cache power plan GUID
+        $output = powercfg /getactivescheme 2>$null
+        if ($output -match '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})') {
+            $pm.PowerPlanGUID = $matches[1]
+        }
+        $pm.Available = $true
+        Write-Host "  [IntelPM] Initialized: $($pm.PhysicalCores)C/$($pm.TotalCores)T Max=$($pm.MaxFreqMHz)MHz Hybrid=$($pm.HasHybridArch)" -ForegroundColor Cyan
+    } catch { $pm.Available = $false }
+    return $pm
+}
+
+function Set-IntelPowerMode {
+    param([hashtable]$PM, [string]$Mode)
+    if (-not $PM -or -not $PM.Available -or $Mode -eq $PM.LastMode) { return }
+    switch ($Mode) {
+        "Silent" {
+            Set-IntelBackgroundAffinity $PM $PM.SilentAffinityMask
+            Set-IntelBackgroundPriority $PM $true
+            Set-IntelFrequencyCap $PM 50   # 50% MaxFreq = baza efektywna (1.3GHz)
+        }
+        "Balanced" {
+            Restore-IntelAffinities $PM
+            Set-IntelBackgroundPriority $PM $false
+            Set-IntelFrequencyCap $PM 85   # 85% = solidna wydajność
+        }
+        "Turbo" {
+            Restore-IntelAffinities $PM
+            Set-IntelBackgroundPriority $PM $true  # Tło cicho, foreground max
+            Set-IntelForegroundBoost $PM
+            Set-IntelFrequencyCap $PM 100  # 100% = pełne turbo
+        }
+        "Extreme" {
+            Restore-IntelAffinities $PM
+            Set-IntelBackgroundPriority $PM $false
+            Set-IntelForegroundBoost $PM
+            Set-IntelFrequencyCap $PM 100
+        }
+    }
+    $PM.LastMode = $Mode; $PM.CurrentMode = $Mode; $PM.ModeStats[$Mode]++
+}
+
+function Set-IntelBackgroundAffinity {
+    param([hashtable]$PM, [long]$mask)
+    try {
+        $fgHwnd = [Win32]::GetForegroundWindow()
+        $fgPid = 0
+        if ($fgHwnd -ne [IntPtr]::Zero) { [Win32]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid) | Out-Null }
+        $protected = @("System","Idle","svchost","csrss","smss","lsass","services","wininit","dwm","explorer","powershell","CPUManager")
+        $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.Id -ne $fgPid -and $_.Id -gt 4 -and $_.WorkingSet64 -gt 20MB -and $protected -notcontains $_.ProcessName
+        } | Sort-Object WorkingSet64 -Descending | Select-Object -First 15
+        foreach ($p in $procs) {
+            try {
+                if (-not $PM.ThrottledProcesses.ContainsKey($p.Id)) {
+                    $PM.ThrottledProcesses[$p.Id] = @{ Name=$p.ProcessName; OrigAffinity=$p.ProcessorAffinity.ToInt64() }
+                }
+                $p.ProcessorAffinity = [IntPtr]$mask
+            } catch {} finally { try { $p.Dispose() } catch {} }
+        }
+    } catch {}
+}
+
+function Restore-IntelAffinities {
+    param([hashtable]$PM)
+    foreach ($procId in @($PM.ThrottledProcesses.Keys)) {
+        try {
+            $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            if ($p) {
+                $orig = $PM.ThrottledProcesses[$procId].OrigAffinity
+                if ($orig -gt 0) { $p.ProcessorAffinity = [IntPtr]$orig }
+                $p.Dispose()
+            }
+        } catch {}
+    }
+    $PM.ThrottledProcesses.Clear()
+}
+
+function Set-IntelBackgroundPriority {
+    param([hashtable]$PM, [bool]$throttle)
+    try {
+        $fgHwnd = [Win32]::GetForegroundWindow()
+        $fgPid = 0
+        if ($fgHwnd -ne [IntPtr]::Zero) { [Win32]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid) | Out-Null }
+        $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.Id -ne $fgPid -and $_.Id -gt 4 -and $_.WorkingSet64 -gt 30MB
+        } | Select-Object -First 20
+        foreach ($p in $procs) {
+            try {
+                $p.PriorityClass = if ($throttle) { [System.Diagnostics.ProcessPriorityClass]::BelowNormal } 
+                                   else { [System.Diagnostics.ProcessPriorityClass]::Normal }
+            } catch {} finally { try { $p.Dispose() } catch {} }
+        }
+    } catch {}
+}
+
+function Set-IntelForegroundBoost {
+    param([hashtable]$PM)
+    try {
+        $fgHwnd = [Win32]::GetForegroundWindow()
+        if ($fgHwnd -eq [IntPtr]::Zero) { return }
+        $fgPid = 0; [Win32]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid) | Out-Null
+        if ($fgPid -gt 0) {
+            $p = Get-Process -Id $fgPid -ErrorAction SilentlyContinue
+            if ($p) {
+                $p.ProcessorAffinity = [IntPtr]$PM.FullAffinityMask
+                $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::AboveNormal
+                $p.Dispose()
+            }
+        }
+    } catch {}
+}
+
+function Set-IntelFrequencyCap {
+    param([hashtable]$PM, [int]$percent)
+    try {
+        $guid = $PM.PowerPlanGUID
+        if (-not $guid) { return }
+        $sub = "54533251-82be-4824-96c1-47b60b740d00"
+        # Max Processor Frequency (MHz cap) — ENGINE decyduje
+        $freqGuid = "75b0ae3f-bce0-45a7-8c89-c9611c25e100"
+        $freqCap = if ($percent -ge 100) { 0 } else { [int]($PM.MaxFreqMHz * $percent / 100) }
+        powercfg /setacvalueindex $guid $sub $freqGuid $freqCap 2>$null
+        powercfg /setdcvalueindex $guid $sub $freqGuid $freqCap 2>$null
+        # EPP — hint dla Intel Speed Shift (ENGINE kontroluje)
+        $epp = if ($percent -le 50) { 200 } elseif ($percent -le 85) { 128 } else { 0 }
+        powercfg /setacvalueindex $guid $sub "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $epp 2>$null
+        powercfg /setdcvalueindex $guid $sub "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $epp 2>$null
+        # Boost mode — ENGINE kontroluje
+        $boost = if ($percent -ge 100) { 2 } elseif ($percent -ge 85) { 1 } else { 0 }
+        powercfg /setacvalueindex $guid $sub "be337238-0d82-4146-a960-4f3749d470c7" $boost 2>$null
+        powercfg /setdcvalueindex $guid $sub "be337238-0d82-4146-a960-4f3749d470c7" $boost 2>$null
+        # Min/Max state — ENGINE ustawia precyzyjnie (nie zakres!)
+        $minState = if ($percent -le 50) { 5 } elseif ($percent -le 85) { 50 } else { 100 }
+        $maxState = $percent
+        powercfg /setacvalueindex $guid $sub "893dee8e-2bef-41e0-89c6-b55d0929964c" $minState 2>$null
+        powercfg /setacvalueindex $guid $sub "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxState 2>$null
+        powercfg /setdcvalueindex $guid $sub "893dee8e-2bef-41e0-89c6-b55d0929964c" $minState 2>$null
+        powercfg /setdcvalueindex $guid $sub "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxState 2>$null
+        powercfg /setactive $guid 2>$null
+    } catch {}
+}
+
+function Reset-IntelPowerManager {
+    param([hashtable]$PM)
+    if (-not $PM -or -not $PM.Available) { return }
+    Restore-IntelAffinities $PM
+    Set-IntelBackgroundPriority $PM $false
+    Set-IntelFrequencyCap $PM 100
+}
+
+$Script:IntelPM = $null
+if ($Script:CPUType -eq "Intel") {
+    try {
+        $Script:IntelPM = New-IntelPowerManager
+        if ($Script:IntelPM.Available) {
+            Write-Host "  Intel Power Manager: ACTIVE ($($Script:IntelPM.PhysicalCores)C/$($Script:IntelPM.TotalCores)T, Hybrid=$($Script:IntelPM.HasHybridArch))" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "  Intel Power Manager: FAILED ($($_.Exception.Message))" -ForegroundColor Yellow
+        $Script:IntelPM = $null
+    }
+}
 # - V40: Wykryj GPU (iGPU/dGPU)
 Detect-GPU | Out-Null
 
@@ -4223,8 +4449,8 @@ $Script:RyzenStates = @{
     Extreme  = @{ Min=100;  Max=100 }   # AMD: Benchmark, rendering (pelna moc)
 }
 $Script:IntelStates = @{
-    Silent   = @{ Min=50;   Max=85  }   # Intel: Cichy tryb (Speed Shift EPP + ograniczenie Max)
-    Balanced = @{ Min=85;   Max=99  }   # Intel: Praca biurowa, kodowanie (wysoka responsywnosc)
+    Silent   = @{ Min=50;   Max=50  }   # Intel: Cichy tryb — 50%=1.3GHz bazowa, NIE pozwalaj na skoki wyżej
+    Balanced = @{ Min=50;   Max=99  }   # Intel: Praca biurowa — od bazy do prawie max, Windows sam reguluje
     Turbo    = @{ Min=99;   Max=100 }   # Intel: Gaming, kompilacja (pelna moc)
     Extreme  = @{ Min=100;  Max=100 }   # Intel: Benchmark, rendering (max staly)
 }
@@ -6165,13 +6391,18 @@ class GPUBoundDetector {
             $result.Confidence = 100  # Zawsze 100 gdy confident
             
             # v43.13: PHASE-AWARE GPU-BOUND MODE
-            # W Gameplay: Balanced (stabilność, CPU może potrzebować mocy na fizykę/AI)
-            # W Cutscene/Menu/Idle: Silent (GPU renderuje, CPU nie potrzebny)
             if ($this.CurrentPhase -eq "Gameplay") {
-                # Gameplay: ZAWSZE Balanced - nie skacz do Silent bo CPU oscyluje
-                $result.SuggestedMode = "Balanced"
-                $result.CPUReduction = 5
-                $result.Reason = "GPU-BOUND: CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% → Balanced (Gameplay stable)"
+                if ($gpuLoad -gt 90 -and $cpu -gt 35) {
+                    # EXTREME: GPU maxed + CPU active = gra potrzebuje WSZYSTKO
+                    $result.SuggestedMode = "Turbo"
+                    $result.CPUReduction = 0
+                    $result.Reason = "GPU-BOUND: CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% → Turbo (Gameplay extreme)"
+                } else {
+                    # Gameplay: Balanced - stabilność, CPU headroom
+                    $result.SuggestedMode = "Balanced"
+                    $result.CPUReduction = 5
+                    $result.Reason = "GPU-BOUND: CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)% → Balanced (Gameplay stable)"
+                }
             }
             elseif ($this.CurrentPhase -eq "Cutscene" -or $this.CurrentPhase -eq "Menu" -or $this.CurrentPhase -eq "Idle") {
                 # Cutscene/Menu/Idle: Silent (cisza, GPU sam sobie radzi)
@@ -6336,19 +6567,25 @@ class ProphetMemory {
         }
         
         # RE-KATEGORYZUJ na podstawie RZECZYWISTEGO użycia
-        # Kategoryzacja bazowana na AvgCPU (stabilne) + MaxCPU (potwierdzenie)
-        # FIX: MaxCPU sam NIE wystarczy do HEAVY - musi być wspierany przez AvgCPU
+        # COMBINED SCORE: CPU + IO + GPU (GPU-bound apps mają niskie CPU ale to nie znaczy że są LIGHT!)
         $avgScore = $app.AvgCPU + ($app.AvgIO * 2)
+        $gpuScore = if ($app.ContainsKey('AvgGPU')) { $app.AvgGPU } else { 0 }
+        # GPU-bound bonus: jeśli GPU>50% ale CPU<40% → app jest ciężka mimo niskiego CPU
+        $gpuBonus = 0
+        if ($gpuScore -gt 50 -and $app.AvgCPU -lt 40) {
+            $gpuBonus = $gpuScore * 0.6  # GPU=80% daje +48 do avgScore
+        }
+        $combinedScore = $avgScore + $gpuBonus
         
         $oldCategory = $app.Category
         
         # Dopiero po MinSamplesForConfidence finalizujemy kategorię
         if ($app.Samples -ge $this.MinSamplesForConfidence) {
-            # HEAVY: AvgCPU > 45% LUB (AvgCPU > 25% I MaxCPU > 65%)
-            if ($avgScore -gt 70 -or ($app.AvgCPU -gt 25 -and $app.MaxCPU -gt 65)) { 
+            # HEAVY: combinedScore>70 LUB GPU-bound LUB (CPU>25% & MaxCPU>65%)
+            if ($combinedScore -gt 70 -or ($gpuScore -gt 60) -or ($app.AvgCPU -gt 25 -and $app.MaxCPU -gt 65)) { 
                 $app.Category = "HEAVY"
                 $app.IsHeavy = $true
-            } elseif ($avgScore -gt 35 -or ($app.AvgCPU -gt 15 -and $app.MaxCPU -gt 45)) { 
+            } elseif ($combinedScore -gt 35 -or ($app.AvgCPU -gt 15 -and $app.MaxCPU -gt 45) -or $gpuScore -gt 35) { 
                 $app.Category = "MEDIUM"
                 $app.IsHeavy = $false
             } else { 
@@ -6356,10 +6593,10 @@ class ProphetMemory {
                 $app.IsHeavy = $false
             }
         } else {
-            # Podczas uczenia - tymczasowa kategoryzacja z ostrzeżeniem
-            if ($avgScore -gt 70 -or ($app.AvgCPU -gt 25 -and $app.MaxCPU -gt 65)) { 
+            # Podczas uczenia - tymczasowa kategoryzacja
+            if ($combinedScore -gt 70 -or ($gpuScore -gt 60) -or ($app.AvgCPU -gt 25 -and $app.MaxCPU -gt 65)) { 
                 $app.Category = "LEARNING_HEAVY"
-            } elseif ($avgScore -gt 35 -or ($app.AvgCPU -gt 15 -and $app.MaxCPU -gt 45)) { 
+            } elseif ($combinedScore -gt 35 -or ($app.AvgCPU -gt 15 -and $app.MaxCPU -gt 45) -or $gpuScore -gt 35) { 
                 $app.Category = "LEARNING_MEDIUM"
             } else { 
                 $app.Category = "LEARNING_LIGHT"
@@ -8024,8 +8261,12 @@ class ContextDetector {
         }
     }
     [string] DetectContext([double]$cpu) {
+        return $this.DetectContext($cpu, 0.0, 0.0)
+    }
+    [string] DetectContext([double]$cpu, [double]$gpu, [double]$io) {
         $detectedContext = "Idle"
         $highestPriority = 999
+        # 1. NAME-BASED: sprawdź znane wzorce (istniejąca logika)
         foreach ($contextName in $this.ContextPatterns.Keys) {
             $pattern = $this.ContextPatterns[$contextName]
             foreach ($patternApp in $pattern.Apps) {
@@ -8037,6 +8278,35 @@ class ContextDetector {
                         }
                     }
                 }
+            }
+        }
+        # 2. BEHAVIOR-BASED: jeśli name matching nie znalazł nic ciekawego,
+        #    wykryj kontekst z ZACHOWANIA (GPU+CPU+IO metryki)
+        if ($detectedContext -eq "Idle" -and $highestPriority -eq 999) {
+            # GPU>70% + CPU>15% = coś ciężkiego graficznie (gra, render, AI)
+            if ($gpu -gt 70 -and $cpu -gt 15) {
+                $detectedContext = "Gaming"
+                $highestPriority = 1
+            }
+            # GPU>50% + CPU<30% = GPU-bound rendering/game
+            elseif ($gpu -gt 50 -and $cpu -lt 30) {
+                $detectedContext = "Rendering"
+                $highestPriority = 2
+            }
+            # CPU>60% + GPU<20% = heavy compute (kompilacja, encoding, nauka)
+            elseif ($cpu -gt 60 -and $gpu -lt 20) {
+                $detectedContext = "Coding"
+                $highestPriority = 3
+            }
+            # I/O>100MB/s + CPU>30% = heavy loading/transfer
+            elseif ($io -gt 100 -and $cpu -gt 30) {
+                $detectedContext = "Work"
+                $highestPriority = 4
+            }
+            # CPU>25% = aktywna praca
+            elseif ($cpu -gt 25) {
+                $detectedContext = "Work"
+                $highestPriority = 5
             }
         }
         # Aktualizuj stabilnosc kontekstu
@@ -8717,15 +8987,32 @@ class SharedAppKnowledge {
             $result.Reasons.Add("Q=$($p.QBestAction)")
         }
         
-        # 3. GPUAI: GPU-bound = BALANCED (nie Silent! Silent throttle APU power budget)
+        # 3. GPUAI: GPU-aware scoring z eskalacją
         if ($p.IsGPUBound) {
-            $votes["Balanced"] += 2.0
-            $totalWeight += 2.0
-            $result.Reasons.Add("GPU-BOUND→Balanced")
+            # GPU-bound: Balanced z wagą proporcjonalną do GPU load
+            $gpuWeight = if ($p.AvgGPU -gt 85) { 3.0 }      # Ekstremalny GPU = bardzo mocny vote
+                         elseif ($p.AvgGPU -gt 70) { 2.5 }
+                         else { 2.0 }
+            $votes["Balanced"] += $gpuWeight
+            $totalWeight += $gpuWeight
+            $result.Reasons.Add("GPU-BOUND($([int]$p.AvgGPU)%)→Balanced")
         } elseif ($p.GPUCategory -eq "Heavy") {
-            $votes["Balanced"] += 1.0
-            $totalWeight += 1.0
-            $result.Reasons.Add("GPU=Heavy")
+            # Heavy GPU ale nie GPU-bound (CPU też ciężki) → Turbo lub Balanced
+            if ($p.AvgCPU -gt 50) {
+                # CPU+GPU obydwa ciężkie = TURBO
+                $votes["Turbo"] += 2.0
+                $totalWeight += 2.0
+                $result.Reasons.Add("GPU+CPU Heavy→Turbo")
+            } else {
+                $votes["Balanced"] += 1.5
+                $totalWeight += 1.5
+                $result.Reasons.Add("GPU=Heavy→Balanced")
+            }
+        } elseif ($p.AvgGPU -gt 35) {
+            # Medium GPU load → Balanced (nie Silent!)
+            $votes["Balanced"] += 0.8
+            $totalWeight += 0.8
+            $result.Reasons.Add("GPU=Medium($([int]$p.AvgGPU)%)")
         }
         
         # 4. Phase: kontekst fazy (waga 1.5)
@@ -8755,24 +9042,39 @@ class SharedAppKnowledge {
             $totalWeight += 0.5
         }
         
-        # 6. Context: kategoria (waga 1.5)
+        # 6. Context + GPU Category: kategoria aplikacji
         # v43.14: Audio apps = Balanced minimum (realtime buffers!)
         if ($p.Category -eq "Audio") {
-            $votes["Balanced"] += 2.0  # Audio WYMAGA Balanced (realtime, low-latency)
+            $votes["Balanced"] += 2.0
             $totalWeight += 2.0
             $result.Reasons.Add("AUDIO→Balanced")
+        } elseif ($p.GPUCategory -eq "Extreme" -or ($p.Category -eq "Gaming" -and $p.AvgGPU -gt 80)) {
+            # Extreme GPU: Turbo (gra/render potrzebuje max mocy)
+            $votes["Turbo"] += 2.5
+            $totalWeight += 2.5
+            $result.Reasons.Add("EXTREME-GPU→Turbo")
         } elseif ($p.Category -eq "Gaming" -or $p.Category -eq "Rendering") {
-            if ($currentPhase -eq "Loading") { $votes["Turbo"] += 1.5 }
+            if ($currentPhase -eq "Loading") { $votes["Turbo"] += 2.0 }
+            elseif ($currentPhase -eq "Gameplay") { $votes["Balanced"] += 2.0 }
             else { $votes["Balanced"] += 1.5 }
+            $totalWeight += 2.0
+            $result.Reasons.Add("$($p.Category)→$($currentPhase)")
+        } elseif ($p.GPUCategory -eq "Rendering") {
+            # GPU rendering (GPU>60 + CPU<40) - Balanced (GPU needs power headroom)
+            $votes["Balanced"] += 1.5
             $totalWeight += 1.5
+            $result.Reasons.Add("GPU-Render→Balanced")
         } elseif ($p.Category -eq "Coding") {
-            # Coding: Active=Balanced, Idle=Silent
             if ($currentPhase -eq "Active") { $votes["Balanced"] += 1.0 }
             else { $votes["Silent"] += 0.5 }
             $totalWeight += 1.0
         } elseif ($p.Category -eq "Work" -or $p.Category -eq "Browser" -or $p.Category -eq "Browsing") {
             $votes["Silent"] += 0.5
             $totalWeight += 0.5
+        } elseif ($p.GPUCategory -eq "Idle" -or $p.Category -eq "Idle") {
+            $votes["Silent"] += 1.0
+            $totalWeight += 1.0
+            $result.Reasons.Add("IDLE→Silent")
         }
         
         # 7. Energy: efektywność (waga 0.5)
@@ -10403,8 +10705,18 @@ class QLearningAgent {
         $ctxBin = switch ($context) { "Gaming" { 2 } "Rendering" { 2 } "Audio" { 2 } default { if ($context -eq "Idle") { 0 } else { 1 } } }
         $ramBin = if ($ramSpike) { 4 } elseif ($ram -lt 40) { 0 } elseif ($ram -lt 60) { 1 } elseif ($ram -lt 75) { 2 } elseif ($ram -lt 85) { 3 } else { 4 }
         $phaseBin = switch ($phase) { "Loading" { "L" } "Gameplay" { "G" } "Active" { "A" } "Cutscene" { "C" } "Menu" { "M" } "Paused" { "Z" } default { "I" } }
-        # v43.14: App w state - Q-Learning uczy się PER-APP
-        $appBin = if ($this.CurrentApp) { $this.CurrentApp.Substring(0, [Math]::Min(8, $this.CurrentApp.Length)).ToLower() } else { "none" }
+        # v46: App w state = KATEGORIA (nie nazwa!) → zarządzalny Q-Table
+        # Per-app data jest w Prophet + SharedAppKnowledge, Q-Learning uczy się WZORCÓW KATEGORII
+        $appBin = "norm"
+        if ($this.CurrentApp) {
+            $al = $this.CurrentApp.ToLower()
+            # Użyj kategorii z Prophet jeśli dostępna, inaczej inferuj z context
+            if ($context -eq "Gaming" -or $context -eq "Rendering") { $appBin = "heavy" }
+            elseif ($context -eq "Audio") { $appBin = "audio" }
+            elseif ($context -eq "Coding") { $appBin = "code" }
+            elseif ($context -eq "Idle") { $appBin = "idle" }
+            else { $appBin = "norm" }
+        }
         $this.LastRAM = $ram
         $this.LastRAMSpike = $ramSpike
         return "$appBin|C$cpuBin-T$tempBin-A$actBin-X$ctxBin-R$ramBin-P$phaseBin"
@@ -10613,8 +10925,11 @@ class QLearningAgent {
                     }
                 }
                 "Gaming" {
+                    # v46: Gaming = GPU-dependent
                     switch ($action) {
-                        "Balanced" { $r += 0.5 }    # Gaming = GPU-bound usually
+                        "Turbo"    { $r += 1.0 }   # Gaming often needs CPU headroom
+                        "Balanced" { $r += 0.8 }   # Stable for GPU-bound games
+                        "Silent"   { $r -= 0.5 }   # Can starve CPU-side work
                     }
                 }
             }
@@ -12339,22 +12654,43 @@ class AICoordinator {
         $engineUsed = "Coordinator"
         $this.EngineDecisionCount[$this.ActiveEngine]++
         
-        # v43.14: Adaptive weight learning
-        # Nagrodź silniki które głosowały ZGODNIE z finalną decyzją
-        # Karaj silniki które głosowały ODWROTNIE
+        # v46: OUTCOME-BASED adaptive weights (nie circular!)
+        # Nie nagradzamy silników za ZGODNOŚĆ z koordynatorem (echo chamber),
+        # a za TRAFNOŚĆ PRZEWIDYWANIA — mierzymy EFEKT poprzedniej decyzji:
+        # - Czy temp spadła/stabilna? → decyzja OK
+        # - Czy CPU headroom był wystarczający? → nie za dużo, nie za mało
+        # - Czy nie było stutteringu? → decyzja OK
         if ($this.LastModelScores -and $this.LastDecidedMode) {
-            $lr = 0.02  # Powolne uczenie wag (stabilność)
-            $decidedScore = switch ($this.LastDecidedMode) { "Silent" { 20 } "Balanced" { 50 } "Turbo" { 80 } default { 50 } }
+            $lr = 0.02
+            # Outcome score: jak DOBRE było to co koordynator zdecydował?
+            $outcomeGood = $true
+            $penalty = 0.0
+            # Thermal check: jeśli po Turbo temp wzrosła >85°C → zła decyzja
+            if ($this.LastDecidedMode -eq "Turbo" -and $temp -gt 85) { $outcomeGood = $false; $penalty = 0.3 }
+            # Silent check: jeśli po Silent CPU>70% → zła decyzja (app potrzebowała mocy)
+            if ($this.LastDecidedMode -eq "Silent" -and $cpu -gt 70) { $outcomeGood = $false; $penalty = 0.3 }
+            # Stutter check
+            if ($Script:PerfMonitor -and $Script:PerfMonitor.HasRecentStutter()) { $outcomeGood = $false; $penalty = 0.2 }
+            
             foreach ($engine in $this.LastModelScores.Keys) {
                 $engineScore = $this.LastModelScores[$engine]
                 if ($null -eq $engineScore) { continue }
-                # Dystans od "poprawnej" odpowiedzi (mniejszy = lepiej)
-                $error = [Math]::Abs($engineScore - $decidedScore) / 100.0
-                $accuracy = 1.0 - $error  # 0=zły, 1=idealny
-                # Update adaptive weight: EMA
                 if (-not $this.AdaptiveWeights) { $this.AdaptiveWeights = @{} }
                 $current = if ($this.AdaptiveWeights.ContainsKey($engine)) { $this.AdaptiveWeights[$engine] } else { 1.0 }
-                $this.AdaptiveWeights[$engine] = $current * (1.0 - $lr) + $accuracy * $lr
+                
+                $decidedScore = switch ($this.LastDecidedMode) { "Silent" { 20 } "Balanced" { 50 } "Turbo" { 80 } default { 50 } }
+                $engineAgreed = ([Math]::Abs($engineScore - $decidedScore) -lt 25)
+                
+                if ($outcomeGood) {
+                    # Dobry outcome: nagradzaj silniki które ZGADZAŁY SIĘ z decyzją
+                    if ($engineAgreed) { $current = $current * (1.0 - $lr) + 1.1 * $lr }
+                } else {
+                    # Zły outcome: karaj silniki które głosowały ZA złą decyzją
+                    if ($engineAgreed) { $current = $current * (1.0 - $lr) + (0.7 - $penalty) * $lr }
+                    # Nagradzaj silniki które OSTRZEGAŁY (głosowały inaczej)
+                    else { $current = $current * (1.0 - $lr) + 1.15 * $lr }
+                }
+                $this.AdaptiveWeights[$engine] = [Math]::Min(1.5, [Math]::Max(0.5, $current))
             }
         }
         $this.LastModelScores = $modelScores.Clone()
@@ -13455,8 +13791,8 @@ class GPUAI {
         $cpuBin = if ($cpuLoad -lt 30) { "L" } elseif ($cpuLoad -lt 60) { "M" } else { "H" }
         # Temp bins: <60=C, 60-80=W, 80+=H
         $tempBin = if ($temp -lt 60) { "C" } elseif ($temp -lt 80) { "W" } else { "H" }
-        # App category: G=Gaming/Heavy, W=Work, I=Idle/Light
-        $catBin = switch ($appCategory) { "Heavy" { "G" } "Gaming" { "G" } "Rendering" { "G" } "Light" { "I" } default { "W" } }
+        # App category: X=Extreme, G=Gaming/Heavy, R=Rendering, W=Work, I=Idle/Light
+        $catBin = switch ($appCategory) { "Extreme" { "X" } "Heavy" { "G" } "Gaming" { "G" } "Rendering" { "R" } "Idle" { "I" } "Light" { "I" } default { "W" } }
         
         return "G$gpuBin-$gpuType-C$cpuBin-T$tempBin-$catBin"
     }
@@ -13725,8 +14061,19 @@ class GPUAI {
         }
         
         # === V40.4: Q-LEARNING UPDATE ===
-        # Określ kategorię aplikacji na podstawie AKTUALNEGO GPU load
-        $appCategory = if ($gpuLoad -gt 60) { "Heavy" } elseif ($gpuLoad -lt 20) { "Light" } else { "Work" }
+        # Kategoria: GPU+CPU combined (nie tylko GPU sam)
+        $appCategory = "Light"
+        if ($gpuLoad -gt 85) {
+            $appCategory = "Extreme"  # GPU maxed out → potrzebuje max power budget
+        } elseif ($gpuLoad -gt 60) {
+            $appCategory = if ($cpuLoad -gt 40) { "Heavy" } else { "Rendering" }
+        } elseif ($gpuLoad -gt 30) {
+            $appCategory = "Work"
+        } elseif ($cpuLoad -gt 60) {
+            $appCategory = "Heavy"  # CPU-heavy, GPU idle (kompilacja/encoding)
+        } elseif ($gpuLoad -lt 10 -and $cpuLoad -lt 15) {
+            $appCategory = "Idle"
+        }
         
         # Dyskretyzuj obecny stan
         $currentState = $this.DiscretizeGPUState($gpuLoad, $activeGPU, $cpuLoad, $temp, $appCategory)
@@ -15537,83 +15884,73 @@ function Set-PowerMode {
         [switch]$HardLock
     )
     if ([string]::IsNullOrWhiteSpace($Mode)) { return }
-    # - RyzenADJ - Ustaw TDP (AMD Ryzen)
+    # ═══ AMD: RyzenADJ (bezpośredni TDP) ═══
     if ($Script:RyzenAdjAvailable -and $Script:CPUType -eq "AMD") {
         Set-RyzenAdjMode $Mode | Out-Null
+        # AMD nadal potrzebuje powercfg jako backup (affinity zarządzane przez RyzenAdj)
+        $powerStates = Get-PowerStates
+        $state = $powerStates[$Mode]
+        if ($state -and ($Script:LastPowerMode -ne $Mode -or $Script:LastPowerMax -ne $state.Max)) {
+            try {
+                if (-not $Script:PowerPlanGUID) {
+                    $output = powercfg /getactivescheme 2>$null
+                    if ($output -match '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})') {
+                        $Script:PowerPlanGUID = $matches[1]
+                    }
+                }
+                if ($Script:PowerPlanGUID) {
+                    $guid = $Script:PowerPlanGUID
+                    $subgroup = "54533251-82be-4824-96c1-47b60b740d00"
+                    powercfg /setacvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $state.Min 2>$null
+                    powercfg /setacvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $state.Max 2>$null
+                    powercfg /setdcvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $state.Min 2>$null
+                    powercfg /setdcvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $state.Max 2>$null
+                    powercfg /setactive $guid 2>$null
+                }
+            } catch {}
+        }
     }
-    # Uzyj odpowiednich stanow dla wykrytego procesora
-    $powerStates = Get-PowerStates
-    $state = $powerStates[$Mode]
-    if (-not $state) { return }
-    $minValue = $state.Min
-    $maxValue = $state.Max
-    # v43.14: Usunięte dynamiczne skalowanie Silent - powodowało feedback loop:
-    # CPU rośnie → max state rośnie → procesor boostuje → CPU rośnie dalej
-    # Teraz Silent = ZAWSZE strict Min/Max z config (dla AMD i Intel)
-    # Balanced/Turbo/Extreme = strict Min/Max z config (bez modyfikacji)
-    #  FIXED: Balanced i Turbo uzywaja wartosci z RyzenStates bez modyfikacji
-    if ($Script:LastPowerMode -eq $Mode -and $Script:LastPowerMax -eq $maxValue) { return }
-    try {
-        if (-not $Script:PowerPlanGUID) {
-            $output = powercfg /getactivescheme 2>$null
-            if ($output -match '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})') {
-                $Script:PowerPlanGUID = $matches[1]
-            }
+    # ═══ INTEL: Własny mechanizm ENGINE (IntelPowerManager) ═══
+    elseif ($Script:CPUType -eq "Intel" -and $Script:IntelPM -and $Script:IntelPM.Available) {
+        Set-IntelPowerMode -PM $Script:IntelPM -Mode $Mode
+    }
+    # ═══ FALLBACK: nieznany CPU — powercfg jako ostatnia deska ═══
+    elseif ($Script:CPUType -ne "AMD") {
+        $powerStates = Get-PowerStates
+        $state = $powerStates[$Mode]
+        if ($state -and ($Script:LastPowerMode -ne $Mode -or $Script:LastPowerMax -ne $state.Max)) {
+            try {
+                if (-not $Script:PowerPlanGUID) {
+                    $output = powercfg /getactivescheme 2>$null
+                    if ($output -match '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})') {
+                        $Script:PowerPlanGUID = $matches[1]
+                    }
+                }
+                if ($Script:PowerPlanGUID) {
+                    $guid = $Script:PowerPlanGUID
+                    $subgroup = "54533251-82be-4824-96c1-47b60b740d00"
+                    powercfg /setacvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $state.Min 2>$null
+                    powercfg /setacvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $state.Max 2>$null
+                    powercfg /setdcvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $state.Min 2>$null
+                    powercfg /setdcvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $state.Max 2>$null
+                    powercfg /setactive $guid 2>$null
+                }
+            } catch {}
         }
-        if ($Script:PowerPlanGUID) {
-            $guid = $Script:PowerPlanGUID
-            $subgroup = "54533251-82be-4824-96c1-47b60b740d00"
-            # Processor Min/Max state - AC (zasilacz) I DC (bateria)
-            powercfg /setacvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $minValue 2>$null
-            powercfg /setacvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxValue 2>$null
-            powercfg /setdcvalueindex $guid $subgroup "893dee8e-2bef-41e0-89c6-b55d0929964c" $minValue 2>$null
-            powercfg /setdcvalueindex $guid $subgroup "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxValue 2>$null
-            # - Intel Speed Shift EPP (Energy Performance Preference)
-            # 0=Performance, 50=Balanced, 100=Power Saving
-            if ($Script:CPUType -eq "Intel") {
-                $eppValue = switch ($Mode) {
-                    "Silent"   { 100 }  # Max power saving (100 = pełna oszczędność, wymusza niskie zegary)
-                    "Balanced" { 50  }  # Balanced
-                    "Turbo"    { 0   }  # Max performance
-                    "Extreme"  { 0   }  # Max performance
-                    default    { 50  }
-                }
-                # EPP setting GUID: 36687f9e-e3a5-4dbf-b1dc-15eb381c6863
-                powercfg /setacvalueindex $guid $subgroup "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $eppValue 2>$null
-                powercfg /setdcvalueindex $guid $subgroup "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $eppValue 2>$null
-                # Processor performance boost mode (0=Disabled, 1=Enabled, 2=Aggressive, 4=Efficient Aggressive)
-                $boostMode = switch ($Mode) {
-                    "Silent"   { 0 }  # Disabled
-                    "Balanced" { 1 }  # Enabled
-                    "Turbo"    { 2 }  # Aggressive
-                    "Extreme"  { 2 }  # Aggressive
-                    default    { 1 }
-                }
-                powercfg /setacvalueindex $guid $subgroup "be337238-0d82-4146-a960-4f3749d470c7" $boostMode 2>$null
-                powercfg /setdcvalueindex $guid $subgroup "be337238-0d82-4146-a960-4f3749d470c7" $boostMode 2>$null
-            }
-            # Logowanie zastosowanych ustawien Intel (EPP + BoostMode)
-            if ($Script:CPUType -eq "Intel") {
-                Write-Log "Intel POWER APPLIED: Mode=$Mode Min=$minValue Max=$maxValue EPP=$eppValue BoostMode=$boostMode" "POWER"
-            }
-            powercfg /setactive $guid 2>$null
-            # ??- SLEDZENIE ZMIAN TRYBU (bez logowania do ActivityLog) ???
-            if ($Global:LastLoggedMode -ne $Mode -or $lastLoggedFreq -ne "$minValue-$maxValue") {
-                # Tylko debug do konsoli (nie do ActivityLog)
-                if ($Global:DebugMode) {
-                    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] MODE: $($Global:LastLoggedMode) -> $Mode | $minValue%-$maxValue% | CPU:$CurrentCPU%" -ForegroundColor Gray
-                }
-                $Global:LastLoggedMode = $Mode
-                $Global:lastLoggedFreq = "$minValue-$maxValue"
-                $Global:ModeChangeCount++
-            }
-            $Script:LastPowerMode = $Mode
-            $Script:LastPowerMax = $maxValue
-            if ($Global:DebugMode) {
-                Add-Log "POWER: $Mode Min=$minValue Max=$maxValue (CPU=$CurrentCPU%)" -Debug
-            }
+    }
+    # ═══ Tracking ═══
+    if ($Script:LastPowerMode -ne $Mode) {
+        if ($Global:DebugMode) {
+            $method = if ($Script:CPUType -eq "AMD") { "RyzenAdj" } 
+                      elseif ($Script:CPUType -eq "Intel" -and $Script:IntelPM) { "IntelPM" } 
+                      else { "powercfg" }
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] MODE: $($Script:LastPowerMode) -> $Mode [$method] CPU:$CurrentCPU%" -ForegroundColor Gray
         }
-    } catch { }
+        $Global:LastLoggedMode = $Mode
+        $Global:ModeChangeCount++
+        $Script:LastPowerMode = $Mode
+        $Script:LastPowerMax = 0
+    }
 }
 # FILE OPERATIONS - FIXED z obsluga bledow
 function Save-State {
@@ -17090,7 +17427,9 @@ $Script:PreviousEnsembleEnabled = $false
                     }
                 }
             } catch {}
-            $currentContext = $contextDetector.DetectContext($currentMetrics.CPU)
+            $ctxGpuLoad = if ($currentMetrics.GPU) { $currentMetrics.GPU.Load } else { 0 }
+            $ctxIoTotal = $diskReadMB + $diskWriteMB
+            $currentContext = $contextDetector.DetectContext($currentMetrics.CPU, $ctxGpuLoad, $ctxIoTotal)
             $Script:CurrentAppContext = $currentContext  # v43.14: Expose to CalcReward for Audio/Gaming awareness
             
             # v43.14: Periodic Knowledge Transfer (every 150 iterations ≈ 5 min)
@@ -17907,7 +18246,13 @@ $Script:PreviousEnsembleEnabled = $false
                         $ctxPriority = if ($contextDetector.ContextPatterns.ContainsKey($currentContext)) { $contextDetector.ContextPatterns[$currentContext].Priority } else { 5 }
                         $sharedKnowledge.WriteFromContext($currentForeground, $currentContext, $ctxPriority)
                         
-                        $gpuCat = if ($gpuLoad -gt 60) { "Heavy" } elseif ($gpuLoad -lt 20) { "Light" } else { "Work" }
+                        $gpuCat = if ($gpuLoad -gt 85) { "Extreme" }
+                                   elseif ($gpuLoad -gt 60 -and $currentMetrics.CPU -gt 40) { "Heavy" }
+                                   elseif ($gpuLoad -gt 60) { "Rendering" }
+                                   elseif ($gpuLoad -gt 30) { "Work" }
+                                   elseif ($currentMetrics.CPU -gt 60 -and $gpuLoad -lt 20) { "Heavy" }
+                                   elseif ($gpuLoad -lt 10 -and $currentMetrics.CPU -lt 15) { "Idle" }
+                                   else { "Light" }
                         $gpuBoundNow = ($gpuBound -and $gpuBound.IsConfident)
                         $prefGPU = if ($gpuAI -and $gpuAI.GetRecommendation) { try { ($gpuAI.GetRecommendation($currentForeground)).PreferredGPU } catch { "" } } else { "" }
                         $sharedKnowledge.WriteFromGPUAI($currentForeground, $prefGPU, $gpuBoundNow, $gpuLoad, $gpuCat)
@@ -18170,7 +18515,7 @@ $Script:PreviousEnsembleEnabled = $false
                 # Typowe przy przeglądaniu stron (CPU skacze 15-40%)
                 # SKIP: Nie stosuj debounce gdy ForceMode/I/O override aktywne!
                 # ═══════════════════════════════════════════════════════════════
-                if (-not $forceModeAllowed -and -not $ioCanOverride) {
+                if (-not $forceModeAllowed -and -not $ioCanOverride -and -not $hardLockBlocked) {
                 if (-not $Script:ModeHoldStart) { $Script:ModeHoldStart = [DateTime]::UtcNow }
                 if (-not $Script:ModeHoldConfirmCount) { $Script:ModeHoldConfirmCount = 0 }
                 if (-not $Script:ModeHoldCandidate) { $Script:ModeHoldCandidate = $null }
@@ -18237,7 +18582,7 @@ $Script:PreviousEnsembleEnabled = $false
                 $aiDecision.Mode = $newMode
                 $aiDecision.Reason = $reason
                 $aiDecision.Score = switch ($newMode) { "Turbo"{85} "Silent"{25} default{50} }
-                }  # KONIEC if (-not $forceModeAllowed -and -not $ioCanOverride)
+                }  # KONIEC if (-not $forceModeAllowed -and -not $ioCanOverride -and -not $hardLockBlocked)
                 
                 # Log tylko przy ZMIANIE trybu
                 if ($newMode -ne $prevMode) { 
@@ -19871,6 +20216,10 @@ $Script:PreviousEnsembleEnabled = $false
         # - Przywroc domyslne plany zasilania Windows
         try { $powerRestored = Restore-DefaultPowerPlans } catch { $powerRestored = $false }
         try { $priorityManager.ResetAllPriorities() } catch { }
+        # Intel Power Manager: przywróć pełną wydajność przy zamknięciu
+        if ($Script:IntelPM -and $Script:IntelPM.Available) {
+            try { Reset-IntelPowerManager $Script:IntelPM; Write-Host "  [IntelPM] Restored defaults" -ForegroundColor Green } catch {}
+        }
         # v44.0: Governor - przywróć Windows defaults i zapisz stan
         try { $systemGovernor.RestoreWindowsDefaults() } catch { }
         try { $systemGovernor.SaveState($Script:ConfigDir) } catch { }

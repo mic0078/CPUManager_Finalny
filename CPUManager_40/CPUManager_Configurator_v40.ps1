@@ -4456,7 +4456,7 @@ foreach ($mode in $modesIntel) {
     $Script:PowerControlsIntel[$mode] = @{ Min = $numMinI; Max = $numMaxI }
     $yI += 35
 }
-$lblIntelInfo = New-Label -Parent $gbPowerIntel -Text "Intel Speed Shift: Min=responsywnosc (jak szybko CPU reaguje), Max=limit wydajnosci" -X 15 -Y 168 -Width 520 -Height 22 -FontSize 8 -ForeColor $Script:Colors.TextDim
+$lblIntelInfo = New-Label -Parent $gbPowerIntel -Text "Intel Power Manager: Affinity+EcoQoS+FreqCap (ENGINE kontroluje, nie Windows). Min/Max jako fallback." -X 15 -Y 168 -Width 520 -Height 22 -FontSize 8 -ForeColor $Script:Colors.TextDim
 
 # INTEL: Opis technologii
 $gbIntelTech = New-GroupBox -Parent $tabSettingsIntel -Title "Technologia Intel Speed Shift (HWP)" -X 580 -Y 10 -Width 530 -Height 200
