@@ -14544,12 +14544,12 @@ class NetworkAI {
             "obs" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "High" }
             "streamlabs" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "High" }
             "twitch" = @{ Type = "Streaming"; NeedsLowPing = $false; Priority = "Normal" }
-            # - Przegladarki - rozne potrzeby
-            "chrome" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
-            "firefox" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
-            "msedge" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
-            "opera" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
-            "brave" = @{ Type = "Browser"; NeedsLowPing = $false; Priority = "Normal" }
+            # - Przegladarki - kategoryzowane dynamicznie po aktualnym ruchu sieciowym
+            "chrome" = @{ Type = "Normal"; NeedsLowPing = $false; Priority = "Normal" }
+            "firefox" = @{ Type = "Normal"; NeedsLowPing = $false; Priority = "Normal" }
+            "msedge" = @{ Type = "Normal"; NeedsLowPing = $false; Priority = "Normal" }
+            "opera" = @{ Type = "Normal"; NeedsLowPing = $false; Priority = "Normal" }
+            "brave" = @{ Type = "Normal"; NeedsLowPing = $false; Priority = "Normal" }
             # - Komunikatory - potrzebuja niskiego pingu dla glosu
             "discord" = @{ Type = "VoIP"; NeedsLowPing = $true; Priority = "High" }
             "teams" = @{ Type = "VoIP"; NeedsLowPing = $true; Priority = "High" }
@@ -14610,36 +14610,37 @@ class NetworkAI {
     # OKRESLANIE TYPU AKTYWNOSCI SIECIOWEJ
     # #
     [string] DetermineNetworkType([string]$app, [double]$download, [double]$upload, [bool]$isGaming) {
-        # 1. Sprawdz wbudowana wiedze
+        # 1. Sprawdz wbudowana wiedze - TYLKO exact match
         if ($this.KnownNetworkApps.ContainsKey($app)) {
             return $this.KnownNetworkApps[$app].Type
         }
-        # 2. Sprawdz nauczone profile
-        if ($this.AppNetworkProfiles.ContainsKey($app)) {
-            $profile = $this.AppNetworkProfiles[$app]
-            if ($profile.Sessions -gt 5) {
-                return $profile.Type
-            }
-        }
-        # 3. Sprawdz AppCategoryPreferences (uzytkownik lub system przypisal kategorie)
+        # 2. Wnioskuj z kontekstu (PRZED learned profiles - świeże dane mają priorytet)
+        if ($isGaming) { return "Gaming" }
+        # 3. Wnioskuj z AKTUALNEJ prędkości (ważniejsze niż historyczne Type)
+        $downloadMB = $download / 1MB
+        $uploadMB = $upload / 1MB
+        if ($downloadMB -gt 5) { return "Download" }
+        if ($uploadMB -gt 2) { return "Streaming" }
+        if ($downloadMB -gt 1 -or $uploadMB -gt 0.5) { return "Active" }
+        # 4. Sprawdz AppCategoryPreferences (user/system kategorie)
         if ($Script:AppCategoryPreferences -and $Script:AppCategoryPreferences.Count -gt 0) {
             foreach ($key in $Script:AppCategoryPreferences.Keys) {
                 $keyLower = $key.ToLower() -replace '\.exe$', ''
-                if ($keyLower -eq $app -or $app -like "*$keyLower*" -or $keyLower -like "*$app*") {
+                if ($keyLower -eq $app) {
                     $pref = $Script:AppCategoryPreferences[$key]
                     if ($pref.Bias -ge 0.8) { return "Gaming" }
                     break
                 }
             }
         }
-        # 4. Wnioskuj z kontekstu
-        if ($isGaming) { return "Gaming" }
-        # 5. Wnioskuj z predkosci
-        $downloadMB = $download / 1MB
-        $uploadMB = $upload / 1MB
-        if ($downloadMB -gt 5) { return "Download" }
-        if ($uploadMB -gt 2) { return "Streaming" }  # Prawdopodobnie upload streamera
-        if ($downloadMB -gt 1 -or $uploadMB -gt 0.5) { return "Active" }
+        # 5. Sprawdz nauczone profile - ale TYLKO jeśli Type nie jest "Browser"/"Normal"
+        # (nie pozwól na utknięcie w złej kategorii)
+        if ($this.AppNetworkProfiles.ContainsKey($app)) {
+            $profile = $this.AppNetworkProfiles[$app]
+            if ($profile.Sessions -gt 5 -and $profile.Type -notin @("Browser", "Normal", "Unknown")) {
+                return $profile.Type
+            }
+        }
         return "Normal"
     }
     # #
@@ -14668,10 +14669,16 @@ class NetworkAI {
             # Maksima
             if ($download -gt $profile.MaxDownload) { $profile.MaxDownload = $download }
             if ($upload -gt $profile.MaxUpload) { $profile.MaxUpload = $upload }
-            # Aktualizuj typ jesli mamy duzo danych
-            if ($sessions -gt 10 -and $networkType -ne "Normal") {
-                $profile.Type = $networkType
-                $profile.NeedsLowPing = ($networkType -eq "Gaming" -or $networkType -eq "VoIP")
+            # Aktualizuj typ na podstawie aktualnej aktywności
+            # Nie pozwól na utknięcie w "Browser"/"Normal" gdy app robi coś innego
+            if ($sessions -gt 3) {
+                if ($networkType -ne "Normal" -and $networkType -ne "Browser") {
+                    $profile.Type = $networkType
+                    $profile.NeedsLowPing = ($networkType -eq "Gaming" -or $networkType -eq "VoIP")
+                } elseif ($sessions -gt 20 -and $profile.Type -eq "Browser") {
+                    # Jeśli "Browser" ale realne zachowanie to Normal — zaktualizuj
+                    $profile.Type = $networkType
+                }
             }
             $profile.Sessions = $sessions
             $profile.LastSeen = [DateTime]::Now
@@ -15045,8 +15052,13 @@ class NetworkAI {
                 # Odtworz profile aplikacji
                 if ($state.AppNetworkProfiles) {
                     $state.AppNetworkProfiles.PSObject.Properties | ForEach-Object {
+                        $loadedType = if ($_.Value.Type) { $_.Value.Type } else { "Normal" }
+                        # FIX: "Browser" nie jest poprawną kategorią sieciową
+                        # Przeglądarki to narzędzia - ich aktywność sieciowa to Download/Streaming/Active/Normal
+                        # Reklasyfikuj "Browser" → "Normal" żeby DetermineNetworkType mógł ponownie ocenić
+                        if ($loadedType -eq "Browser") { $loadedType = "Normal" }
                         $this.AppNetworkProfiles[$_.Name] = @{
-                            Type = $_.Value.Type
+                            Type = $loadedType
                             AvgDownload = $_.Value.AvgDownload
                             AvgUpload = $_.Value.AvgUpload
                             MaxDownload = $_.Value.MaxDownload
