@@ -3200,7 +3200,7 @@ $Script:txtActivityLog.ForeColor = $Script:Colors.Text
 $Script:txtActivityLog.Font = New-Object System.Drawing.Font("Consolas", 8)
 $Script:txtActivityLog.ReadOnly = $true; $Script:txtActivityLog.ScrollBars = "Vertical"; $Script:txtActivityLog.WordWrap = $false
 $tabSensors.Controls.Add($Script:txtActivityLog)
-$btnClearLog = New-Button -Parent $tabSensors -Text "Clear" -X 680 -Y 245 -Width 70 -Height 25 -BackColor $Script:Colors.Card -OnClick { $Script:txtActivityLog.Clear(); $Script:LastLogs.Clear() }
+$btnClearLog = New-Button -Parent $tabSensors -Text "Clear" -X 680 -Y 245 -Width 70 -Height 25 -BackColor $Script:Colors.Card -OnClick { $Script:txtActivityLog.Clear(); $Script:LastLogs.Clear(); $Script:ActivityLogList.Clear() }
 $Script:lblLogCount = New-Label -Parent $tabSensors -Text "0" -X 755 -Y 275 -Width 30 -Height 20 -ForeColor $Script:Colors.TextDim
 $lblRAMChartTitle = New-SectionLabel -Parent $tabSensors -Text "[RAM INTELLIGENCE HISTORY]" -X 10 -Y 410
 # Wykres (lewa strona - 760px)
@@ -6218,77 +6218,59 @@ Update-DatabaseView
 # #
 $Script:LastLogs = [System.Collections.Generic.HashSet[string]]::new()
 $Script:LastBoringLogTime = @{}  # Throttling dla powtarzających się logów
+$Script:ActivityLogList = [System.Collections.Generic.List[string]]::new()  # Najnowsze PIERWSZE
 function Add-ColoredLog {
     param([string]$Line)
     if ([string]::IsNullOrWhiteSpace($Line)) { return }
     
-    # Filtruj nudne, powtarzające się logi (Auto-save, Intel POWER itp.)
-    # Pokazuj tylko znaczące zmiany stanu/akcje
+    # Filtruj nudne, powtarzające się logi
     if ($Line -match "Auto-save|Intel POWER APPLIED|Knowledge Transfer #\d+") {
-        # Dla tych logów sprawdź czy ostatni wpis był podobny (w ciągu 30s)
         if (-not $Script:LastBoringLogTime) { $Script:LastBoringLogTime = @{} }
         $logType = if ($Line -match "Auto-save") { "AutoSave" }
                    elseif ($Line -match "Intel POWER") { "IntelPower" }
                    else { "KnowledgeTransfer" }
-        
         $now = [DateTime]::Now
         if ($Script:LastBoringLogTime.ContainsKey($logType)) {
             $elapsed = ($now - $Script:LastBoringLogTime[$logType]).TotalSeconds
-            if ($elapsed -lt 30) { return }  # Pomiń jeśli był podobny wpis w ciągu 30s
+            if ($elapsed -lt 30) { return }
         }
         $Script:LastBoringLogTime[$logType] = $now
     }
     
-    # Sprawdź duplikaty tylko dla istotnych logów
+    # Sprawdź duplikaty
     if ($Script:LastLogs.Contains($Line)) { return }
-    
     if ($Script:LastLogs.Count -gt 300) { 
-        # Usun najstarsze (pierwsze 150)
         $toRemove = @($Script:LastLogs | Select-Object -First 150)
         foreach ($item in $toRemove) { [void]$Script:LastLogs.Remove($item) }
     }
     [void]$Script:LastLogs.Add($Line)
-    $color = $Script:Colors.Text
-    if ($Line -match "TURBO|BOOST|🚀") { $color = $Script:Colors.Turbo }
-    elseif ($Line -match "BALANCED|⚖") { $color = $Script:Colors.Balanced }
-    elseif ($Line -match "SILENT|🔇") { $color = $Script:Colors.Silent }
-    elseif ($Line -match "ERROR|BLAD") { $color = $Script:Colors.Danger }
-    elseif ($Line -match "AI|🤖|Q-Learning") { $color = $Script:Colors.Purple }
-    elseif ($Line -match "I/O|💾|Disk") { $color = $Script:Colors.Warning }
-    # AppendText jest O(1), SelectionStart=0 + SelectedText jest O(n)
+    
+    # Dodaj na POCZĄTEK listy (najnowsze pierwsze)
+    $Script:ActivityLogList.Insert(0, $Line)
+    # Ogranicz do 20 wpisów
+    while ($Script:ActivityLogList.Count -gt 20) {
+        $Script:ActivityLogList.RemoveAt($Script:ActivityLogList.Count - 1)
+    }
+    # Przebuduj RichTextBox z listy (najnowsze na górze)
     try {
-        $Script:txtActivityLog.SelectionStart = $Script:txtActivityLog.TextLength
-        $Script:txtActivityLog.SelectionLength = 0
-        $Script:txtActivityLog.SelectionColor = $color
-        $Script:txtActivityLog.AppendText($Line + "`r`n")
-        # Scroll do konca (najnowsze logi)
-        $Script:txtActivityLog.SelectionStart = $Script:txtActivityLog.TextLength
+        $Script:txtActivityLog.Clear()
+        foreach ($ln in $Script:ActivityLogList) {
+            $lineColor = $Script:Colors.Text
+            if ($ln -match "TURBO|BOOST") { $lineColor = $Script:Colors.Turbo }
+            elseif ($ln -match "BALANCED") { $lineColor = $Script:Colors.Balanced }
+            elseif ($ln -match "SILENT") { $lineColor = $Script:Colors.Silent }
+            elseif ($ln -match "ERROR|BLAD|WARN") { $lineColor = $Script:Colors.Danger }
+            elseif ($ln -match "AI|Q-Learning|Knowledge|Auto-save|Gen:") { $lineColor = $Script:Colors.Purple }
+            elseif ($ln -match "I/O|Disk|ProBalance|Culprit") { $lineColor = $Script:Colors.Warning }
+            $Script:txtActivityLog.SelectionStart = $Script:txtActivityLog.TextLength
+            $Script:txtActivityLog.SelectionLength = 0
+            $Script:txtActivityLog.SelectionColor = $lineColor
+            $Script:txtActivityLog.AppendText($ln + "`r`n")
+        }
+        # Scroll na górę (najnowsze)
+        $Script:txtActivityLog.SelectionStart = 0
         $Script:txtActivityLog.ScrollToCaret()
     } catch { }
-    # Automatyczne czyszczenie starych logów - okno mieści ~10 linii, trzymamy max 20
-    if ($Script:txtActivityLog.Lines.Count -gt 25) {
-        try {
-            # Zachowaj tylko 15 ostatnich linii (najnowsze aktywności)
-            $lastLines = @($Script:txtActivityLog.Lines | Select-Object -Last 15)
-            $Script:txtActivityLog.Clear()
-            foreach ($ln in $lastLines) {
-                # Re-apply color coding
-                $lineColor = $Script:Colors.Text
-                if ($ln -match "TURBO|BOOST|🚀") { $lineColor = $Script:Colors.Turbo }
-                elseif ($ln -match "BALANCED|⚖") { $lineColor = $Script:Colors.Balanced }
-                elseif ($ln -match "SILENT|🔇") { $lineColor = $Script:Colors.Silent }
-                elseif ($ln -match "ERROR|BLAD") { $lineColor = $Script:Colors.Danger }
-                elseif ($ln -match "AI|🤖|Q-Learning") { $lineColor = $Script:Colors.Purple }
-                elseif ($ln -match "I/O|💾|Disk") { $lineColor = $Script:Colors.Warning }
-                
-                $Script:txtActivityLog.SelectionStart = $Script:txtActivityLog.TextLength
-                $Script:txtActivityLog.SelectionLength = 0
-                $Script:txtActivityLog.SelectionColor = $lineColor
-                $Script:txtActivityLog.AppendText($ln + "`r`n")
-            }
-        } catch { }
-    }
-    $Script:lblLogCount.Text = "$($Script:txtActivityLog.Lines.Count)"
 }
 # #
 # TIMER - REFRESH
