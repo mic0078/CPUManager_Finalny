@@ -9916,8 +9916,14 @@ class ProBalance {
                 CPUAtThrottle = [Math]::Round($cpuUsage, 1)
             }
             $this.TotalThrottles++
-            # Log
-            Add-Log "- ProBalance: Throttled '$($proc.ProcessName)' (PID $processId) - CPU $([Math]::Round($cpuUsage, 1))% -> BelowNormal"
+            # Log — rate-limit: max raz na 60s per proces
+            $logKey = "PB_$($proc.ProcessName)"
+            $now = [DateTime]::UtcNow
+            if (-not $Script:ProBalanceLogTimes) { $Script:ProBalanceLogTimes = @{} }
+            if (-not $Script:ProBalanceLogTimes.ContainsKey($logKey) -or ($now - $Script:ProBalanceLogTimes[$logKey]).TotalSeconds -gt 60) {
+                $Script:ProBalanceLogTimes[$logKey] = $now
+                Add-Log "- ProBalance: Throttled '$($proc.ProcessName)' (PID $processId) - CPU $([Math]::Round($cpuUsage, 1))%"
+            }
         } catch {
             # Ignore errors (process may have exited)
         }
@@ -9931,8 +9937,10 @@ class ProBalance {
             $proc.PriorityClass = $info.OriginalPriority
             $duration = ([DateTime]::Now - $info.ThrottledAt).TotalSeconds
             $this.TotalRestores++
-            # Log
-            Add-Log "- ProBalance: Restored '$($info.Name)' (PID $processId) - throttled for $([Math]::Round($duration, 0))s"
+            # Log — tylko jeśli throttle trwał >30s (krótkie cykle to normalne, nie loguj)
+            if ($duration -gt 30) {
+                Add-Log "- ProBalance: Restored '$($info.Name)' (PID $processId) - ${([Math]::Round($duration, 0))}s"
+            }
             $proc.Dispose()
         } catch {
             # Process died - OK
@@ -12525,10 +12533,10 @@ class AICoordinator {
         # Wagi bazowe silników
         $baseWeights = @{
             "QLearning" = 2.0; "Prophet" = 1.8; "Context" = 1.5; "Thermal" = 1.5
-            "Phase" = 1.6; "GPU" = 1.3; "Energy" = 1.2; "Trend" = 1.0
-            "IOMonitor" = 1.0; "NetworkAI" = 0.6; "Pattern" = 0.8; "Brain" = 0.8
-            "Bandit" = 0.7; "Genetic" = 0.6; "Chain" = 0.6; "Predictor" = 0.5
-            "Anomaly" = 0.5; "Tuner" = 0.4; "Activity" = 0.4; "PowerBoost" = 0.3
+            "Phase" = 1.6; "GPU" = 1.3; "Energy" = 1.2; "Trend" = 1.2
+            "IOMonitor" = 1.0; "NetworkAI" = 0.8; "Pattern" = 1.0; "Brain" = 1.0
+            "Chain" = 0.8; "Predictor" = 0.7
+            "Anomaly" = 0.8; "Activity" = 0.6; "PowerBoost" = 0.5
             "AppIntel" = 2.5
         }
         
@@ -17974,7 +17982,30 @@ $Script:PreviousEnsembleEnabled = $false
                 }
                 
                 #  7. USER PATTERNS - Activity Patterns
-                $patternScore = if ($userPatterns.IsTypicallyActiveNow()) { 55 } else { 30 }
+                # v47: Pattern score wielowymiarowy — godzina + aktywność + kontekst + CPU history
+                $patternScore = 50
+                $hourNow = (Get-Date).Hour
+                # 1. Czy ta godzina jest typowo aktywna?
+                $hourActive = $userPatterns.IsTypicallyActiveNow()
+                # 2. Jaki kontekst dominuje o tej godzinie? (z Prophet HourlyActivity)
+                $hourlyHeavy = $false
+                if ($prophet -and $prophet.HourlyActivity -and $prophet.HourlyActivity[$hourNow] -gt 3) {
+                    $hourlyHeavy = $true  # O tej godzinie zwykle ciężkie aplikacje
+                }
+                # 3. Ostatni trend CPU (rosnący = app się rozgrzewa)
+                $recentCPUHigh = ($currentMetrics.CPU -gt 40 -or ($trend -and $trend -gt 10))
+                
+                if (-not $isUserActive -and -not $hourActive -and $currentMetrics.CPU -lt 15) {
+                    $patternScore = 15   # Nocna cisza, nic nie działa
+                } elseif ($hourlyHeavy -and $hourActive) {
+                    $patternScore = 65   # Ta godzina = zwykle ciężka praca
+                } elseif ($isUserActive -and $recentCPUHigh) {
+                    $patternScore = 70   # Aktywny + CPU rośnie
+                } elseif ($hourActive -and -not $recentCPUHigh) {
+                    $patternScore = 45   # Aktywna godzina ale CPU niski
+                } elseif (-not $hourActive) {
+                    $patternScore = 25   # Nietypowa godzina
+                }
                 
                 #  8. GPU MONITOR - Graphics Load + GPU Type + AI Learning drives score
                 $gpuLoad = if ($currentMetrics.GPU) { $currentMetrics.GPU.Load } else { 0 }
@@ -18037,14 +18068,16 @@ $Script:PreviousEnsembleEnabled = $false
                 #  11. FORECASTER - CPU Trend Analysis
                 #  SYNC: uses variables z config.json
                 $trend = $forecaster.Trend()
-                $trendScore = 50  # Bazowy
-                # Trend wpływa na score: +trend = wyższy score, -trend = niższy score
-                $trendScore += ($trend * 0.5)  # Trend ±20 = ±10 score
+                $trendScore = 50
+                # v47: Wzmocniony wpływ trendu — trend to REALNY sygnał czasu rzeczywistego
+                # Trend +20 = CPU rośnie szybko → score +25 (przygotuj moc)
+                # Trend -20 = CPU spada → score -25 (zwalniaj)
+                $trendScore += ($trend * 1.25)  # Trend ±20 = ±25 score
                 $trendScore = [Math]::Min(100, [Math]::Max(0, $trendScore))
                 
                 #  12. SELF-TUNER - Dynamic Thresholds
                 #  SYNC: uses variables z config.json
-                $tunerScore = $aiDecision.Score  # Bazuj na aktualnym AI score
+                # (Tuner usunięty z modelScores — był kopią Brain score)
                 
                 #  13. ENERGY TRACKER - Efficiency Focus
                 $energyScore = 50  # Neutralny
@@ -18084,10 +18117,24 @@ $Script:PreviousEnsembleEnabled = $false
                 }
                 
                 #  15. ANOMALY DETECTOR - Security Check
-                $anomalyScore = 50  # Neutralny
+                # v47: Anomaly score — wielowymiarowe wykrywanie anomalii
+                $anomalyScore = 50
                 if ($anomalyAlert -eq "CRYPTO_MINER") { 
-                    $anomalyScore = 15  # Silnie obniż score dla podejrzanej aktywności
+                    $anomalyScore = 10  # Crypto miner → prawie Silent
                 }
+                # CPU anomaly: wysoki CPU bez aktywnej app użytkownika = podejrzane
+                elseif ($currentMetrics.CPU -gt 70 -and (-not $currentForeground -or $currentForeground -eq "Desktop") -and -not $isUserActive) {
+                    $anomalyScore = 20  # Coś ciężkiego w tle bez wiedzy usera
+                }
+                # GPU anomaly: wysoki GPU bez rozpoznanej app = podejrzane
+                elseif ($gpuLoad -gt 60 -and (-not $currentForeground -or $currentForeground -eq "Desktop")) {
+                    $anomalyScore = 25  # GPU działa ale user nic nie robi
+                }
+                # Thermal anomaly: temp rośnie szybko przy niskim CPU = problem chłodzenia
+                elseif ($currentMetrics.Temp -gt 80 -and $currentMetrics.CPU -lt 30) {
+                    $anomalyScore = 20  # Przegrzanie bez obciążenia → obniż
+                }
+                # Wszystko OK: nie modyfikuj score (=50 neutralne)
                 
                 # - 16. ACTIVITY MONITOR - User Presence
                 $activityScore = 50  # Neutralny
@@ -18189,31 +18236,12 @@ $Script:PreviousEnsembleEnabled = $false
                     "Silent" { 25 }
                     default { 50 }
                 }
-                $banditScore = switch ($banditAction) {
-                    "Turbo" { 85 }
-                    "Balanced" { 50 }
-                    "Silent" { 25 }
-                    default { 50 }
-                }
                 
-                # Filtry dla bardzo niskiego CPU
-                if ($currentMetrics.CPU -lt $Script:BalancedThreshold) {
-                    # Przy niskim CPU, obniż score jeśli zbyt wysoki
-                    if ($qScore -gt 70) { $qScore = 55 }
-                    if ($banditScore -gt 70) { $banditScore = 55 }
-                }
-                if ($currentMetrics.CPU -lt $Script:ForceSilentCPU) {
-                    # Przy bardzo niskim CPU, wszystkie scores idą w dół
-                    $qScore = [Math]::Min($qScore, 30)
-                    $banditScore = [Math]::Min($banditScore, 30)
-                }
+                # Filtr Q-Learning przy niskim CPU
+                if ($currentMetrics.CPU -lt $Script:BalancedThreshold -and $qScore -gt 70) { $qScore = 55 }
+                if ($currentMetrics.CPU -lt $Script:ForceSilentCPU) { $qScore = [Math]::Min($qScore, 30) }
                 
-                $geneticScore = switch ($geneticMode) {
-                    "Turbo" { 85 }
-                    "Balanced" { 50 }
-                    "Silent" { 25 }
-                    default { 50 }
-                }
+                # (Bandit i Genetic usunięte z modelScores — Bandit nadal się uczy w tle)
                 
                 # AICoordinator: wybierz aktywny silnik na podstawie warunków
                 if ($aiCoordinator) {
@@ -18284,13 +18312,11 @@ $Script:PreviousEnsembleEnabled = $false
                     } catch {}
                 }
                 
-                # NOWA STRUKTURA: modelScores zamiast modelDecisions (tryby)
-                # Każdy silnik AI daje score 0-100, nie tryb
+                # NOWA STRUKTURA: modelScores — TYLKO silniki z unikalnym sygnałem
+                # Usunięte placebo: Tuner (=kopia Brain), Genetic (=Brain+progi), Bandit (=globalny szum)
                 $modelScores = @{
                     "Brain" = $aiDecision.Score
                     "QLearning" = $qScore
-                    "Bandit" = $banditScore
-                    "Genetic" = $geneticScore
                     "Context" = $contextScore
                     "Thermal" = $thermalScore
                     "Pattern" = $patternScore
@@ -18298,7 +18324,6 @@ $Script:PreviousEnsembleEnabled = $false
                     "Predictor" = $predictorScore
                     "Chain" = $chainScore
                     "Trend" = $trendScore
-                    "Tuner" = $tunerScore
                     "Energy" = $energyScore
                     "Prophet" = $prophetScore
                     "Anomaly" = $anomalyScore
@@ -18809,125 +18834,83 @@ $Script:PreviousEnsembleEnabled = $false
                     if ($iteration % 10 -eq 0) {
                     }
                     # Pobierz Prophet prediction jesli dostepne
-                    # DYNAMICZNA PREDYKCJA: Przewiduj przyszłe obciążenie na podstawie trendu + wiedzy Prophet
+                    # v47 FIX: PRAWDZIWA PREDYKCJA — nie echo CPU, a wiedza o aplikacji
                     $prophetPrediction = 0
                     $prophetDebug = "N/A"
-                    $predictionSteps = 8  # 8 iteracji = ~8-16 sekund do przodu
-                    
-                    # Pobierz dynamiczną predykcję z Forecaster
-                    $basePrediction = $forecaster.Predict($predictionSteps)
                     $cpuTrend = $forecaster.Trend()
                     
-                    # Wzmocnij trend (momentum) - nagły wzrost/spadek powinien być widoczny
-                    if ([Math]::Abs($cpuTrend) -gt 1.5) {
-                        $momentum = $cpuTrend * 0.3 * $predictionSteps
-                        $basePrediction += $momentum
-                    }
-                    
-                    # ═══════════════════════════════════════════════════════════════
-                    # MULTI-SIGNAL PREDICTION: Zbierz sygnały z WSZYSTKICH silników
-                    # ═══════════════════════════════════════════════════════════════
-                    $signalBoost = 0.0  # Dodatkowy wpływ na predykcję (-30 do +30)
-                    $signalDebug = @()
-                    
-                    # SYGNAŁ 1: RAM Spike Detection → CPU spike koreluje z RAM spike
-                    if ($ramAnalyzer -and $ramAnalyzer.SpikeDetected) {
-                        $signalBoost += 12  # RAM spike = CPU zaraz wzrośnie
-                        $signalDebug += "RAMSpike+12"
-                    }
-                    if ($ramAnalyzer -and $ramAnalyzer.TrendDetected) {
-                        $signalBoost += 6  # Trend wzrostowy RAM = CPU też rośnie
-                        $signalDebug += "RAMTrend+6"
-                    }
-                    
-                    # SYGNAŁ 2: ProBalance Throttled → ciężkie procesy aktywne = CPU wysoko
-                    if ($proBalance -and $proBalance.ThrottledProcesses.Count -gt 0) {
-                        $throttleBoost = [Math]::Min(15, $proBalance.ThrottledProcesses.Count * 5)
-                        $signalBoost += $throttleBoost
-                        $signalDebug += "Throttle+$throttleBoost($($proBalance.ThrottledProcesses.Count))"
-                    }
-                    
-                    # SYGNAŁ 3: Anomaly Detection → anomalia = CPU utrzyma się wysoko
-                    if (-not [string]::IsNullOrWhiteSpace($anomalyAlert)) {
-                        if ($anomalyAlert -eq "CRYPTO_MINER") {
-                            $signalBoost += 25  # Miner = CPU 100% non-stop
-                            $signalDebug += "Miner+25"
-                        } else {
-                            $signalBoost += 10  # Inna anomalia
-                            $signalDebug += "Anomaly+10"
+                    if ($prophet -and $currentActiveApp -and $prophet.Apps.ContainsKey($currentActiveApp)) {
+                        $appData = $prophet.Apps[$currentActiveApp]
+                        $learnedAvgCPU = if ($appData.AvgCPU -gt 0) { [double]$appData.AvgCPU } else { $cpuToShow }
+                        $learnedMaxCPU = if ($appData.MaxCPU -gt 0) { [double]$appData.MaxCPU } else { $cpuToShow }
+                        $appCategory = $appData.Category
+                        $samples = if ($appData.Samples) { $appData.Samples } else { 0 }
+                        
+                        # ═══ PRAWDZIWA PREDYKCJA: bazuj na WIEDZY, nie na aktualnym CPU ═══
+                        # 1. Jeśli CPU ROŚNIE → cel to learnedMaxCPU (app się rozgrzewa)
+                        # 2. Jeśli CPU SPADA → cel to learnedAvgCPU (app się stabilizuje)
+                        # 3. Jeśli CPU STABILNY → cel to learnedAvgCPU (steady state)
+                        
+                        if ($cpuTrend -gt 2.0) {
+                            # CPU rośnie szybko → przewiduj szczyt na podstawie historii
+                            $trendStrength = [Math]::Min(0.8, $cpuTrend / 8.0)
+                            $prophetPrediction = [int]($cpuToShow * (1 - $trendStrength) + $learnedMaxCPU * $trendStrength)
                         }
-                    }
-                    
-                    # SYGNAŁ 4: ChainPredictor → wie jaka NASTĘPNA app będzie
-                    if ($chainPredictor -and $chainPredictor.PredictionConfidence -gt 0.3 -and $prophet) {
-                        $nextApp = $chainPredictor.CurrentPrediction
-                        if ($nextApp -and $prophet.Apps.ContainsKey($nextApp)) {
-                            $nextAppData = $prophet.Apps[$nextApp]
-                            $nextAvgCPU = if ($nextAppData.AvgCPU) { [int]$nextAppData.AvgCPU } else { 0 }
-                            # Jeśli następna appka jest cięższa niż aktualna → boost up
-                            if ($nextAvgCPU -gt $cpuToShow + 10) {
-                                $chainBoost = [Math]::Min(15, [int](($nextAvgCPU - $cpuToShow) * $chainPredictor.PredictionConfidence * 0.5))
-                                $signalBoost += $chainBoost
-                                $signalDebug += "Chain+$chainBoost($nextApp)"
-                            }
-                            # Jeśli następna jest lżejsza → reduce
-                            elseif ($nextAvgCPU -lt $cpuToShow - 15) {
-                                $chainDrop = [Math]::Max(-10, [int](($nextAvgCPU - $cpuToShow) * $chainPredictor.PredictionConfidence * 0.3))
-                                $signalBoost += $chainDrop
-                                $signalDebug += "Chain$chainDrop($nextApp)"
+                        elseif ($cpuTrend -gt 0.5) {
+                            # CPU rośnie wolno → przewiduj między avg a max
+                            $midTarget = ($learnedAvgCPU + $learnedMaxCPU) / 2
+                            $prophetPrediction = [int]($cpuToShow * 0.5 + $midTarget * 0.5)
+                        }
+                        elseif ($cpuTrend -lt -2.0) {
+                            # CPU spada szybko → przewiduj dół na podstawie avg
+                            $dropTarget = $learnedAvgCPU * 0.7
+                            $trendStrength = [Math]::Min(0.7, [Math]::Abs($cpuTrend) / 8.0)
+                            $prophetPrediction = [int]($cpuToShow * (1 - $trendStrength) + $dropTarget * $trendStrength)
+                        }
+                        else {
+                            # CPU stabilny → przewiduj learnedAvgCPU (steady state)
+                            if ($samples -ge 10) {
+                                $prophetPrediction = [int]($cpuToShow * 0.3 + $learnedAvgCPU * 0.7)
+                            } else {
+                                $prophetPrediction = [int]$cpuToShow  # Za mało danych
                             }
                         }
-                    }
-                    
-                    # SYGNAŁ 5: I/O Boost aktywny → CPU będzie wyższe
-                    if ($Script:IOBoostActive) {
-                        $signalBoost += 8
-                        $signalDebug += "IOBoost+8"
-                    }
-                    
-                    # Zastosuj sygnały do basePrediction
-                    $basePrediction += $signalBoost
-                    $basePrediction = [Math]::Max(2, [Math]::Min(100, $basePrediction))
-                    
-                    # ═══════════════════════════════════════════════════════════════
-                    # PROPHET KNOWLEDGE: Ogranicz/kieruj wiedzą o aplikacji
-                    # ═══════════════════════════════════════════════════════════════
-                    if ($prophet -and $currentActiveApp) {
-                        if ($prophet.Apps.ContainsKey($currentActiveApp)) {
-                            $appData = $prophet.Apps[$currentActiveApp]
-                            $appCategory = $appData.Category
-                            $learnedAvgCPU = if ($appData.AvgCPU -gt 0) { [int]$appData.AvgCPU } else { 0 }
-                            $learnedMaxCPU = if ($appData.MaxCPU -gt 0) { [int]$appData.MaxCPU } else { 0 }
-                            $samples = if ($appData.Samples) { $appData.Samples } else { 0 }
-                            
-                            # Granice na podstawie historii aplikacji
-                            $minBound = [Math]::Max(2, $learnedAvgCPU * 0.15)
-                            $maxBound = [Math]::Min(100, $learnedMaxCPU + 25)
-                            
-                            # Trend-aware prediction z wiedzą Prophet:
-                            if ($cpuTrend -gt 1.0) {
-                                $trendWeight = [Math]::Min(0.6, $cpuTrend / 10.0)
-                                $basePrediction = $basePrediction * (1 - $trendWeight) + $learnedMaxCPU * $trendWeight
-                            }
-                            elseif ($cpuTrend -lt -1.0) {
-                                $trendWeight = [Math]::Min(0.5, [Math]::Abs($cpuTrend) / 10.0)
-                                $basePrediction = $basePrediction * (1 - $trendWeight) + ($learnedAvgCPU * 0.7) * $trendWeight
-                            }
-                            elseif ($samples -ge 10 -and [Math]::Abs($cpuTrend) -le 1.0) {
-                                $revertWeight = 0.15
-                                $basePrediction = $basePrediction * (1 - $revertWeight) + $learnedAvgCPU * $revertWeight
-                            }
-                            
-                            $prophetPrediction = [int][Math]::Max($minBound, [Math]::Min($maxBound, $basePrediction))
-                            $sigInfo = if ($signalDebug.Count -gt 0) { " Sig:$($signalDebug -join ',')" } else { "" }
-                            $prophetDebug = "$currentActiveApp=$appCategory(T:$([Math]::Round($cpuTrend,1)),P:$prophetPrediction,A:$learnedAvgCPU,M:$learnedMaxCPU$sigInfo)"
-                        } else {
-                            $prophetDebug = "$currentActiveApp=Unknown(T:$([Math]::Round($cpuTrend,1)))"
-                            $prophetPrediction = [int][Math]::Max(5, [Math]::Min(95, $basePrediction))
+                        
+                        # Sygnały dodatkowe (RAM spike, I/O, ProBalance, Chain)
+                        $signalBoost = 0
+                        if ($ramAnalyzer -and $ramAnalyzer.SpikeDetected) { $signalBoost += 12 }
+                        if ($ramAnalyzer -and $ramAnalyzer.TrendDetected) { $signalBoost += 6 }
+                        if ($proBalance -and $proBalance.ThrottledProcesses.Count -gt 0) { 
+                            $signalBoost += [Math]::Min(15, $proBalance.ThrottledProcesses.Count * 5) 
                         }
-                    } else {
-                        $prophetDebug = "NoApp-T:$([Math]::Round($cpuTrend,1))"
+                        if ($Script:IOBoostActive) { $signalBoost += 8 }
+                        
+                        # Chain Predictor: następna app jest cięższa?
+                        if ($chainPredictor -and $chainPredictor.PredictionConfidence -gt 0.3) {
+                            $nextApp = $chainPredictor.CurrentPrediction
+                            if ($nextApp -and $prophet.Apps.ContainsKey($nextApp)) {
+                                $nextAvgCPU = [int]$prophet.Apps[$nextApp].AvgCPU
+                                if ($nextAvgCPU -gt $learnedAvgCPU + 15) {
+                                    $signalBoost += [Math]::Min(15, [int](($nextAvgCPU - $learnedAvgCPU) * $chainPredictor.PredictionConfidence * 0.4))
+                                }
+                            }
+                        }
+                        
+                        $prophetPrediction += $signalBoost
+                        $prophetPrediction = [Math]::Max(2, [Math]::Min(100, $prophetPrediction))
+                        $prophetDebug = "$currentActiveApp=$appCategory(T:$([Math]::Round($cpuTrend,1)),P:$prophetPrediction,A:$([int]$learnedAvgCPU),M:$([int]$learnedMaxCPU))"
+                    }
+                    elseif ($prophet -and $currentActiveApp) {
+                        # Nieznana app — fallback na ekstrapolację trendu
+                        $basePrediction = $forecaster.Predict(8)
                         $prophetPrediction = [int][Math]::Max(5, [Math]::Min(95, $basePrediction))
+                        $prophetDebug = "$currentActiveApp=Unknown(T:$([Math]::Round($cpuTrend,1)))"
+                    }
+                    else {
+                        # Brak aktywnej app
+                        $basePrediction = $forecaster.Predict(8)
+                        $prophetPrediction = [int][Math]::Max(5, [Math]::Min(95, $basePrediction))
+                        $prophetDebug = "NoApp-T:$([Math]::Round($cpuTrend,1))"
                     }
                     # Pobierz aktualne TDP/Power
                     $currentPower = if ($currentMetrics.CPUPower -and $currentMetrics.CPUPower -gt 0) {

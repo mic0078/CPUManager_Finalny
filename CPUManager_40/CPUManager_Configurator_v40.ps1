@@ -4673,12 +4673,8 @@ $Script:chkNeuralBrain = New-CheckBox -Parent $gbAdvanced -Text "Neural Brain (W
 $toolTip.SetToolTip($Script:chkNeuralBrain, " Siec neuronowa z wagami aplikacji. Gleboka analiza zachowan procesow i pamiec dlugoterminowa.")
 $Script:chkEnsemble = New-CheckBox -Parent $gbAdvanced -Text "Ensemble (Voting)" -X 15 -Y 58 -Checked ($Script:Engines.Ensemble -eq $true) -Width 250
 $toolTip.SetToolTip($Script:chkEnsemble, " Glosowanie wielu silnikow AI. Najstabilniejsze decyzje kosztem wydajnosci.")
-# v43: Nowe checkboxy dla Bandit, Genetic, Energy
-$Script:chkBandit = New-CheckBox -Parent $gbAdvanced -Text "Bandit (Thompson Sampling)" -X 280 -Y 58 -Checked ($(if ($Script:Engines.Bandit -eq $null) { $true } else { $Script:Engines.Bandit })) -Width 250
-$toolTip.SetToolTip($Script:chkBandit, " Multi-Armed Bandit - adaptacyjny wybor trybu. Balansuje eksploracje i eksploatacje.")
-$Script:chkGenetic = New-CheckBox -Parent $gbAdvanced -Text "Genetic (Evolution)" -X 15 -Y 88 -Checked ($(if ($Script:Engines.Genetic -eq $null) { $true } else { $Script:Engines.Genetic })) -Width 250
-$toolTip.SetToolTip($Script:chkGenetic, " Algorytm genetyczny ewoluuje parametry. Samodoskonalenie progow i wag.")
-$Script:chkEnergy = New-CheckBox -Parent $gbAdvanced -Text "Energy (Efficiency)" -X 280 -Y 88 -Checked ($(if ($Script:Engines.Energy -eq $null) { $true } else { $Script:Engines.Energy })) -Width 250
+# v47: Bandit i Genetic usunięte z GUI — były placebo (duplikaty Brain)
+$Script:chkEnergy = New-CheckBox -Parent $gbAdvanced -Text "Energy (Efficiency)" -X 15 -Y 58 -Checked ($(if ($Script:Engines.Energy -eq $null) { $true } else { $Script:Engines.Energy })) -Width 250
 $toolTip.SetToolTip($Script:chkEnergy, " Tracker efektywnosci energetycznej. Optymalizuje zuzycie energii vs wydajnosc.")
 # #
 #  SYNC v43: AI THRESHOLDS - zsynchronizowane z ENGINE
@@ -4709,7 +4705,7 @@ $toolTip.SetToolTip($btnSaveEngines, "✓ Zapisuje konfiguracje systemów AI. Zm
         AnomalyDetector = $Script:chkAnomalyDetector.Checked; ChainPredictor = $Script:chkChainPredictor.Checked
         LoadPredictor = $Script:chkLoadPredictor.Checked; QLearning = $Script:chkQLearning.Checked
         NeuralBrain = $Script:chkNeuralBrain.Checked; Ensemble = $Script:chkEnsemble.Checked
-        Bandit = $Script:chkBandit.Checked; Genetic = $Script:chkGenetic.Checked; Energy = $Script:chkEnergy.Checked
+        Energy = $Script:chkEnergy.Checked
     }
     
     # Policz włączone silniki
@@ -4751,17 +4747,15 @@ $btnEnableCore = New-Button -Parent $tabSettings -Text "Enable CORE" -X 200 -Y 8
     $Script:chkProphet.Checked = $true; $Script:chkSelfTuner.Checked = $true; $Script:chkAnomalyDetector.Checked = $true
     $Script:chkChainPredictor.Checked = $true; $Script:chkLoadPredictor.Checked = $true
     $Script:chkQLearning.Checked = $true; $Script:chkNeuralBrain.Checked = $false; $Script:chkEnsemble.Checked = $false
-    # v43: Nowe silniki - CORE includes Bandit, Genetic, Energy
-    $Script:chkBandit.Checked = $true; $Script:chkGenetic.Checked = $true; $Script:chkEnergy.Checked = $true
-    [System.Windows.Forms.MessageBox]::Show("✓ Zaznaczono CORE engines (9/11):`n• Prophet, SelfTuner, Anomaly, Chain`n• LoadPred, Q-Learning, Bandit`n• Genetic, Energy`n`n⚠ Kliknij 'SAVE AI ENGINES' aby zapisać!", "Enable CORE", "OK", "Information")
+    $Script:chkEnergy.Checked = $true
+    [System.Windows.Forms.MessageBox]::Show("Zaznaczono CORE engines (7/9):`n- Prophet, SelfTuner, Anomaly, Chain`n- LoadPred, Q-Learning, Energy`n`nKliknij 'SAVE AI ENGINES' aby zapisac!", "Enable CORE", "OK", "Information")
 }
 $btnEnableAll = New-Button -Parent $tabSettings -Text "Enable ALL" -X 320 -Y 810 -Width 100 -Height 40 -BackColor $Script:Colors.Purple -ForeColor $Script:Colors.TextBright -OnClick {
     $Script:chkProphet.Checked = $true; $Script:chkSelfTuner.Checked = $true; $Script:chkAnomalyDetector.Checked = $true
     $Script:chkChainPredictor.Checked = $true; $Script:chkLoadPredictor.Checked = $true
     $Script:chkQLearning.Checked = $true; $Script:chkNeuralBrain.Checked = $true; $Script:chkEnsemble.Checked = $true
-    # v43: Nowe silniki
-    $Script:chkBandit.Checked = $true; $Script:chkGenetic.Checked = $true; $Script:chkEnergy.Checked = $true
-    [System.Windows.Forms.MessageBox]::Show("✓ Zaznaczono WSZYSTKIE engines (11/11)`n`nPełna moc AI!`n`n⚠ Kliknij 'SAVE AI ENGINES' aby zapisać!", "Enable ALL", "OK", "Information")
+    $Script:chkEnergy.Checked = $true
+    [System.Windows.Forms.MessageBox]::Show("Zaznaczono WSZYSTKIE engines (9/9)`n`nPelna moc AI!`n`nKliknij 'SAVE AI ENGINES' aby zapisac!", "Enable ALL", "OK", "Information")
 }
 $btnDisableAll = New-Button -Parent $tabSettings -Text "Disable ALL" -X 430 -Y 810 -Width 100 -Height 40 -BackColor $Script:Colors.Danger -ForeColor $Script:Colors.TextBright -OnClick {
     $result = [System.Windows.Forms.MessageBox]::Show(
@@ -4774,9 +4768,8 @@ $btnDisableAll = New-Button -Parent $tabSettings -Text "Disable ALL" -X 430 -Y 8
         $Script:chkProphet.Checked = $false; $Script:chkSelfTuner.Checked = $false; $Script:chkAnomalyDetector.Checked = $false
         $Script:chkChainPredictor.Checked = $false; $Script:chkLoadPredictor.Checked = $false
         $Script:chkQLearning.Checked = $false; $Script:chkNeuralBrain.Checked = $false; $Script:chkEnsemble.Checked = $false
-        # v43: Nowe silniki
-        $Script:chkBandit.Checked = $false; $Script:chkGenetic.Checked = $false; $Script:chkEnergy.Checked = $false
-        [System.Windows.Forms.MessageBox]::Show("⚠ Odznaczono WSZYSTKIE engines (0/11)`n`nAI będzie działać w trybie podstawowym.`n`n⚠ Kliknij 'SAVE AI ENGINES' aby zapisać!", "Disable ALL", "OK", "Warning")
+        $Script:chkEnergy.Checked = $false
+        [System.Windows.Forms.MessageBox]::Show("Odznaczono WSZYSTKIE engines (0/9)`n`nAI bedzie dzialac w trybie podstawowym.`n`nKliknij 'SAVE AI ENGINES' aby zapisac!", "Disable ALL", "OK", "Warning")
     }
 }
 $gbOptimization = New-GroupBox -Parent $tabSettings -Title "OPTIMIZATION Settings" -X 580 -Y 500 -Width 530 -Height 270
