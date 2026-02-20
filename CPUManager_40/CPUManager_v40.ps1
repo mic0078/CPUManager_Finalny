@@ -426,6 +426,28 @@ function Write-DebugLog {
     }
 }
 
+# ═══════════════════════════════════════════════════════════════
+# RAMCache Debug Log — dedykowany plik logów do C:\Temp\RAMCache-Debug.log
+# ═══════════════════════════════════════════════════════════════
+$Script:RAMCacheLogPath = "C:\Temp\RAMCache-Debug.log"
+function Write-RCLog {
+    param([string]$Message)
+    try {
+        $timestamp = Get-Date -Format "HH:mm:ss.fff"
+        $line = "[$timestamp] $Message"
+        $dir = Split-Path $Script:RAMCacheLogPath -Parent
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        # Rotacja >500KB
+        if (Test-Path $Script:RAMCacheLogPath) {
+            $size = (Get-Item $Script:RAMCacheLogPath -ErrorAction SilentlyContinue).Length
+            if ($size -gt 500KB) {
+                Set-Content -Path $Script:RAMCacheLogPath -Value "[$timestamp] === LOG ROTATED ===" -Encoding UTF8
+            }
+        }
+        Add-Content -Path $Script:RAMCacheLogPath -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {}
+}
+
 function Write-ErrorLog {
     param(
         [string]$Component = "ENGINE",  # ENGINE, CONFIGURATOR, GPU-BOUND, PROPHET, etc.
@@ -15605,67 +15627,355 @@ class DiskWriteCache {
     }
 }
 # ═══════════════════════════════════════════════════════════════════════════════
-# APP RAM CACHE — prawdziwy cache aplikacji w RAM
-# Ładuje EXE+DLL przewidywanych aplikacji do pamięci ZANIM user je uruchomi
-# Automatycznie zwalnia gdy RAM spada poniżej progu
-# Integracja: Prophet (wiedza o apps), ChainPredictor (co następne), AI decision
+# APP RAM CACHE v2 — AI-driven predictive cache z 10 ulepszeniami
+# 1. Time-decay scoring — priorytety wygasają wykładniczo
+# 2. Confidence-based preload — 60%=full, 40-60%=partial, <30%=skip
+# 3. Smart DLL sorting — rozmiar × cold-start impact
+# 4. Battery/thermal awareness — nie drenuj baterii w tle
+# 5. Batch preload — małe porcje bez skoków I/O
+# 6. Depth-2 chain prediction — A→B(full) + B→C(warm)
+# 7. Real memory pressure — commit ratio + page faults, nie % RAM
+# 8. Adaptive aggressiveness — uczy się ile preloadować
+# 9. Recency boost — ostatnio używane nie wylatują
+# 10. Idle learning phase — refleksja i rewizja score'ów
 # ═══════════════════════════════════════════════════════════════════════════════
 class AppRAMCache {
-    [hashtable] $CachedApps         # appName → @{ Files=[]; SizeMB=0; CachedAt=datetime; LastAccess=datetime; HitCount=0 }
-    [hashtable] $AppPaths           # appName → @{ ExePath=""; DLLs=@() }
-    [double] $TotalCachedMB         # Łączny rozmiar cache w MB
-    [double] $MaxCacheMB            # Max dozwolony rozmiar cache
-    [double] $MinFreeRAMPercent     # Min % wolnego RAM — poniżej = eviction
-    [int] $TotalPreloads            # Ile razy załadowano do cache
-    [int] $TotalHits                # Ile razy app była już w cache gdy user ją uruchomił
-    [int] $TotalEvictions           # Ile razy zwolniono z cache
-    [int] $MaxAppsInCache           # Max aplikacji w cache naraz
+    # ── Core state ──
+    [hashtable] $CachedApps          # appName → @{ Files, SizeMB, CachedAt, LastAccess, HitCount, FileCount, PreloadLevel }
+    [hashtable] $AppPaths            # appName → @{ ExePath, Dir }
+    [double] $TotalCachedMB
+    [double] $MaxCacheMB
+    [int] $MaxAppsInCache
     [bool] $Enabled
     [datetime] $LastEvictionCheck
+    [datetime] $LastIdleLearn
+    
+    # ── Stats ──
+    [int] $TotalPreloads
+    [int] $TotalHits
+    [int] $TotalMisses
+    [int] $TotalEvictions
+    [int] $TotalWastedPreloads
+    
+    # ── Adaptive aggressiveness ──
+    [double] $Aggressiveness
+    [double] $AggressivenessMin
+    [double] $AggressivenessMax
+    [double] $RetentionTolerance       # Osobny parametr — jak długo trzymać w cache (0.0=czyść szybko, 1.0=trzymaj zawsze)
+    
+    # ── Batch preload ──
+    [System.Collections.Generic.Queue[hashtable]] $BatchQueue
+    [int] $BatchSizeBytes
+    [datetime] $LastBatchTick
+    
+    # ── Memory pressure + trend (pkt 8: trend-based, nie punktowy) ──
+    [double] $LastCommitRatio
+    [double] $LastAvailableMB
+    [double] $LastAvailablePercent       # Available / Total * 100
+    [int] $LastPageFaultsPerSec
+    [double] $MemoryPressure
+    [System.Collections.Generic.List[double]] $PressureHistory  # ostatnie N odczytów (trend)
+    
+    # ── NEW: Heavy/Light classification (#1) ──
+    [hashtable] $AppClassification    # appName → "Heavy" | "Light"
+    
+    # ── NEW: Working Set Protection (#2) ──
+    [hashtable] $ProtectedApps        # appName → @{ PID, MinWS, StableWS, ProtectedAt }
+    
+    # ── NEW: Heavy Mode (#3) ──
+    [bool] $HeavyMode                 # Globalny tryb stabilności
+    [string] $HeavyModeApp            # Która app włączyła Heavy Mode
+    [datetime] $HeavyModeActivated
+    
+    # ── NEW: Guard Band RAM (#4) ──
+    [double] $GuardBandMB             # Min wolny RAM w MB (dynamiczny)
+    [double] $GuardBandHeavyMB        # Większy bufor gdy heavy app (dynamiczny)
+    [double] $TotalSystemRAM           # Zainstalowany RAM w MB (auto-detected)
+    
+    # ── NEW: Anti-AltTab Protection (#5) ──
+    [hashtable] $AltTabProtection     # appName → @{ ProtectedUntil, WasFullscreen }
+    [string] $LastFullscreenApp
+    [datetime] $LastFocusChange
+    
+    # ── NEW: Negative Learning (#7) ──
+    [hashtable] $NegativeScores       # appName → @{ PreloadCount, HitCount, PenaltyUntil }
+    
+    # ── NEW: Session type (#8) ──
+    [string] $CurrentSession          # "Gaming" | "Work" | "Browsing" | "Mixed"
+    
+    # ── NEW: DisplayName → ProcessName mapping ──
+    [hashtable] $NameMap              # "Google Chrome" → "chrome", "Total Commander" → "TOTALCMD"
     
     AppRAMCache() {
         $this.CachedApps = @{}
         $this.AppPaths = @{}
         $this.TotalCachedMB = 0
-        $this.MaxCacheMB = 512        # Max 512MB na cache (konfigurowalne)
-        $this.MinFreeRAMPercent = 25   # Eviction gdy <25% wolnego RAM
-        $this.MaxAppsInCache = 8      # Max 8 aplikacji naraz
+        $this.MaxAppsInCache = 30
         $this.TotalPreloads = 0
         $this.TotalHits = 0
+        $this.TotalMisses = 0
         $this.TotalEvictions = 0
+        $this.TotalWastedPreloads = 0
         $this.Enabled = $true
         $this.LastEvictionCheck = [datetime]::Now
+        $this.LastIdleLearn = [datetime]::Now
         
-        # Dostosuj MaxCacheMB do dostępnego RAM
+        # Aggressiveness = preload intensity + learning speed (NIE steruje eviction!)
+        $this.Aggressiveness = 0.6
+        $this.AggressivenessMin = 0.3
+        $this.AggressivenessMax = 1.0
+        $this.RetentionTolerance = 1.0
+        
+        # Batch preload
+        $this.BatchQueue = [System.Collections.Generic.Queue[hashtable]]::new()
+        $this.BatchSizeBytes = 32MB
+        $this.LastBatchTick = [datetime]::Now
+        
+        # Memory pressure + trend
+        $this.LastCommitRatio = 0
+        $this.LastAvailableMB = 4096
+        $this.LastAvailablePercent = 80
+        $this.LastPageFaultsPerSec = 0
+        $this.MemoryPressure = 0
+        $this.PressureHistory = [System.Collections.Generic.List[double]]::new()
+        
+        $this.AppClassification = @{}
+        $this.ProtectedApps = @{}
+        $this.HeavyMode = $false
+        $this.HeavyModeApp = ""
+        $this.HeavyModeActivated = [datetime]::MinValue
+        $this.AltTabProtection = @{}
+        $this.LastFullscreenApp = ""
+        $this.LastFocusChange = [datetime]::Now
+        $this.NegativeScores = @{}
+        $this.CurrentSession = "Mixed"
+        $this.NameMap = @{}
+        
+        # ═══ SKALOWANIE DO HARDWARE (pkt 1,6,9 instrukcji) ═══
         try {
             $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-            $totalRAMGB = [Math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
-            # Cache = max 5% total RAM, min 128MB, max 1024MB
-            $this.MaxCacheMB = [Math]::Max(128, [Math]::Min(1024, [int]($totalRAMGB * 1024 * 0.05)))
-        } catch { $this.MaxCacheMB = 256 }
+            $this.TotalSystemRAM = [Math]::Round($os.TotalVisibleMemorySize / 1KB)  # MB
+            $freeRAM = [Math]::Round($os.FreePhysicalMemory / 1KB)                  # MB
+            $totalGB = [Math]::Round($this.TotalSystemRAM / 1024, 1)
+            
+            # Guard Band = % RAM (pkt 1: procent, nie stała)
+            # Mniejszy procent przy większym RAM — bo OS potrzebuje mniej proporcjonalnie
+            if ($totalGB -ge 32) {
+                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.08)     # 8% → 40GB = 3.2GB
+                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.10) # 10% → 40GB = 4GB
+            } elseif ($totalGB -ge 16) {
+                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.10)     # 10%
+                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.14) # 14%
+            } else {
+                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.12)     # 12%
+                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.18) # 18%
+            }
+            
+            # MaxCacheMB = 50% RAM (pkt 1: 40-60% dynamicznie)
+            $this.MaxCacheMB = [int]($this.TotalSystemRAM * 0.50)
+            
+            # Zmierz dostępny RAM od razu (pkt 4: nie opierać się na default)
+            $this.LastAvailableMB = [Math]::Round($freeRAM)
+            
+            # BatchSize skalowany do RAM
+            if ($totalGB -ge 32) { $this.BatchSizeBytes = 64MB }
+            elseif ($totalGB -ge 16) { $this.BatchSizeBytes = 32MB }
+            else { $this.BatchSizeBytes = 16MB }
+            
+        } catch { 
+            $this.TotalSystemRAM = 8192
+            $this.MaxCacheMB = 2048
+            $this.GuardBandMB = 1024
+            $this.GuardBandHeavyMB = 1536
+            $this.LastAvailableMB = 4096
+        }
     }
     
-    # ═══════════════════════════════════════
-    # Załaduj aplikację do RAM cache
-    # Wywoływane przez ChainPredictor/Prophet gdy przewiduje uruchomienie
-    # ═══════════════════════════════════════
-    [bool] PreloadApp([string]$appName, [string]$exePath) {
-        if (-not $this.Enabled) { return $false }
-        if ($this.CachedApps.ContainsKey($appName)) {
-            # Już w cache — odśwież timestamp
-            $this.CachedApps[$appName].LastAccess = [datetime]::Now
-            $this.CachedApps[$appName].HitCount++
-            $this.TotalHits++
-            return $true
-        }
-        if ($this.CachedApps.Count -ge $this.MaxAppsInCache) {
-            $this.EvictLRU()
-        }
-        if ($this.TotalCachedMB -ge $this.MaxCacheMB) {
-            $this.EvictLRU()
+    # ═══════════════════════════════════════════════════════════════
+    # #1 TIME-DECAY PRIORITY — score maleje wykładniczo z czasem
+    # halfLife = 10 min → po 10 min priorytet = 50%, po 20 min = 25%
+    # #9 RECENCY BOOST — <30s = +40, <5min = +20
+    # ═══════════════════════════════════════════════════════════════
+    [double] GetDecayedPriority([string]$appName, [hashtable]$prophetApps, [hashtable]$transitions) {
+        $basePriority = 0.0
+        
+        # #7: Negative learning penalty
+        if ($this.IsNegativePenalty($appName)) { return 0.0 }
+        
+        # Prophet knowledge
+        if ($prophetApps -and $prophetApps.ContainsKey($appName)) {
+            $app = $prophetApps[$appName]
+            if ($app.IsHeavy) { $basePriority += 30 }
+            if ($app.Samples) { $basePriority += [Math]::Min(20, [double]$app.Samples / 5.0) }
+            if ($app.AvgCPU -gt 40) { $basePriority += 10 }
         }
         
-        # Znajdź exe path
+        # Chain transitions
+        if ($transitions) {
+            foreach ($src in $transitions.Keys) {
+                if ($transitions[$src].ContainsKey($appName)) {
+                    $basePriority += [Math]::Min(15, $transitions[$src][$appName].Count * 3)
+                }
+            }
+        }
+        
+        # #10: Cost efficiency bonus
+        $efficiency = $this.GetCostEfficiency($appName, $prophetApps)
+        $basePriority += [Math]::Min(10, $efficiency * 0.5)
+        
+        # Cache hits + time decay
+        if ($this.CachedApps.ContainsKey($appName)) {
+            $entry = $this.CachedApps[$appName]
+            $basePriority += [Math]::Min(25, $entry.HitCount * 5)
+            
+            # #6: Heavy = wolniejszy decay (halfLife 20 min), Light = szybszy (8 min)
+            $appClass = $this.ClassifyApp($appName, $prophetApps)
+            $halfLife = if ($appClass -eq "Heavy") { 20.0 } else { 8.0 }
+            
+            $minutesSinceAccess = ([datetime]::Now - $entry.LastAccess).TotalMinutes
+            $decayFactor = [Math]::Pow(0.5, $minutesSinceAccess / $halfLife)
+            $basePriority *= $decayFactor
+            
+            # #9 Recency boost + #5 Anti-AltTab
+            $secsSinceAccess = ([datetime]::Now - $entry.LastAccess).TotalSeconds
+            if ($secsSinceAccess -lt 30) { $basePriority += 40 }
+            elseif ($secsSinceAccess -lt 300) { $basePriority += 20 }
+            
+            # #5: Anti-AltTab protection bonus
+            if ($this.IsAltTabProtected($appName)) { $basePriority += 50 }
+        }
+        
+        return $basePriority
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # #7 REAL MEMORY PRESSURE — commit ratio + available MB + page faults
+    # Zwraca 0.0 (brak presji) → 1.0 (krytyczna presja)
+    # ═══════════════════════════════════════════════════════════════
+    [double] MeasureMemoryPressure() {
+        try {
+            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $availableMB = [Math]::Round($os.FreePhysicalMemory / 1KB, 0)
+            $totalMB = [Math]::Round($os.TotalVisibleMemorySize / 1KB, 0)
+            $availablePercent = if ($totalMB -gt 0) { ($availableMB / $totalMB) * 100.0 } else { 50.0 }
+            $commitRatio = if ($totalMB -gt 0) { 1.0 - ($availableMB / $totalMB) } else { 0.5 }
+            
+            $pageFaults = 0
+            try {
+                $pf = (Get-Counter '\Memory\Pages/sec' -ErrorAction Stop).CounterSamples[0].CookedValue
+                $pageFaults = [int]$pf
+            } catch { $pageFaults = $this.LastPageFaultsPerSec }
+            
+            $this.LastAvailableMB = $availableMB
+            $this.LastAvailablePercent = $availablePercent
+            $this.LastCommitRatio = $commitRatio
+            $this.LastPageFaultsPerSec = $pageFaults
+            
+            # ═══ PRESSURE SKALOWANE DO % RAM (pkt 1) ═══
+            # Progi zależne od ilości RAM:
+            $totalGB = $this.TotalSystemRAM / 1024.0
+            # Eviction threshold (pkt 1):
+            # >=32GB: eviction gdy Available < 20%
+            # 16-32GB: eviction gdy Available < 25%  
+            # <16GB: eviction gdy Available < 30%
+            $criticalPercent = if ($totalGB -ge 32) { 15 } elseif ($totalGB -ge 16) { 20 } else { 25 }
+            $warnPercent = if ($totalGB -ge 32) { 20 } elseif ($totalGB -ge 16) { 25 } else { 30 }
+            
+            $pressureAvail = 0.0
+            if ($availablePercent -lt $criticalPercent) {
+                $pressureAvail = 0.5 + (($criticalPercent - $availablePercent) / $criticalPercent) * 0.5
+            } elseif ($availablePercent -lt $warnPercent) {
+                $pressureAvail = (($warnPercent - $availablePercent) / ($warnPercent - $criticalPercent)) * 0.5
+            }
+            
+            $pressurePF = [Math]::Min(1.0, $pageFaults / 500.0)
+            
+            $instantPressure = [Math]::Min(1.0, ($pressureAvail * 0.7) + ($pressurePF * 0.3))
+            
+            # ═══ TREND TRACKING (pkt 8: trend-based, nie punktowy) ═══
+            $this.PressureHistory.Add($instantPressure)
+            if ($this.PressureHistory.Count -gt 6) { $this.PressureHistory.RemoveAt(0) }  # Ostatnie 6 odczytów (~90s)
+            
+            # Pressure = średnia z historii (wygładza szumy)
+            $avg = 0.0; foreach ($p in $this.PressureHistory) { $avg += $p }
+            $avg /= [Math]::Max(1, $this.PressureHistory.Count)
+            
+            # Trend: rosnący = ostrzeżenie, malejący = bezpiecznie
+            $trend = 0.0
+            if ($this.PressureHistory.Count -ge 3) {
+                $recent = $this.PressureHistory[$this.PressureHistory.Count - 1]
+                $older = $this.PressureHistory[0]
+                $trend = $recent - $older  # >0 = rośnie, <0 = maleje
+            }
+            
+            # Końcowa pressure = średnia, ale z bonusem za rosnący trend
+            $this.MemoryPressure = [Math]::Min(1.0, $avg + [Math]::Max(0, $trend * 0.3))
+            
+            return $this.MemoryPressure
+        } catch {
+            return $this.MemoryPressure
+        }
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # #2 CONFIDENCE-BASED PRELOAD
+    # #3 SMART DLL SORTING (rozmiar × priorytet rozszerzenia)
+    # #5 BATCH PRELOAD — kolejkuje pliki w porcjach
+    # ═══════════════════════════════════════════════════════════════
+    [bool] PreloadApp([string]$appName, [string]$exePath, [double]$confidence) {
+        if (-not $this.Enabled) { return $false }
+        
+        # #7: Negative learning — skip apps z penalty
+        if ($this.IsNegativePenalty($appName)) { return $false }
+        
+        # #4: Guard band — sprawdź czy jest miejsce
+        if (-not $this.HasGuardBandSpace()) { 
+            $avPct = if ($this.TotalSystemRAM -gt 0) { [int](($this.LastAvailableMB / $this.TotalSystemRAM) * 100) } else { 0 }
+            Write-RCLog "PRELOAD SKIP '$appName': guard band (avail=$([int]$this.LastAvailableMB)MB=$avPct% heavy=$($this.HeavyMode))"
+            return $false 
+        }
+        
+        # #3: Heavy Mode — w gaming session nie preloaduj light apps
+        if ($this.HeavyMode -and $this.CurrentSession -eq "Gaming" -and $appName -ne $this.HeavyModeApp) {
+            # W heavy mode pozwól tylko na heavy apps
+            if ($this.AppClassification.ContainsKey($appName) -and $this.AppClassification[$appName] -eq "Light") {
+                return $false
+            }
+        }
+        
+        # Confidence check
+        $effectiveConfidence = $confidence * $this.Aggressiveness
+        if ($effectiveConfidence -lt 0.25) { return $false }  # Za niska pewność → skip
+        
+        # Już w cache → odśwież
+        if ($this.CachedApps.ContainsKey($appName)) {
+            $this.CachedApps[$appName].LastAccess = [datetime]::Now
+            return $true
+        }
+        
+        # Memory pressure check
+        if ($this.MemoryPressure -gt 0.7) { Write-RCLog "PRELOAD SKIP '$appName': pressure=$([Math]::Round($this.MemoryPressure,2))"; return $false }
+        if ($this.TotalCachedMB -ge $this.MaxCacheMB) {
+            $avPct = if ($this.TotalSystemRAM -gt 0) { ($this.LastAvailableMB / $this.TotalSystemRAM) * 100.0 } else { 0 }
+            if ($avPct -gt 25) {
+                # Wolny RAM >25% → podnieś limit (max 60% total RAM)
+                $this.MaxCacheMB = [Math]::Min([int]($this.TotalSystemRAM * 0.60), $this.MaxCacheMB + 512)
+            } else {
+                Write-RCLog "PRELOAD SKIP '$appName': cache full ($([int]$this.TotalCachedMB)/$($this.MaxCacheMB)MB, avail=$([int]$avPct)%)"
+                return $false
+            }
+        }
+        
+        # Determine preload level based on confidence (#2)
+        $preloadLevel = "full"     # ≥60%: exe + top DLL + configs
+        if ($effectiveConfidence -lt 0.6) {
+            $preloadLevel = "partial"  # 40-60%: exe + top 5 DLL
+        }
+        if ($effectiveConfidence -lt 0.4) {
+            $preloadLevel = "warm"     # 25-40%: exe only
+        }
+        
+        # Find exe path
         $targetPath = $exePath
         if ([string]::IsNullOrWhiteSpace($targetPath)) {
             if ($this.AppPaths.ContainsKey($appName)) {
@@ -15677,291 +15987,1153 @@ class AppRAMCache {
                 } catch {}
             }
         }
-        if ([string]::IsNullOrWhiteSpace($targetPath) -or -not (Test-Path $targetPath)) { return $false }
-        
-        # Załaduj do RAM w tle
-        $appDir = [System.IO.Path]::GetDirectoryName($targetPath)
-        $loadedFiles = [System.Collections.Generic.List[object]]::new()
-        $totalSize = 0
-        
-        try {
-            # 1. Załaduj główny EXE do pamięci
-            if (Test-Path $targetPath) {
-                $fileSize = (Get-Item $targetPath).Length
-                if ($fileSize -lt 200MB) {  # Max 200MB per plik
-                    $stream = [System.IO.File]::Open($targetPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                    $loadedFiles.Add(@{ Path = $targetPath; Stream = $stream; SizeBytes = $fileSize })
-                    $totalSize += $fileSize
-                }
-            }
-            
-            # 2. Załaduj DLL z tego samego katalogu (top 15 by size)
-            $dlls = Get-ChildItem -Path $appDir -Filter "*.dll" -ErrorAction SilentlyContinue |
-                Sort-Object Length -Descending | Select-Object -First 15
-            foreach ($dll in $dlls) {
-                if (($totalSize + $dll.Length) / 1MB -gt ($this.MaxCacheMB - $this.TotalCachedMB)) { break }
-                if ($dll.Length -gt 100MB) { continue }  # Skip gigantic DLLs
-                try {
-                    $stream = [System.IO.File]::Open($dll.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                    $loadedFiles.Add(@{ Path = $dll.FullName; Stream = $stream; SizeBytes = $dll.Length })
-                    $totalSize += $dll.Length
-                } catch { continue }
-            }
-            
-            # 3. Załaduj config/data files (.json, .xml, .ini — małe ale często czytane)
-            $configs = Get-ChildItem -Path $appDir -Include "*.json","*.xml","*.ini","*.cfg" -ErrorAction SilentlyContinue |
-                Where-Object { $_.Length -lt 1MB } | Select-Object -First 5
-            foreach ($cfg in $configs) {
-                try {
-                    $stream = [System.IO.File]::Open($cfg.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                    $loadedFiles.Add(@{ Path = $cfg.FullName; Stream = $stream; SizeBytes = $cfg.Length })
-                    $totalSize += $cfg.Length
-                } catch { continue }
-            }
-            
-            $sizeMB = [Math]::Round($totalSize / 1MB, 1)
-            $this.CachedApps[$appName] = @{
-                Files = $loadedFiles
-                SizeMB = $sizeMB
-                CachedAt = [datetime]::Now
-                LastAccess = [datetime]::Now
-                HitCount = 0
-                FileCount = $loadedFiles.Count
-            }
-            $this.AppPaths[$appName] = @{ ExePath = $targetPath; Dir = $appDir }
-            $this.TotalCachedMB += $sizeMB
-            $this.TotalPreloads++
-            return $true
-        } catch {
-            # Cleanup on failure
-            foreach ($f in $loadedFiles) {
-                try { $f.Stream.Dispose() } catch {}
-            }
+        if ([string]::IsNullOrWhiteSpace($targetPath) -or -not (Test-Path $targetPath)) {
+            Write-RCLog "PRELOAD SKIP '$appName': no valid path (exePath='$exePath', inAppPaths=$($this.AppPaths.ContainsKey($appName)))"
             return $false
         }
+        
+        $appDir = [System.IO.Path]::GetDirectoryName($targetPath)
+        
+        # Zbierz listę plików do załadowania
+        $filesToLoad = [System.Collections.Generic.List[hashtable]]::new()
+        
+        # 1. Główny EXE (zawsze)
+        try {
+            $exeInfo = Get-Item $targetPath -ErrorAction Stop
+            if ($exeInfo.Length -lt 200MB) {
+                $filesToLoad.Add(@{ Path = $targetPath; Size = $exeInfo.Length; Type = "exe" })
+            }
+        } catch {}
+        
+        # 2. DLL/Modules — użyj LEARNED FILES jeśli dostępne, inaczej skanuj katalog
+        $usedLearned = $false
+        if ($preloadLevel -ne "warm") {
+            $maxFiles = if ($preloadLevel -eq "full") { 20 } else { 8 }
+            
+            # PRIORYTET 1: Learned files z profilu (rzeczywiste moduły procesu)
+            if ($this.AppPaths.ContainsKey($appName) -and $this.AppPaths[$appName].LearnedFiles -and $this.AppPaths[$appName].LearnedFiles.Count -gt 0) {
+                $learnedFiles = $this.AppPaths[$appName].LearnedFiles
+                $count = 0
+                foreach ($lf in $learnedFiles) {
+                    if ($count -ge $maxFiles) { break }
+                    if ($lf.Path -eq $targetPath) { continue }  # Skip exe (już dodany)
+                    if (-not (Test-Path $lf.Path -ErrorAction SilentlyContinue)) { continue }  # Plik usunięty
+                    $budgetLeft = ($this.MaxCacheMB - $this.TotalCachedMB) * 1MB
+                    $currentBatch = 0; foreach ($f in $filesToLoad) { $currentBatch += $f.Size }
+                    if (($currentBatch + $lf.Size) -gt $budgetLeft) { break }
+                    $filesToLoad.Add(@{ Path = $lf.Path; Size = $lf.Size; Type = "learned" })
+                    $count++
+                }
+                $usedLearned = ($count -gt 0)
+            }
+            
+            # FALLBACK: Skanuj katalog jeśli brak learned files
+            if (-not $usedLearned) {
+                try {
+                    $dlls = Get-ChildItem -Path $appDir -Filter "*.dll" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Length -gt 10KB -and $_.Length -lt 100MB }
+                    $scoredDlls = foreach ($dll in $dlls) {
+                        $weight = 1.0
+                        $name = $dll.Name.ToLower()
+                        if ($name -match 'runtime|core|clr|jit|v8|electron|cef|qt5core|libcef') { $weight = 3.0 }
+                        elseif ($name -match 'framework|system\.|microsoft\.|wpf|winforms|gtk|sdl') { $weight = 2.0 }
+                        elseif ($name -match 'd3d|vulkan|opengl|dxgi|nvapi|cuda|opencl') { $weight = 2.5 }
+                        $sizeScore = [Math]::Log10([Math]::Max(1, $dll.Length / 1KB))
+                        @{ File = $dll; Score = $weight * $sizeScore }
+                    }
+                    $sorted = $scoredDlls | Sort-Object { $_.Score } -Descending | Select-Object -First $maxFiles
+                    foreach ($item in $sorted) {
+                        $budgetLeft = ($this.MaxCacheMB - $this.TotalCachedMB) * 1MB
+                        $currentBatch = 0; foreach ($f in $filesToLoad) { $currentBatch += $f.Size }
+                        if (($currentBatch + $item.File.Length) -gt $budgetLeft) { break }
+                        $filesToLoad.Add(@{ Path = $item.File.FullName; Size = $item.File.Length; Type = "dll" })
+                    }
+                } catch {}
+            }
+        }
+        
+        # 3. Config files (tylko full preload)
+        if ($preloadLevel -eq "full") {
+            try {
+                $configs = Get-ChildItem -Path $appDir -Include "*.json","*.xml","*.ini","*.cfg" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Length -lt 1MB } | Select-Object -First 5
+                foreach ($cfg in $configs) {
+                    $filesToLoad.Add(@{ Path = $cfg.FullName; Size = $cfg.Length; Type = "cfg" })
+                }
+            } catch {}
+        }
+        
+        if ($filesToLoad.Count -eq 0) { return $false }
+        
+        # Oblicz total size
+        $totalSize = 0; foreach ($f in $filesToLoad) { $totalSize += $f.Size }
+        $sizeMB = [Math]::Round($totalSize / 1MB, 1)
+        
+        # Utwórz cache entry (pliki będą ładowane w batchach)
+        $this.CachedApps[$appName] = @{
+            Files = [System.Collections.Generic.List[object]]::new()
+            SizeMB = $sizeMB
+            CachedAt = [datetime]::Now
+            LastAccess = [datetime]::Now
+            HitCount = 0
+            FileCount = $filesToLoad.Count
+            PreloadLevel = $preloadLevel
+            LoadComplete = $false
+            FilesLoaded = 0
+        }
+        $this.AppPaths[$appName] = @{ ExePath = $targetPath; Dir = $appDir }
+        $this.TotalCachedMB += $sizeMB
+        $this.TotalPreloads++
+        $this.RecordPreloadAttempt($appName)
+        $usedType = if ($usedLearned) { "LEARNED" } else { "SCAN" }
+        Write-RCLog "PRELOAD '$appName' [$preloadLevel/$usedType]: $($filesToLoad.Count) files ($sizeMB MB) conf=$([Math]::Round($confidence,2))"
+        
+        # BATCH PRELOAD (#5): kolejkuj pliki w porcjach zamiast ładować naraz
+        foreach ($fileInfo in $filesToLoad) {
+            $this.BatchQueue.Enqueue(@{
+                AppName = $appName
+                Path = $fileInfo.Path
+                Size = $fileInfo.Size
+                Type = $fileInfo.Type
+            })
+        }
+        
+        return $true
     }
     
-    # ═══════════════════════════════════════
-    # Sprawdź czy app jest w cache (hit/miss)
-    # ═══════════════════════════════════════
+    # Backwards-compatible overload (confidence=1.0)
+    [bool] PreloadApp([string]$appName, [string]$exePath) {
+        return $this.PreloadApp($appName, $exePath, 1.0)
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # #5 BATCH TICK — ładuj pliki w małych porcjach (4MB/tick)
+    # Wywoływany co iterację main loop
+    # ═══════════════════════════════════════════════════════════════
+    [int] BatchTick() {
+        if ($this.BatchQueue.Count -eq 0) { return 0 }
+        $now = [datetime]::Now
+        if (($now - $this.LastBatchTick).TotalMilliseconds -lt 500) { return 0 }
+        $this.LastBatchTick = $now
+        
+        $loaded = 0
+        $bytesThisTick = 0
+        
+        while ($this.BatchQueue.Count -gt 0 -and $bytesThisTick -lt $this.BatchSizeBytes) {
+            $item = $this.BatchQueue.Dequeue()
+            $appName = $item.AppName
+            
+            if (-not $this.CachedApps.ContainsKey($appName)) { continue }
+            
+            try {
+                if (-not (Test-Path $item.Path)) { continue }
+                $fileSize = $item.Size
+                
+                # Pliki <50MB → ReadAllBytes (trzyma w managed heap = pewne w RAM)
+                # Pliki ≥50MB → MemoryMappedFile + sequential read (ładuje do file cache)
+                if ($fileSize -lt 50MB) {
+                    $bytes = [System.IO.File]::ReadAllBytes($item.Path)
+                    $this.CachedApps[$appName].Files.Add(@{ 
+                        Path = $item.Path; Data = $bytes; SizeBytes = $fileSize; Type = $item.Type 
+                    })
+                } else {
+                    # Duże pliki: memory-mapped + sekwencyjny odczyt wymusza załadowanie stron
+                    $mmf = [System.IO.MemoryMappedFiles.MemoryMappedFile]::CreateFromFile(
+                        $item.Path, [System.IO.FileMode]::Open, $null, 0, 
+                        [System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read)
+                    $accessor = $mmf.CreateViewAccessor(0, $fileSize, 
+                        [System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read)
+                    # Odczytaj co 4KB żeby wymusić załadowanie wszystkich stron do RAM
+                    $dummyByte = [byte]0
+                    for ($offset = 0; $offset -lt $fileSize; $offset += 4096) {
+                        $dummyByte = $accessor.ReadByte($offset)
+                    }
+                    $this.CachedApps[$appName].Files.Add(@{ 
+                        Path = $item.Path; MMF = $mmf; Accessor = $accessor
+                        SizeBytes = $fileSize; Type = $item.Type 
+                    })
+                }
+                
+                $this.CachedApps[$appName].FilesLoaded++
+                $bytesThisTick += $fileSize
+                $loaded++
+            } catch { continue }
+        }
+        
+        # Oznacz completed apps
+        foreach ($appName in @($this.CachedApps.Keys)) {
+            $entry = $this.CachedApps[$appName]
+            if (-not $entry.LoadComplete -and $entry.FilesLoaded -ge $entry.FileCount) {
+                $entry.LoadComplete = $true
+            }
+        }
+        
+        return $loaded
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # HIT/MISS tracking
+    # ═══════════════════════════════════════════════════════════════
     [bool] IsAppCached([string]$appName) {
-        if ($this.CachedApps.ContainsKey($appName)) {
-            $this.CachedApps[$appName].LastAccess = [datetime]::Now
-            $this.CachedApps[$appName].HitCount++
+        # Ignoruj Desktop i procesy ENGINE — nie licz jako hit/miss
+        if ($appName -eq "Desktop" -or $appName -match '^(pwsh|powershell|conhost|WindowsTerminal)$') { return $false }
+        $resolved = $this.ResolveAppName($appName)
+        if ($resolved -match '^(pwsh|powershell|conhost|WindowsTerminal)$') { return $false }
+        if ($this.CachedApps.ContainsKey($resolved)) {
+            $this.CachedApps[$resolved].LastAccess = [datetime]::Now
+            $this.CachedApps[$resolved].HitCount++
             $this.TotalHits++
+            $this.AdjustAggressiveness($true)
+            $this.RecordPreloadHit($resolved)
+            Write-RCLog "HIT '$appName' → resolved='$resolved' (hitCount=$($this.CachedApps[$resolved].HitCount), totalHits=$($this.TotalHits))"
             return $true
         }
+        $this.TotalMisses++
+        Write-RCLog "MISS '$appName' → resolved='$resolved' (totalMisses=$($this.TotalMisses), cached=[$(@($this.CachedApps.Keys) -join ',')])"
         return $false
     }
     
-    # ═══════════════════════════════════════
-    # Eviction: zwolnij najrzadziej używaną app
-    # ═══════════════════════════════════════
-    [void] EvictLRU() {
-        if ($this.CachedApps.Count -eq 0) { return }
-        $oldest = $null
-        $oldestTime = [datetime]::MaxValue
-        foreach ($appName in @($this.CachedApps.Keys)) {
-            $entry = $this.CachedApps[$appName]
-            if ($entry.LastAccess -lt $oldestTime) {
-                $oldestTime = $entry.LastAccess
-                $oldest = $appName
-            }
-        }
-        if ($oldest) { $this.EvictApp($oldest) }
-    }
-    
-    # ═══════════════════════════════════════
-    # Evict konkretnej app
-    # ═══════════════════════════════════════
-    [void] EvictApp([string]$appName) {
-        if (-not $this.CachedApps.ContainsKey($appName)) { return }
+    # ═══════════════════════════════════════════════════════════════
+    # EVICTION — po decayed priority (nie LRU)
+    # ═══════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
+    # EVICTION SCORING (pkt 3,7 instrukcji)
+    # Score = (HitWeight × hitCount) + (RecentWeight × recency) + (HeavyBonus) - (SizePenalty)
+    # Wyższy score = ważniejszy = evictuj OSTATNI
+    # ═══════════════════════════════════════════════════════════════
+    [double] GetEvictionScore([string]$appName, [hashtable]$prophetApps) {
+        if (-not $this.CachedApps.ContainsKey($appName)) { return 0.0 }
         $entry = $this.CachedApps[$appName]
-        # Zamknij wszystkie otwarte streamy
-        foreach ($f in $entry.Files) {
-            try { $f.Stream.Dispose() } catch {}
-        }
-        $this.TotalCachedMB -= $entry.SizeMB
-        if ($this.TotalCachedMB -lt 0) { $this.TotalCachedMB = 0 }
-        $this.CachedApps.Remove($appName)
-        $this.TotalEvictions++
-    }
-    
-    # ═══════════════════════════════════════
-    # Tick: sprawdź RAM i evictuj jeśli za mało
-    # Wywoływany co ~10 iteracji main loop
-    # ═══════════════════════════════════════
-    [void] Tick() {
-        if (-not $this.Enabled -or $this.CachedApps.Count -eq 0) { return }
-        $now = [datetime]::Now
-        if (($now - $this.LastEvictionCheck).TotalSeconds -lt 20) { return }
-        $this.LastEvictionCheck = $now
+        $score = 0.0
         
-        try {
-            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-            $freeRAMPercent = [Math]::Round(($os.FreePhysicalMemory / $os.TotalVisibleMemorySize) * 100, 1)
-            
-            # RAM za niski → eviction najstarszych
-            while ($freeRAMPercent -lt $this.MinFreeRAMPercent -and $this.CachedApps.Count -gt 0) {
-                $this.EvictLRU()
-                # Recalculate
-                $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-                $freeRAMPercent = [Math]::Round(($os.FreePhysicalMemory / $os.TotalVisibleMemorySize) * 100, 1)
-            }
-            
-            # Evictuj apps nie używane >10 minut
-            foreach ($appName in @($this.CachedApps.Keys)) {
-                $entry = $this.CachedApps[$appName]
-                if (($now - $entry.LastAccess).TotalMinutes -gt 10) {
-                    # Sprawdź czy app jeszcze działa
-                    $running = Get-Process -Name $appName -ErrorAction SilentlyContinue
-                    if (-not $running) {
-                        $this.EvictApp($appName)
-                    }
-                }
-            }
-        } catch {}
+        # Hit weight — każdy hit = +10 punktów (pkt 3: ochrona hitCount>3)
+        $score += $entry.HitCount * 10.0
+        
+        # Recency — ile minut od ostatniego dostępu
+        $minutesSinceAccess = ([datetime]::Now - $entry.LastAccess).TotalMinutes
+        if ($minutesSinceAccess -lt 2) { $score += 30 }
+        elseif ($minutesSinceAccess -lt 5) { $score += 20 }
+        elseif ($minutesSinceAccess -lt 15) { $score += 10 }
+        elseif ($minutesSinceAccess -lt 30) { $score += 5 }
+        # >30 min = 0 bonus
+        
+        # Heavy app bonus (pkt 7: wyższy retention weight)
+        $class = if ($this.AppClassification.ContainsKey($appName)) { $this.AppClassification[$appName] } else { "Light" }
+        if ($class -eq "Heavy") { $score += 25 }
+        
+        # Running process bonus — nigdy nie evictuj running
+        $running = Get-Process -Name $appName -ErrorAction SilentlyContinue
+        if ($running) { $score += 1000 }
+        
+        # AltTab protected bonus
+        if ($this.IsAltTabProtected($appName)) { $score += 100 }
+        
+        # Size penalty — większe pliki = droższe w ponownym załadowaniu (mały bonus za duże)
+        if ($entry.SizeMB -gt 100) { $score += 5 }  # Duże = drogie do reload
+        
+        return $score
     }
     
-    # ═══════════════════════════════════════
-    # Status
-    # ═══════════════════════════════════════
-    [string] GetStatus() {
-        $apps = @($this.CachedApps.Keys) -join ","
-        return "RAMCache:$([Math]::Round($this.TotalCachedMB,0))MB/$($this.MaxCacheMB)MB Apps:$($this.CachedApps.Count) Hits:$($this.TotalHits) Preloads:$($this.TotalPreloads)"
-    }
-    
-    # ═══════════════════════════════════════
-    # AI PRIORITY: oblicz priorytet cache per app
-    # Im wyższy score → dłużej w cache, wcześniej preloaded
-    # ═══════════════════════════════════════
-    [int] GetAppPriority([string]$appName, [hashtable]$prophetApps, [hashtable]$transitions) {
-        $priority = 0
-        # 1. Prophet: czy app jest heavy? (+30)
-        if ($prophetApps -and $prophetApps.ContainsKey($appName)) {
-            $app = $prophetApps[$appName]
-            if ($app.IsHeavy) { $priority += 30 }
-            # Częstość użycia (+1 per sample, max 20)
-            if ($app.Samples) { $priority += [Math]::Min(20, [int]($app.Samples / 5)) }
-            # Wysokie avg CPU = potrzebuje szybkiego startu (+10)
-            if ($app.AvgCPU -gt 40) { $priority += 10 }
-        }
-        # 2. ChainPredictor: ile razy ta app jest celem przejść (+5 per transition)
-        if ($transitions) {
-            foreach ($src in $transitions.Keys) {
-                if ($transitions[$src].ContainsKey($appName)) {
-                    $priority += [Math]::Min(15, $transitions[$src][$appName].Count * 3)
-                }
-            }
-        }
-        # 3. Czy jest w cache i ma hits? (+hit_count * 5)
-        if ($this.CachedApps.ContainsKey($appName)) {
-            $priority += [Math]::Min(25, $this.CachedApps[$appName].HitCount * 5)
-        }
-        return $priority
-    }
-    
-    # ═══════════════════════════════════════
-    # AI EVICTION: evictuj app z NAJNIŻSZYM priorytetem (nie LRU)
-    # ═══════════════════════════════════════
-    [void] EvictLowestPriority([hashtable]$prophetApps, [hashtable]$transitions) {
+    [void] EvictLowest([hashtable]$prophetApps, [hashtable]$transitions) {
         if ($this.CachedApps.Count -eq 0) { return }
         $lowestApp = $null
-        $lowestPrio = [int]::MaxValue
+        $lowestScore = [double]::MaxValue
         foreach ($appName in @($this.CachedApps.Keys)) {
-            # Nie evictuj app która jest aktualnie uruchomiona
-            $running = Get-Process -Name $appName -ErrorAction SilentlyContinue
-            if ($running) { continue }
-            $prio = $this.GetAppPriority($appName, $prophetApps, $transitions)
-            if ($prio -lt $lowestPrio) {
-                $lowestPrio = $prio
+            $score = $this.GetEvictionScore($appName, $prophetApps)
+            if ($score -lt 1000 -and $score -lt $lowestScore) {  # <1000 = nie running
+                $lowestScore = $score
                 $lowestApp = $appName
             }
         }
-        if ($lowestApp) { $this.EvictApp($lowestApp) }
+        if ($lowestApp) { 
+            Write-RCLog "EVICT-SCORE '$lowestApp': score=$([Math]::Round($lowestScore,1)) hits=$($this.CachedApps[$lowestApp].HitCount) free=$([int]$this.LastAvailableMB)MB"
+            $this.EvictApp($lowestApp) 
+        }
     }
     
-    # ═══════════════════════════════════════
-    # PROACTIVE IDLE CACHE: gdy system jest idle, preloaduj top apps
-    # Wywoływane gdy CPU < 15% i user nieaktywny
-    # ═══════════════════════════════════════
-    [void] ProactiveCacheIdle([hashtable]$prophetApps, [hashtable]$transitions, [hashtable]$appPaths) {
-        if (-not $this.Enabled -or $this.CachedApps.Count -ge $this.MaxAppsInCache) { return }
-        if ($this.TotalCachedMB -ge $this.MaxCacheMB * 0.8) { return }  # Max 80% zapełnienia
+    [void] EvictApp([string]$appName) {
+        if (-not $this.CachedApps.ContainsKey($appName)) { return }
+        $entry = $this.CachedApps[$appName]
+        # Sprawdź czy to wasted preload (0 hits)
+        if ($entry.HitCount -eq 0) {
+            $this.TotalWastedPreloads++
+            # NIE zmieniamy Aggressiveness przy eviction — to osobna metryka
+        }
+        foreach ($f in $entry.Files) {
+            try { 
+                if ($f.ContainsKey('Accessor') -and $f.Accessor) { $f.Accessor.Dispose() }
+                if ($f.ContainsKey('MMF') -and $f.MMF) { $f.MMF.Dispose() }
+                if ($f.ContainsKey('Stream') -and $f.Stream) { $f.Stream.Dispose() }
+                if ($f.ContainsKey('Data')) { $f.Data = $null }
+            } catch {}
+        }
+        $this.TotalCachedMB -= $entry.SizeMB
+        if ($this.TotalCachedMB -lt 0) { $this.TotalCachedMB = 0 }
+        # Usuń pending batch items dla tej app
+        $remaining = [System.Collections.Generic.Queue[hashtable]]::new()
+        while ($this.BatchQueue.Count -gt 0) {
+            $item = $this.BatchQueue.Dequeue()
+            if ($item.AppName -ne $appName) { $remaining.Enqueue($item) }
+        }
+        $this.BatchQueue = $remaining
+        $this.CachedApps.Remove($appName)
+        $this.TotalEvictions++
+        Write-RCLog "EVICT '$appName' (hits=$($entry.HitCount), wasted=$($entry.HitCount -eq 0), totalEvictions=$($this.TotalEvictions))"
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # #8 ADAPTIVE AGGRESSIVENESS — uczy się ile preloadować
+    # ═══════════════════════════════════════════════════════════════
+    [void] AdjustAggressiveness([bool]$wasHit) {
+        if ($wasHit) {
+            # Hit → zwiększ agresję o 5%
+            $this.Aggressiveness = [Math]::Min($this.AggressivenessMax, $this.Aggressiveness + 0.05)
+        } else {
+            # Waste → zmniejsz agresję o 8% (kara większa niż nagroda)
+            $this.Aggressiveness = [Math]::Max($this.AggressivenessMin, $this.Aggressiveness - 0.08)
+        }
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # #4 PROACTIVE IDLE CACHE z battery/thermal awareness
+    # #6 DEPTH-2 CHAIN PREDICTION (A→B full, B→C warm)
+    # ═══════════════════════════════════════════════════════════════
+    [void] ProactiveCacheIdle([hashtable]$prophetApps, [hashtable]$transitions, [hashtable]$appPaths, [double]$cpuTemp, [bool]$onBattery, [string]$currentMode) {
+        if (-not $this.Enabled) { return }
+        if ($this.TotalCachedMB -ge $this.MaxCacheMB * 0.8) { return }
+        if ($this.MemoryPressure -gt 0.5) { return }
         
-        # Zbierz kandydatów z Prophet (znane heavy apps)
+        # #4: Battery/thermal/mode awareness
+        if ($onBattery) { return }                         # Na baterii → nie preloaduj w idle
+        if ($cpuTemp -gt 70) { return }                    # CPU gorący → pauza
+        if ($currentMode -eq "Turbo") { return }           # Dopiero po boost → pauza
+        
+        # Zbierz kandydatów z Prophet
         $candidates = @{}
         if ($prophetApps) {
             foreach ($appName in $prophetApps.Keys) {
-                if ($this.CachedApps.ContainsKey($appName)) { continue }  # Już cached
-                $prio = $this.GetAppPriority($appName, $prophetApps, $transitions)
-                if ($prio -ge 15) {  # Min próg priority
+                if ($this.CachedApps.ContainsKey($appName)) { continue }
+                $prio = $this.GetDecayedPriority($appName, $prophetApps, $transitions)
+                if ($prio -ge 10) {
                     $candidates[$appName] = $prio
                 }
             }
         }
         if ($candidates.Count -eq 0) { return }
         
-        # Załaduj top 2 kandydatów po priorytecie
-        $sorted = $candidates.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 2
+        # Preload top kandydatów (ograniczony przez aggressiveness)
+        $maxToPreload = [Math]::Max(1, [int]($this.Aggressiveness * 3))  # 0.3→1, 0.6→2, 1.0→3
+        $sorted = $candidates.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First $maxToPreload
+        
         foreach ($entry in $sorted) {
-            $appName = $entry.Name
+            $appName = $this.ResolveAppName($entry.Name)
             $exePath = ""
-            if ($appPaths -and $appPaths.ContainsKey($appName)) {
-                $exePath = $appPaths[$appName]
-            }
-            $this.PreloadApp($appName, $exePath) | Out-Null
+            if ($this.AppPaths.ContainsKey($appName)) { $exePath = $this.AppPaths[$appName].ExePath }
+            elseif ($appPaths -and $appPaths.ContainsKey($entry.Name)) { $exePath = $appPaths[$entry.Name] }
+            $conf = [Math]::Min(1.0, $entry.Value / 60.0)
+            $this.PreloadApp($appName, $exePath, $conf) | Out-Null
         }
     }
     
-    # ═══════════════════════════════════════
-    # AI TICK: ulepszona eviction z priorytetami
-    # ═══════════════════════════════════════
-    [void] AITick([hashtable]$prophetApps, [hashtable]$transitions) {
-        if (-not $this.Enabled -or $this.CachedApps.Count -eq 0) { return }
-        $now = [datetime]::Now
-        if (($now - $this.LastEvictionCheck).TotalSeconds -lt 20) { return }
-        $this.LastEvictionCheck = $now
+    # ═══════════════════════════════════════════════════════════════
+    # #6 DEPTH-2 CHAIN PRELOAD — wywołaj gdy ChainPredictor ma prediction
+    # B = pełny preload, C = warm only
+    # ═══════════════════════════════════════════════════════════════
+    [void] ChainPreload([string]$predictedB, [double]$confB, [hashtable]$transitions, [hashtable]$appPaths) {
+        if (-not $this.Enabled -or $this.MemoryPressure -gt 0.6) { return }
         
-        try {
-            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-            $freeRAMPercent = [Math]::Round(($os.FreePhysicalMemory / $os.TotalVisibleMemorySize) * 100, 1)
-            
-            # RAM za niski → eviction po PRIORYTECIE (nie LRU)
-            while ($freeRAMPercent -lt $this.MinFreeRAMPercent -and $this.CachedApps.Count -gt 0) {
-                $this.EvictLowestPriority($prophetApps, $transitions)
-                $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-                $freeRAMPercent = [Math]::Round(($os.FreePhysicalMemory / $os.TotalVisibleMemorySize) * 100, 1)
+        $resolvedB = $this.ResolveAppName($predictedB)
+        if (-not [string]::IsNullOrWhiteSpace($resolvedB) -and $confB -ge 0.3) {
+            if (-not $this.CachedApps.ContainsKey($resolvedB)) {
+                $exeB = ""
+                if ($this.AppPaths.ContainsKey($resolvedB)) { $exeB = $this.AppPaths[$resolvedB].ExePath }
+                elseif ($appPaths -and $appPaths.ContainsKey($predictedB)) { $exeB = $appPaths[$predictedB] }
+                $this.PreloadApp($resolvedB, $exeB, $confB) | Out-Null
             }
             
-            # Evictuj apps nie używane >10 min I nie running I niski priorytet
-            foreach ($appName in @($this.CachedApps.Keys)) {
-                $entry = $this.CachedApps[$appName]
-                if (($now - $entry.LastAccess).TotalMinutes -gt 10) {
-                    $running = Get-Process -Name $appName -ErrorAction SilentlyContinue
-                    if (-not $running) {
-                        $prio = $this.GetAppPriority($appName, $prophetApps, $transitions)
-                        if ($prio -lt 30) {
-                            $this.EvictApp($appName)
-                        }
-                        # High priority apps zostają dłużej (do 30 min)
-                        elseif (($now - $entry.LastAccess).TotalMinutes -gt 30) {
-                            $this.EvictApp($appName)
-                        }
+            if ($transitions -and $transitions.ContainsKey($predictedB)) {
+                $bestC = ""; $bestCount = 0; $totalTrans = 0
+                foreach ($c in $transitions[$predictedB].Keys) {
+                    $count = $transitions[$predictedB][$c].Count
+                    $totalTrans += $count
+                    if ($count -gt $bestCount) { $bestCount = $count; $bestC = $c }
+                }
+                if ($bestC -and $totalTrans -gt 0) {
+                    $resolvedC = $this.ResolveAppName($bestC)
+                    $confC = [Math]::Round($bestCount / $totalTrans, 2) * $confB * 0.5
+                    if ($confC -ge 0.2 -and -not $this.CachedApps.ContainsKey($resolvedC)) {
+                        $exeC = ""
+                        if ($this.AppPaths.ContainsKey($resolvedC)) { $exeC = $this.AppPaths[$resolvedC].ExePath }
+                        elseif ($appPaths -and $appPaths.ContainsKey($bestC)) { $exeC = $appPaths[$bestC] }
+                        $this.PreloadApp($resolvedC, $exeC, $confC) | Out-Null
                     }
                 }
+            }
+        }
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # AI TICK — główna pętla eviction/pressure
+    # ═══════════════════════════════════════════════════════════════
+    [void] AITick([hashtable]$prophetApps, [hashtable]$transitions) {
+        if (-not $this.Enabled) { return }
+        $now = [datetime]::Now
+        if (($now - $this.LastEvictionCheck).TotalSeconds -lt 15) { return }
+        $this.LastEvictionCheck = $now
+        
+        # Batch tick
+        $this.BatchTick() | Out-Null
+        
+        # Zmierz memory pressure
+        $this.MeasureMemoryPressure() | Out-Null
+        
+        # ═══ DYNAMIC CACHE RESIZE ═══
+        # Filozofia: wolny RAM = zmarnowany RAM. Cache rośnie do limitu wolnego RAM.
+        $guardReq = if ($this.HeavyMode) { $this.GuardBandHeavyMB } else { $this.GuardBandMB }
+        $freeAfterGuard = $this.LastAvailableMB - $guardReq
+        $absMax = [int]($this.TotalSystemRAM * 0.60)  # Absolutny max = 60% RAM
+        
+        if ($freeAfterGuard -gt 1024 -and $this.MemoryPressure -lt 0.3) {
+            # Dużo wolnego RAM → cache rośnie agresywnie
+            # Rośnie o 512MB per tick (co 15s) aż do wolny RAM - guard band
+            $targetMax = [Math]::Min($absMax, [int]($this.TotalCachedMB + $freeAfterGuard * 0.5))
+            $newMax = [Math]::Min($targetMax, $this.MaxCacheMB + 512)
+            if ($newMax -gt $this.MaxCacheMB) {
+                $old = $this.MaxCacheMB
+                $this.MaxCacheMB = $newMax
+                if ($newMax - $old -ge 256) {
+                    Write-RCLog "RESIZE UP: MaxCache $($old)→$($this.MaxCacheMB)MB (free=$([int]$this.LastAvailableMB)MB guard=$([int]$guardReq)MB)"
+                }
+            }
+        } elseif ($this.MemoryPressure -gt 0.5 -or $freeAfterGuard -lt 256) {
+            # RAM ciasno → zmniejszaj cache, oddaj pamięć systemowi
+            $shrink = if ($this.MemoryPressure -gt 0.7) { 1024 } else { 512 }
+            $newMax = [Math]::Max(256, $this.MaxCacheMB - $shrink)
+            if ($newMax -lt $this.MaxCacheMB) {
+                $old = $this.MaxCacheMB
+                $this.MaxCacheMB = $newMax
+                Write-RCLog "RESIZE DOWN: MaxCache $($old)→$($this.MaxCacheMB)MB (free=$([int]$this.LastAvailableMB)MB pressure=$([Math]::Round($this.MemoryPressure,2)))"
+            }
+        }
+        
+        # #4: Guard Band enforcement — JEDYNY powód do eviction przy niskim RAM
+        if (-not $this.HasGuardBandSpace()) {
+            $this.EnforceGuardBand($prophetApps, $transitions)
+        }
+        
+        # #9: Page Fault response
+        if ($this.LastPageFaultsPerSec -gt 200 -and $this.HeavyMode) {
+            $this.PageFaultResponse($this.HeavyModeApp, $prophetApps, $transitions)
+        }
+        
+        # #2: Cleanup dead protected apps
+        $this.CleanupProtectedApps()
+        
+        if ($this.CachedApps.Count -eq 0) { return }
+        
+        # ═══════════════════════════════════════════════════════════
+        # NOWA POLITYKA EVICTION: wolny RAM > 25% total → ZERO eviction
+        # Eviction TYLKO gdy system naprawdę potrzebuje pamięci
+        # ═══════════════════════════════════════════════════════════
+        $freePercent = if ($this.TotalSystemRAM -gt 0) { $this.LastAvailableMB / $this.TotalSystemRAM } else { 0.5 }
+        
+        # TWARDY PRÓG: dopóki wolny RAM > 25% total → nic nie ruszaj
+        if ($freePercent -gt 0.25) { return }
+        
+        # 15-25% free: lekka eviction — tylko nie-running apps z 0 hitów i stare >10 min
+        if ($freePercent -gt 0.15) {
+            foreach ($appName in @($this.CachedApps.Keys)) {
+                if ($this.IsAltTabProtected($appName)) { continue }
+                $running = Get-Process -Name $appName -ErrorAction SilentlyContinue
+                if ($running) { continue }
+                $entry = $this.CachedApps[$appName]
+                $age = ($now - $entry.CachedAt).TotalMinutes
+                if ($entry.HitCount -eq 0 -and $age -gt 10) {
+                    Write-RCLog "EVICT-STALE '$appName': 0 hits, age=$([int]$age)min, freeRAM=$([int]$freePercent*100)%"
+                    $this.EvictApp($appName)
+                }
+            }
+            return
+        }
+        
+        # <15% free: agresywna eviction — evictuj najniższy priorytet
+        Write-RCLog "LOW RAM EVICT: free=$([int]$this.LastAvailableMB)MB ($([int]($freePercent*100))%) pressure=$([Math]::Round($this.MemoryPressure,2))"
+        while ($freePercent -lt 0.20 -and $this.CachedApps.Count -gt 0) {
+            $this.EvictLowest($prophetApps, $transitions)
+            $this.MeasureMemoryPressure() | Out-Null
+            $freePercent = if ($this.TotalSystemRAM -gt 0) { $this.LastAvailableMB / $this.TotalSystemRAM } else { 0.5 }
+        }
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # #10 IDLE LEARNING PHASE — refleksja i rewizja score'ów
+    # Wywoływane gdy idle >60s
+    # ═══════════════════════════════════════════════════════════════
+    [hashtable] IdleLearn() {
+        $now = [datetime]::Now
+        if (($now - $this.LastIdleLearn).TotalSeconds -lt 60) { return $null }
+        $this.LastIdleLearn = $now
+        
+        $totalOps = $this.TotalHits + $this.TotalMisses
+        $hitRate = if ($totalOps -gt 0) { [Math]::Round($this.TotalHits / $totalOps * 100, 1) } else { 0 }
+        $wasteRate = if ($this.TotalPreloads -gt 0) { [Math]::Round($this.TotalWastedPreloads / $this.TotalPreloads * 100, 1) } else { 0 }
+        
+        # Auto-adjust aggressiveness based on performance
+        if ($totalOps -ge 10) {
+            if ($hitRate -gt 70 -and $wasteRate -lt 30) {
+                # Dobre trafienia, mało odpadów → zwiększ agresję
+                $this.Aggressiveness = [Math]::Min($this.AggressivenessMax, $this.Aggressiveness + 0.02)
+            }
+            elseif ($hitRate -lt 30 -or $wasteRate -gt 60) {
+                # Słabe trafienia lub dużo odpadów → zmniejsz
+                $this.Aggressiveness = [Math]::Max($this.AggressivenessMin, $this.Aggressiveness - 0.03)
+            }
+        }
+        
+        # Auto-adjust MaxCacheMB — NIGDY nie zmniejszaj poniżej dynamicznego minimum
+        # Dynamic resize jest już w AITick — tu NIE ruszamy MaxCacheMB
+        # (stary kod miał hard cap 1536MB co sabotowało 20GB cache)
+        
+        return @{
+            HitRate = $hitRate
+            WasteRate = $wasteRate
+            Aggressiveness = [Math]::Round($this.Aggressiveness, 2)
+            MaxCacheMB = $this.MaxCacheMB
+            MemoryPressure = [Math]::Round($this.MemoryPressure, 2)
+        }
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # NAME RESOLUTION: DisplayName ↔ ProcessName
+    # currentForeground = "Google Chrome" → CachedApps key = "chrome"
+    # ═══════════════════════════════════════════════════════════════
+    [string] ResolveAppName([string]$name) {
+        # Bezpośredni klucz?
+        if ($this.CachedApps.ContainsKey($name)) { return $name }
+        if ($this.AppPaths.ContainsKey($name)) { return $name }
+        # Mapping DisplayName → ProcessName?
+        if ($this.NameMap.ContainsKey($name)) { return $this.NameMap[$name] }
+        # Reverse: może to ProcessName a ktoś szuka DisplayName
+        foreach ($displayName in $this.NameMap.Keys) {
+            if ($this.NameMap[$displayName] -eq $name) { return $name }
+        }
+        return $name  # Zwróć jak jest
+    }
+    
+    [void] LearnName([string]$displayName, [string]$processName) {
+        if ([string]::IsNullOrWhiteSpace($displayName) -or [string]::IsNullOrWhiteSpace($processName)) { return }
+        if ($displayName -eq $processName) { return }
+        # Ignoruj Desktop i procesy ENGINE
+        if ($displayName -eq "Desktop" -or $processName -match '^(pwsh|powershell|conhost|WindowsTerminal)$') { return }
+        if (-not $this.NameMap.ContainsKey($displayName)) {
+            $this.NameMap[$displayName] = $processName
+            Write-RCLog "NAME MAP: '$displayName' → '$processName'"
+        }
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #1 CLASSIFY APP — Heavy vs Light na podstawie Prophet data
+    # ═══════════════════════════════════════════════════════════════
+    [string] ClassifyApp([string]$appName, [hashtable]$prophetApps) {
+        if ($this.AppClassification.ContainsKey($appName)) { return $this.AppClassification[$appName] }
+        $class = "Light"
+        if ($prophetApps -and $prophetApps.ContainsKey($appName)) {
+            $app = $prophetApps[$appName]
+            $avgCPU = if ($app.AvgCPU) { [double]$app.AvgCPU } else { 0 }
+            $isHeavy = if ($app.IsHeavy) { $app.IsHeavy } else { $false }
+            $samples = if ($app.Samples) { [int]$app.Samples } else { 0 }
+            # Heavy: IsHeavy flag OR avgCPU>35% z >20 samples
+            if ($isHeavy -or ($avgCPU -gt 35 -and $samples -gt 20)) { $class = "Heavy" }
+        }
+        # Runtime check: czy process ma duży working set?
+        try {
+            $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($proc -and $proc.WorkingSet64 -gt 500MB) { $class = "Heavy" }
+        } catch {}
+        $this.AppClassification[$appName] = $class
+        return $class
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #2 WORKING SET PROTECTION — monituj i chroń heavy apps
+    # ═══════════════════════════════════════════════════════════════
+    [void] ProtectWorkingSet([string]$appName) {
+        try {
+            $procs = Get-Process -Name $appName -ErrorAction SilentlyContinue
+            if (-not $procs) { return }
+            foreach ($proc in $procs) {
+                $ws = $proc.WorkingSet64
+                if ($ws -lt 100MB) { continue }  # Nie chronimy małych
+                $key = "$appName`:$($proc.Id)"
+                if ($this.ProtectedApps.ContainsKey($key)) {
+                    # Update stable WS (slow moving average)
+                    $entry = $this.ProtectedApps[$key]
+                    $entry.StableWS = [long]($entry.StableWS * 0.9 + $ws * 0.1)
+                } else {
+                    $this.ProtectedApps[$key] = @{
+                        PID = $proc.Id
+                        AppName = $appName
+                        MinWS = $ws
+                        StableWS = $ws
+                        ProtectedAt = [datetime]::Now
+                    }
+                }
+                # Set min working set na procesu (hint dla OS)
+                try {
+                    $minWS = [Math]::Max(50MB, [long]($ws * 0.7))
+                    $proc.MinWorkingSet = [IntPtr]$minWS
+                } catch {}
             }
         } catch {}
     }
     
-    # ═══════════════════════════════════════
-    # Cleanup (finally)
-    # ═══════════════════════════════════════
-    [void] Cleanup() {
-        foreach ($appName in @($this.CachedApps.Keys)) {
-            $this.EvictApp($appName)
+    [void] CleanupProtectedApps() {
+        foreach ($key in @($this.ProtectedApps.Keys)) {
+            $entry = $this.ProtectedApps[$key]
+            try {
+                $proc = Get-Process -Id $entry.PID -ErrorAction Stop
+            } catch {
+                $this.ProtectedApps.Remove($key)  # Process died
+            }
         }
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #3 HEAVY MODE — global stabilization mode
+    # ═══════════════════════════════════════════════════════════════
+    [void] UpdateHeavyMode([string]$foregroundApp, [double]$cpu, [double]$gpuLoad, [hashtable]$prophetApps) {
+        # Ignoruj Desktop i ENGINE procesy
+        if ($foregroundApp -eq "Desktop" -or $foregroundApp -match '^(pwsh|powershell|conhost|WindowsTerminal)$') { return }
+        $appClass = $this.ClassifyApp($foregroundApp, $prophetApps)
+        $shouldBeHeavy = $false
+        # Warunki aktywacji: heavy app na pierwszym planie + CPU>30% przez >30s LUB GPU>60%
+        if ($appClass -eq "Heavy" -and ($cpu -gt 30 -or $gpuLoad -gt 60)) {
+            $shouldBeHeavy = $true
+        }
+        # Aktywacja
+        if ($shouldBeHeavy -and -not $this.HeavyMode) {
+            $this.HeavyMode = $true
+            $this.HeavyModeApp = $foregroundApp
+            $this.HeavyModeActivated = [datetime]::Now
+            $this.ProtectWorkingSet($foregroundApp)
+            Write-RCLog "HEAVY MODE ON: '$foregroundApp' (CPU=$([int]$cpu)% GPU=$([int]$gpuLoad)%)"
+        }
+        # Deaktywacja: heavy app nie jest już foreground przez >2 min
+        elseif ($this.HeavyMode -and $foregroundApp -ne $this.HeavyModeApp) {
+            if (([datetime]::Now - $this.HeavyModeActivated).TotalMinutes -gt 2) {
+                # Sprawdź czy heavy app jeszcze działa
+                $stillRunning = Get-Process -Name $this.HeavyModeApp -ErrorAction SilentlyContinue
+                if (-not $stillRunning) {
+                    $this.HeavyMode = $false
+                    $this.HeavyModeApp = ""
+                }
+                # Jeśli działa ale nie jest foreground >5 min → wyłącz heavy mode
+                elseif (([datetime]::Now - $this.HeavyModeActivated).TotalMinutes -gt 5) {
+                    $this.HeavyMode = $false
+                }
+            }
+        }
+        # Odśwież WS protection w heavy mode
+        if ($this.HeavyMode) {
+            $this.ProtectWorkingSet($this.HeavyModeApp)
+        }
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #4 GUARD BAND RAM — nie spadaj poniżej min free RAM
+    # Zwraca $true jeśli jest wystarczająco dużo wolnego RAM
+    # ═══════════════════════════════════════════════════════════════
+    [bool] HasGuardBandSpace() {
+        if ($this.LastAvailableMB -le 0) { $this.MeasureMemoryPressure() | Out-Null }
+        
+        $required = if ($this.HeavyMode) { $this.GuardBandHeavyMB } else { $this.GuardBandMB }
+        $totalGB = $this.TotalSystemRAM / 1024.0
+        $availPercent = if ($this.TotalSystemRAM -gt 0) { ($this.LastAvailableMB / $this.TotalSystemRAM) * 100.0 } else { 50.0 }
+        
+        # Przy dużym RAM i >30% available → ZAWSZE pozwól (pkt 4,6)
+        if ($totalGB -ge 32 -and $availPercent -gt 30) { return $true }
+        if ($totalGB -ge 16 -and $availPercent -gt 35) { return $true }
+        
+        return ($this.LastAvailableMB -ge $required)
+    }
+    
+    [void] EnforceGuardBand([hashtable]$prophetApps, [hashtable]$transitions) {
+        $required = if ($this.HeavyMode) { $this.GuardBandHeavyMB } else { $this.GuardBandMB }
+        if ($this.LastAvailableMB -ge $required) { return }
+        Write-RCLog "GUARD BAND ENFORCE: avail=$([int]$this.LastAvailableMB)MB < required=$([int]$required)MB"
+        while ($this.LastAvailableMB -lt $required -and $this.CachedApps.Count -gt 0) {
+            $this.EvictLowest($prophetApps, $transitions)
+            $this.MeasureMemoryPressure() | Out-Null
+            if ($this.CachedApps.Count -eq 0) { break }
+        }
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #5 ANTI-ALTTAB PROTECTION
+    # Po alt-tab z fullscreen: chroni app przez 3 minuty
+    # ═══════════════════════════════════════════════════════════════
+    [void] RecordFocusChange([string]$newApp, [string]$oldApp) {
+        $now = [datetime]::Now
+        $this.LastFocusChange = $now
+        # Jeśli stara app była chroniona → przedłuż ochronę
+        if (-not [string]::IsNullOrWhiteSpace($oldApp)) {
+            $this.AltTabProtection[$oldApp] = @{
+                ProtectedUntil = $now.AddMinutes(3)
+                SwitchedAt = $now
+            }
+            # Chroń working set starej app
+            $this.ProtectWorkingSet($oldApp)
+        }
+        # Czyść wygasłe ochrony
+        foreach ($app in @($this.AltTabProtection.Keys)) {
+            if ($this.AltTabProtection[$app].ProtectedUntil -lt $now) {
+                $this.AltTabProtection.Remove($app)
+            }
+        }
+    }
+    
+    [bool] IsAltTabProtected([string]$appName) {
+        if (-not $this.AltTabProtection.ContainsKey($appName)) { return $false }
+        return ($this.AltTabProtection[$appName].ProtectedUntil -gt [datetime]::Now)
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #6 TIME-DECAY: wolniejszy dla Heavy, szybszy dla Light
+    # (modyfikacja istniejącej GetDecayedPriority)
+    # ═══════════════════════════════════════════════════════════════
+    # Already integrated in GetDecayedPriority — uses ClassifyApp to set halfLife
+
+    # ═══════════════════════════════════════════════════════════════
+    # #7 NEGATIVE LEARNING — kara za złe przewidywania
+    # ═══════════════════════════════════════════════════════════════
+    [void] RecordPreloadAttempt([string]$appName) {
+        if (-not $this.NegativeScores.ContainsKey($appName)) {
+            $this.NegativeScores[$appName] = @{ PreloadCount = 0; HitCount = 0; PenaltyUntil = [datetime]::MinValue }
+        }
+        $this.NegativeScores[$appName].PreloadCount++
+    }
+    
+    [void] RecordPreloadHit([string]$appName) {
+        if ($this.NegativeScores.ContainsKey($appName)) {
+            $this.NegativeScores[$appName].HitCount++
+        }
+    }
+    
+    [bool] IsNegativePenalty([string]$appName) {
+        if (-not $this.NegativeScores.ContainsKey($appName)) { return $false }
+        $ns = $this.NegativeScores[$appName]
+        # Penalty aktywna?
+        if ($ns.PenaltyUntil -gt [datetime]::Now) { return $true }
+        # Sprawdź historię: >5 preloadów i <20% hitRate → nakładaj penalty
+        if ($ns.PreloadCount -ge 5) {
+            $hitRate = $ns.HitCount / $ns.PreloadCount
+            if ($hitRate -lt 0.2) {
+                $ns.PenaltyUntil = [datetime]::Now.AddMinutes(10)  # 10 min penalty
+                return $true
+            }
+        }
+        return $false
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #8 SESSION-AWARE — wykryj typ sesji
+    # ═══════════════════════════════════════════════════════════════
+    [void] DetectSession([string]$context, [double]$gpuLoad) {
+        if ($context -eq "Gaming" -or $gpuLoad -gt 70) {
+            $this.CurrentSession = "Gaming"
+        } elseif ($context -eq "Coding" -or $context -eq "Office") {
+            $this.CurrentSession = "Work"
+        } elseif ($context -eq "Browsing" -or $context -eq "Media") {
+            $this.CurrentSession = "Browsing"
+        } else {
+            $this.CurrentSession = "Mixed"
+        }
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #9 PAGE FAULT ALARM — reaguj na nagły wzrost page faults
+    # ═══════════════════════════════════════════════════════════════
+    [void] PageFaultResponse([string]$heavyApp, [hashtable]$prophetApps, [hashtable]$transitions) {
+        if ($this.LastPageFaultsPerSec -lt 200) { return }  # Normalny poziom
+        # Alarm: page faults > 200/s → system pod presją
+        # 1. Zatrzymaj batch preload
+        # (BatchTick sam sprawdza pressure, ale tu wymuszamy)
+        # 2. Boost priority heavy app
+        if (-not [string]::IsNullOrWhiteSpace($heavyApp)) {
+            try {
+                $proc = Get-Process -Name $heavyApp -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($proc) { $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::AboveNormal }
+            } catch {}
+        }
+        # 3. Agresywna eviction light apps
+        $this.EnforceGuardBand($prophetApps, $transitions)
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # #10 MEMORY COST EFFICIENCY — priorytet = zysk / koszt_RAM
+    # ═══════════════════════════════════════════════════════════════
+    [double] GetCostEfficiency([string]$appName, [hashtable]$prophetApps) {
+        $sizeMB = 1.0  # Default
+        if ($this.CachedApps.ContainsKey($appName)) {
+            $sizeMB = [Math]::Max(1, $this.CachedApps[$appName].SizeMB)
+        }
+        # Zysk = estimated startup time saved (based on avgCPU + IsHeavy)
+        $benefit = 10.0  # Default benefit
+        if ($prophetApps -and $prophetApps.ContainsKey($appName)) {
+            $app = $prophetApps[$appName]
+            if ($app.IsHeavy) { $benefit += 30 }
+            if ($app.AvgCPU -gt 50) { $benefit += 20 }
+            elseif ($app.AvgCPU -gt 30) { $benefit += 10 }
+            if ($app.Samples -gt 50) { $benefit += 5 }  # Dobrze znana app
+        }
+        return $benefit / $sizeMB  # Wyższy = lepszy stosunek zysk/koszt
+    }
+
+    # ═══════════════════════════════════════════════════════════════
+    # Status / Cleanup
+    # ═══════════════════════════════════════════════════════════════
+    [string] GetStatus() {
+        $hitRate = 0
+        $total = $this.TotalHits + $this.TotalMisses
+        if ($total -gt 0) { $hitRate = [Math]::Round($this.TotalHits / $total * 100, 0) }
+        $mode = if ($this.HeavyMode) { "HEAVY:$($this.HeavyModeApp)" } else { $this.CurrentSession }
+        return "RAMCache:$([int]$this.TotalCachedMB)/$($this.MaxCacheMB)MB Apps:$($this.CachedApps.Count) Hit:$hitRate% Aggr:$([Math]::Round($this.Aggressiveness,1)) Ret:$([Math]::Round($this.RetentionTolerance,1)) Free:$([int]$this.LastAvailableMB)MB [$mode]"
+    }
+    
+    [void] Cleanup() {
+        $count = $this.CachedApps.Count
+        foreach ($appName in @($this.CachedApps.Keys)) {
+            $entry = $this.CachedApps[$appName]
+            foreach ($f in $entry.Files) {
+                try { 
+                    if ($f.ContainsKey('Accessor') -and $f.Accessor) { $f.Accessor.Dispose() }
+                    if ($f.ContainsKey('MMF') -and $f.MMF) { $f.MMF.Dispose() }
+                    if ($f.ContainsKey('Stream') -and $f.Stream) { $f.Stream.Dispose() }
+                    if ($f.ContainsKey('Data')) { $f.Data = $null }
+                } catch {}
+            }
+        }
+        $this.CachedApps.Clear()
         $this.TotalCachedMB = 0
+        while ($this.BatchQueue.Count -gt 0) { $this.BatchQueue.Dequeue() | Out-Null }
+        Write-RCLog "CLEANUP: Released $count cached apps (ENGINE shutdown)"
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # PERSISTENCE: SaveState / LoadState — zapamiętuj wiedzę między restarty
+    # Zapisuje: AppClassification, NegativeScores, AppPaths + LearnedFiles per app
+    # ═══════════════════════════════════════════════════════════════
+    
+    # ═══════════════════════════════════════════════════════════════
+    # PROFILE APP MODULES — skanuj RZECZYWISTE moduły załadowane przez proces
+    # Wywoływane gdy app jest running → zapamiętuje dokładne pliki
+    # ═══════════════════════════════════════════════════════════════
+    [void] ProfileAppModules([string]$appName) {
+        if ([string]::IsNullOrWhiteSpace($appName)) { return }
+        try {
+            $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $proc) { return }
+            
+            # Pobierz RZECZYWISTE załadowane moduły procesu
+            $modules = $proc.Modules | Where-Object { 
+                $_.FileName -and (Test-Path $_.FileName -ErrorAction SilentlyContinue)
+            } | Select-Object -First 30  # Max 30 modułów
+            
+            if ($modules.Count -lt 2) { return }
+            
+            # Zbierz listę plików z rozmiarami
+            $learnedFiles = [System.Collections.Generic.List[hashtable]]::new()
+            foreach ($mod in $modules) {
+                try {
+                    $size = (Get-Item $mod.FileName -ErrorAction Stop).Length
+                    if ($size -gt 5KB -and $size -lt 200MB) {
+                        $learnedFiles.Add(@{
+                            Path = $mod.FileName
+                            Size = $size
+                            Module = $mod.ModuleName
+                        })
+                    }
+                } catch { continue }
+            }
+            
+            if ($learnedFiles.Count -lt 2) { return }
+            
+            # Zapisz do AppPaths
+            if (-not $this.AppPaths.ContainsKey($appName)) {
+                $this.AppPaths[$appName] = @{ ExePath = $proc.Path; Dir = [System.IO.Path]::GetDirectoryName($proc.Path) }
+            }
+            $this.AppPaths[$appName].LearnedFiles = $learnedFiles
+            $this.AppPaths[$appName].ProfiledAt = [datetime]::Now
+            $this.AppPaths[$appName].ModuleCount = $learnedFiles.Count
+            # Log success
+            $totalSizeMB = 0; foreach ($f in $learnedFiles) { $totalSizeMB += $f.Size }
+            $totalSizeMB = [Math]::Round($totalSizeMB / 1MB, 1)
+            Write-RCLog "PROFILED '$appName': $($learnedFiles.Count) modules ($($totalSizeMB)MB)"
+        } catch {}
+    }
+    
+    [void] SaveState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "RAMCache.json"
+            
+            # NegativeScores (safe serialization)
+            $negScores = @{}
+            foreach ($app in @($this.NegativeScores.Keys)) {
+                try {
+                    $ns = $this.NegativeScores[$app]
+                    if ($ns -and $ns.PenaltyUntil) {
+                        $negScores[$app] = @{
+                            PreloadCount = [int]$ns.PreloadCount
+                            HitCount = [int]$ns.HitCount
+                            PenaltyUntil = ([datetime]$ns.PenaltyUntil).ToString("o")
+                        }
+                    }
+                } catch { continue }
+            }
+            
+            # AppPaths z LearnedFiles (safe serialization)
+            $paths = @{}
+            foreach ($app in @($this.AppPaths.Keys)) {
+                try {
+                    $entry = $this.AppPaths[$app]
+                    if (-not $entry -or -not $entry.ExePath) { continue }
+                    $pathEntry = @{ 
+                        ExePath = [string]$entry.ExePath
+                        Dir = [string]$entry.Dir 
+                    }
+                    # Learned files — serializuj bezpiecznie
+                    if ($entry.ContainsKey('LearnedFiles') -and $entry.LearnedFiles -and $entry.LearnedFiles.Count -gt 0) {
+                        $files = [System.Collections.Generic.List[hashtable]]::new()
+                        $count = 0
+                        foreach ($f in $entry.LearnedFiles) {
+                            if ($count -ge 25) { break }
+                            if ($f -and $f.Path) {
+                                $files.Add(@{ P = [string]$f.Path; S = [long]$f.Size; M = [string]$f.Module })
+                                $count++
+                            }
+                        }
+                        if ($files.Count -gt 0) {
+                            $pathEntry.LF = @($files)  # Force array
+                        }
+                        if ($entry.ContainsKey('ProfiledAt') -and $entry.ProfiledAt) {
+                            $pathEntry.PA = ([datetime]$entry.ProfiledAt).ToString("o")
+                        }
+                    }
+                    $paths[$app] = $pathEntry
+                } catch { continue }
+            }
+            
+            $data = @{
+                V = 2
+                AppClassification = $this.AppClassification
+                NegativeScores = $negScores
+                AppPaths = $paths
+                NameMap = $this.NameMap
+                Aggressiveness = [Math]::Round($this.Aggressiveness, 3)
+                MaxCacheMB = [int]$this.MaxCacheMB
+                TotalSystemRAM = [int]$this.TotalSystemRAM
+                GuardBandMB = [int]$this.GuardBandMB
+                GuardBandHeavyMB = [int]$this.GuardBandHeavyMB
+                TotalHits = [int]$this.TotalHits
+                TotalMisses = [int]$this.TotalMisses
+                TotalPreloads = [int]$this.TotalPreloads
+                TotalWastedPreloads = [int]$this.TotalWastedPreloads
+                SavedAt = [datetime]::Now.ToString("o")
+            }
+            $json = $data | ConvertTo-Json -Depth 8 -Compress
+            [System.IO.File]::WriteAllText($path, $json, [System.Text.Encoding]::UTF8)
+            Write-RCLog "SAVED: $path ($([Math]::Round($json.Length/1KB,1))KB) Paths=$($paths.Count) Hits=$($this.TotalHits) Miss=$($this.TotalMisses) Aggr=$([Math]::Round($this.Aggressiveness,2))"
+        } catch {
+            Write-RCLog "SAVE ERROR: $($_.Exception.Message)"
+        }
+    }
+    
+    [void] LoadState([string]$configDir) {
+        try {
+            $path = Join-Path $configDir "RAMCache.json"
+            if (-not (Test-Path $path)) { return }
+            $json = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+            $data = $json | ConvertFrom-Json
+            
+            if ($data.AppClassification) {
+                $data.AppClassification.PSObject.Properties | ForEach-Object {
+                    $this.AppClassification[$_.Name] = $_.Value
+                }
+            }
+            if ($data.NegativeScores) {
+                $data.NegativeScores.PSObject.Properties | ForEach-Object {
+                    $ns = $_.Value
+                    $this.NegativeScores[$_.Name] = @{
+                        PreloadCount = [int]$ns.PreloadCount
+                        HitCount = [int]$ns.HitCount
+                        PenaltyUntil = try { [datetime]::Parse($ns.PenaltyUntil, [System.Globalization.CultureInfo]::InvariantCulture) } catch { [datetime]::MinValue }
+                    }
+                }
+            }
+            # Restore AppPaths Z LearnedFiles
+            if ($data.AppPaths) {
+                $data.AppPaths.PSObject.Properties | ForEach-Object {
+                    $v = $_.Value
+                    $entry = @{ ExePath = $v.ExePath; Dir = $v.Dir }
+                    # Restore learned files
+                    if ($v.LF -and $v.LF.Count -gt 0) {
+                        $lf = [System.Collections.Generic.List[hashtable]]::new()
+                        foreach ($f in $v.LF) {
+                            $lf.Add(@{ Path = $f.P; Size = [long]$f.S; Module = $f.M })
+                        }
+                        $entry.LearnedFiles = $lf
+                        if ($v.PA) { $entry.ProfiledAt = try { [datetime]::Parse($v.PA, [System.Globalization.CultureInfo]::InvariantCulture) } catch { [datetime]::Now } }
+                        $entry.ModuleCount = $lf.Count
+                    }
+                    $this.AppPaths[$_.Name] = $entry
+                }
+            }
+            if ($data.Aggressiveness) { $this.Aggressiveness = [Math]::Max($this.AggressivenessMin, [Math]::Min($this.AggressivenessMax, [double]$data.Aggressiveness)) }
+            # Restore NameMap
+            if ($data.NameMap) {
+                $data.NameMap.PSObject.Properties | ForEach-Object {
+                    $this.NameMap[$_.Name] = [string]$_.Value
+                }
+            }
+            if ($data.MaxCacheMB) { $this.MaxCacheMB = [int]$data.MaxCacheMB }
+            if ($data.TotalHits) { $this.TotalHits = [int]$data.TotalHits }
+            if ($data.TotalMisses) { $this.TotalMisses = [int]$data.TotalMisses }
+            if ($data.TotalPreloads) { $this.TotalPreloads = [int]$data.TotalPreloads }
+            if ($data.TotalWastedPreloads) { $this.TotalWastedPreloads = [int]$data.TotalWastedPreloads }
+        } catch {
+            Write-RCLog "LOAD ERROR: $($_.Exception.Message)"
+        }
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # BOOTSTRAP SCAN — natychmiastowe skanowanie przy pierwszym uruchomieniu
+    # Skanuje WSZYSTKIE running procesy, uczy się ścieżek + modułów,
+    # klasyfikuje Heavy/Light, tworzy RAMCache.json od razu
+    # ═══════════════════════════════════════════════════════════════
+    [int] BootstrapScan([hashtable]$prophetApps) {
+        $learned = 0
+        try {
+            # Pobierz wszystkie user procesy (nie systemowe, nie svchost)
+            $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                $_.Path -and 
+                $_.Id -gt 4 -and 
+                $_.ProcessName -notmatch '^(svchost|csrss|lsass|services|smss|wininit|System|Idle|Registry|dwm|conhost|fontdrvhost|sihost|taskhostw|ctfmon|SearchHost|StartMenuExperienceHost|RuntimeBroker|TextInputHost|SecurityHealthSystray|explorer|ShellExperienceHost|pwsh|powershell|WindowsTerminal|WmiPrvSE|wmiprvse|ApplicationFrameHost|nvcontainer|NVDisplay\.Container|audiodg|CompPkgSrv|dllhost)$' -and
+                $_.WorkingSet64 -gt 10MB
+            } | Sort-Object WorkingSet64 -Descending | Select-Object -First 20
+            
+            foreach ($proc in $procs) {
+                $appName = $proc.ProcessName
+                if ($this.AppPaths.ContainsKey($appName) -and 
+                    $this.AppPaths[$appName].ContainsKey('LearnedFiles') -and 
+                    $this.AppPaths[$appName].LearnedFiles -and 
+                    $this.AppPaths[$appName].LearnedFiles.Count -gt 0) {
+                    continue  # Już ma profil z poprzedniej sesji
+                }
+                
+                try {
+                    # 1. Zapisz ścieżkę
+                    $this.AppPaths[$appName] = @{
+                        ExePath = $proc.Path
+                        Dir = [System.IO.Path]::GetDirectoryName($proc.Path)
+                    }
+                    
+                    # 2. Profiluj moduły (rzeczywiste DLL w pamięci procesu)
+                    $modules = $proc.Modules | Where-Object { 
+                        $_.FileName -and (Test-Path $_.FileName -ErrorAction SilentlyContinue)
+                    } | Select-Object -First 30
+                    
+                    if ($modules.Count -ge 2) {
+                        $learnedFiles = [System.Collections.Generic.List[hashtable]]::new()
+                        foreach ($mod in $modules) {
+                            try {
+                                $size = (Get-Item $mod.FileName -ErrorAction Stop).Length
+                                if ($size -gt 5KB -and $size -lt 200MB) {
+                                    $learnedFiles.Add(@{
+                                        Path = $mod.FileName
+                                        Size = $size
+                                        Module = $mod.ModuleName
+                                    })
+                                }
+                            } catch { continue }
+                        }
+                        if ($learnedFiles.Count -ge 2) {
+                            $this.AppPaths[$appName].LearnedFiles = $learnedFiles
+                            $this.AppPaths[$appName].ProfiledAt = [datetime]::Now
+                            $this.AppPaths[$appName].ModuleCount = $learnedFiles.Count
+                        }
+                    }
+                    
+                    # 3. Klasyfikuj Heavy/Light
+                    $class = "Light"
+                    if ($proc.WorkingSet64 -gt 500MB) { $class = "Heavy" }
+                    elseif ($prophetApps -and $prophetApps.ContainsKey($appName)) {
+                        $pa = $prophetApps[$appName]
+                        if ($pa.IsHeavy -or ($pa.AvgCPU -gt 35 -and $pa.Samples -gt 20)) { $class = "Heavy" }
+                    }
+                    $this.AppClassification[$appName] = $class
+                    
+                    $learned++
+                } catch { continue }
+            }
+        } catch {}
+        Write-RCLog "BOOTSTRAP: Scanned $learned apps. Paths=$($this.AppPaths.Count) Class=$($this.AppClassification.Count)"
+        foreach ($app in $this.AppPaths.Keys) {
+            $lfc = 0; if ($this.AppPaths[$app].ContainsKey('LearnedFiles') -and $this.AppPaths[$app].LearnedFiles) { $lfc = $this.AppPaths[$app].LearnedFiles.Count }
+            $cls = if ($this.AppClassification.ContainsKey($app)) { $this.AppClassification[$app] } else { "?" }
+            Write-RCLog "  APP: $app [$cls] modules=$lfc exe=$($this.AppPaths[$app].ExePath)"
+        }
+        return $learned
+    }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # STARTUP PRELOAD — przy starcie ENGINE załaduj apps które Prophet
+    # wie że są typowe dla tej godziny + mają high priority
+    # ═══════════════════════════════════════════════════════════════
+    [void] StartupPreload([hashtable]$prophetApps, [int[]]$hourlyActivity, [hashtable]$transitions) {
+        if (-not $this.Enabled -or -not $prophetApps) { return }
+        $currentHour = (Get-Date).Hour
+        
+        # Sprawdź czy ta godzina jest aktywna (Prophet wie)
+        $hourActivity = 0
+        if ($hourlyActivity -and $currentHour -ge 0 -and $currentHour -lt 24) {
+            $hourActivity = $hourlyActivity[$currentHour]
+        }
+        if ($hourActivity -lt 3) { return }  # Za mało danych dla tej godziny
+        
+        # Zbierz kandydatów: Heavy apps z wysokim priorytetem które mamy ścieżkę
+        $candidates = @{}
+        foreach ($appName in $prophetApps.Keys) {
+            $app = $prophetApps[$appName]
+            # Tylko apps ze znaną ścieżką
+            if (-not $this.AppPaths.ContainsKey($appName)) { continue }
+            # Skip apps z negative penalty
+            if ($this.IsNegativePenalty($appName)) { continue }
+            
+            $prio = 0
+            if ($app.IsHeavy) { $prio += 30 }
+            if ($app.Samples -and $app.Samples -gt 20) { $prio += [Math]::Min(20, [int]($app.Samples / 5)) }
+            if ($app.AvgCPU -gt 40) { $prio += 15 }
+            # Chain bonus
+            if ($transitions) {
+                foreach ($src in $transitions.Keys) {
+                    if ($transitions[$src].ContainsKey($appName)) {
+                        $prio += [Math]::Min(10, $transitions[$src][$appName].Count * 2)
+                    }
+                }
+            }
+            if ($prio -ge 25) { $candidates[$appName] = $prio }  # Min próg
+        }
+        
+        if ($candidates.Count -eq 0) { return }
+        
+        # Preload top 3 (batch — nie blokuj startu)
+        $sorted = $candidates.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3
+        foreach ($entry in $sorted) {
+            $appName = $entry.Name
+            $exePath = $this.AppPaths[$appName].ExePath
+            $conf = [Math]::Min(1.0, $entry.Value / 60.0)  # Normalizuj priorytet na confidence
+            $this.PreloadApp($appName, $exePath, $conf) | Out-Null
+        }
     }
 }
 class DesktopWidget {
@@ -17418,7 +18590,35 @@ $Script:PreviousEnsembleEnabled = $false
     # ═══ APP RAM CACHE — prawdziwy preload aplikacji do RAM ═══
     $appRAMCache = [AppRAMCache]::new()
     $Script:AppRAMCache = $appRAMCache
-    Write-Host "  [CACHE] AppRAMCache: Max=$($appRAMCache.MaxCacheMB)MB MinFreeRAM=$($appRAMCache.MinFreeRAMPercent)% MaxApps=$($appRAMCache.MaxAppsInCache)" -ForegroundColor Cyan
+    
+    # 1. Załaduj poprzednią wiedzę (jeśli RAMCache.json istnieje)
+    $appRAMCache.LoadState($Script:ConfigDir)
+    Write-RCLog "═══ ENGINE START ═══"
+    Write-RCLog "RAM: $([Math]::Round($appRAMCache.TotalSystemRAM/1024,1))GB detected → MaxCache=$($appRAMCache.MaxCacheMB)MB Guard=$($appRAMCache.GuardBandMB)/$($appRAMCache.GuardBandHeavyMB)MB Free=$([int]$appRAMCache.LastAvailableMB)MB"
+    Write-RCLog "LoadState: Paths=$($appRAMCache.AppPaths.Count) Class=$($appRAMCache.AppClassification.Count) Aggr=$([Math]::Round($appRAMCache.Aggressiveness,2))"
+    $rcJsonPath = Join-Path $Script:ConfigDir "RAMCache.json"
+    $rcJsonExists = Test-Path $rcJsonPath
+    $prophetAppsForCache = if ($prophet) { $prophet.Apps } else { $null }
+    
+    # 2. BOOTSTRAP: Skanuj running procesy — ucz się ścieżek i modułów OD RAZU
+    $bootstrapCount = $appRAMCache.BootstrapScan($prophetAppsForCache)
+    
+    # 3. Natychmiast zapisz RAMCache.json (tworzy plik jeśli nie istnieje)
+    $appRAMCache.SaveState($Script:ConfigDir)
+    $rcJsonNow = Test-Path $rcJsonPath
+    
+    if (-not $rcJsonExists -and $rcJsonNow) {
+        Write-Host "  [CACHE] RAMCache.json CREATED — $bootstrapCount apps profiled at startup" -ForegroundColor Green
+    }
+    Write-Host "  [CACHE] AppRAMCache: RAM=$([Math]::Round($appRAMCache.TotalSystemRAM/1024,1))GB MaxCache=$($appRAMCache.MaxCacheMB)MB Guard=$($appRAMCache.GuardBandMB)/$($appRAMCache.GuardBandHeavyMB)MB Aggr=$([Math]::Round($appRAMCache.Aggressiveness,2)) Paths=$($appRAMCache.AppPaths.Count)" -ForegroundColor Cyan
+    
+    # 4. Startup preload — załaduj heavy apps typowe dla tej godziny (korzysta z nowo-nauczonej wiedzy)
+    if ($prophet -and $chainPredictor) {
+        $appRAMCache.StartupPreload($prophet.Apps, $prophet.HourlyActivity, $chainPredictor.TransitionGraph)
+        if ($appRAMCache.CachedApps.Count -gt 0 -or $appRAMCache.BatchQueue.Count -gt 0) {
+            Write-Host "  [CACHE] Startup preload: $($appRAMCache.CachedApps.Count) apps, $($appRAMCache.BatchQueue.Count) files queued" -ForegroundColor Green
+        }
+    }
     try {
         Write-Host "[DEBUG] Engine: starting main loop" -ForegroundColor Yellow
         while (-not $Global:ExitRequested) {
@@ -17747,19 +18947,46 @@ $Script:PreviousEnsembleEnabled = $false
                     [void]$chainPredictor.RecordAppLaunch($currentForeground)
                 }
                 [void]$userPatterns.RecordAppUsage($currentForeground)
+                    # v47.3: #5 Anti-AltTab — chroń poprzednią app po przełączeniu
+                    if ($appRAMCache -and -not [string]::IsNullOrWhiteSpace($lastForegroundApp)) {
+                        $appRAMCache.RecordFocusChange($currentForeground, $lastForegroundApp)
+                    }
                 $lastForegroundApp = $currentForeground
-                    # v47: RAMCache — sprawdź hit (app była preloaded?) i preloaduj jeśli nie
+                    # v47.3: RAMCache — sprawdź hit + ucz się mapowania nazw
                     if ($appRAMCache -and $appRAMCache.Enabled) {
+                        # Ucz się mapowania DisplayName → ProcessName
+                        try {
+                            $fgHwnd = [Win32]::GetForegroundWindow()
+                            $fgPid = 0; [Win32]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid) | Out-Null
+                            if ($fgPid -gt 0) {
+                                $fgProc = Get-Process -Id $fgPid -ErrorAction SilentlyContinue
+                                if ($fgProc) {
+                                    $procName = $fgProc.ProcessName
+                                    $appRAMCache.LearnName($currentForeground, $procName)
+                                    # Ucz się ścieżki pod ProcessName (nie DisplayName)
+                                    if (-not $appRAMCache.AppPaths.ContainsKey($procName) -and $fgProc.Path) {
+                                        $appRAMCache.AppPaths[$procName] = @{ ExePath = $fgProc.Path; Dir = [System.IO.Path]::GetDirectoryName($fgProc.Path) }
+                                    }
+                                }
+                            }
+                        } catch {}
+                        
                         if ($appRAMCache.IsAppCached($currentForeground)) {
-                            # HIT — app była przewidziana i preloaded do RAM!
                             if ($Global:DebugMode) { Add-Log "- RAMCache: HIT '$currentForeground' (was preloaded)" }
                         } else {
-                            # MISS — załaduj teraz (lepiej późno niż wcale)
-                            $exePath = ""
-                            if ($performanceBooster -and $performanceBooster.AppExecutablePaths.ContainsKey($currentForeground)) {
-                                $exePath = $performanceBooster.AppExecutablePaths[$currentForeground]
+                            # MISS — załaduj pod resolved name
+                            $resolved = $appRAMCache.ResolveAppName($currentForeground)
+                            if ($resolved -ne "Desktop" -and $resolved -notmatch '^(pwsh|powershell)$') {
+                                $exePath = ""
+                                if ($appRAMCache.AppPaths.ContainsKey($resolved)) {
+                                    $exePath = $appRAMCache.AppPaths[$resolved].ExePath
+                                } elseif ($performanceBooster -and $performanceBooster.AppExecutablePaths.ContainsKey($currentForeground)) {
+                                    $exePath = $performanceBooster.AppExecutablePaths[$currentForeground]
+                                }
+                                $appRAMCache.PreloadApp($resolved, $exePath, 1.0) | Out-Null
+                                # Natychmiast profiluj moduły (żeby następny preload użył LEARNED)
+                                $appRAMCache.ProfileAppModules($resolved)
                             }
-                            $appRAMCache.PreloadApp($currentForeground, $exePath) | Out-Null
                         }
                     }
                     if ($performanceBooster.IsHeavyApp($currentForeground) -or 
@@ -18439,17 +19666,12 @@ $Script:PreviousEnsembleEnabled = $false
                         } else {
                             $chainScore = 70
                         }
-                        # v47: PRELOAD do RAM cache — załaduj predicted app ZANIM user ją uruchomi
+                        # v47.2: DEPTH-2 CHAIN PRELOAD — A→B(full) + B→C(warm)
                         if ($predictedApp -and $appRAMCache -and $appRAMCache.Enabled) {
-                            if (-not $appRAMCache.IsAppCached($predictedApp)) {
-                                $exePath = ""
-                                if ($performanceBooster -and $performanceBooster.AppExecutablePaths.ContainsKey($predictedApp)) {
-                                    $exePath = $performanceBooster.AppExecutablePaths[$predictedApp]
-                                }
-                                if ($appRAMCache.PreloadApp($predictedApp, $exePath)) {
-                                    Add-Log "- RAMCache: Preloaded '$predictedApp' ($($appRAMCache.CachedApps[$predictedApp].SizeMB)MB)"
-                                }
-                            }
+                            $chainConf = if ($chainPredictor.PredictionConfidence -gt 0) { $chainPredictor.PredictionConfidence } else { 0.5 }
+                            $chainTrans = $chainPredictor.TransitionGraph
+                            $exePaths = if ($performanceBooster) { $performanceBooster.AppExecutablePaths } else { @{} }
+                            $appRAMCache.ChainPreload($predictedApp, $chainConf, $chainTrans, $exePaths)
                         }
                     } elseif ($currentContext -eq "Idle" -and $currentMetrics.CPU -lt 20) { 
                         $chainScore = 20
@@ -19147,16 +20369,56 @@ $Script:PreviousEnsembleEnabled = $false
             
             # DISK WRITE CACHE: Flush 1-2 dirty plików na dysk (rozłożone I/O)
             try { $diskCache.Tick() | Out-Null } catch { }
-            # v47: RAMCache AI tick — eviction po priorytecie + proactive idle cache
+            # v47.3: RAMCache AI tick — full v2 integration (13 features)
             try { 
                 if ($appRAMCache) { 
                     $prophetApps = if ($prophet) { $prophet.Apps } else { $null }
                     $chainTrans = if ($chainPredictor) { $chainPredictor.TransitionGraph } else { $null }
+                    $ctxGpuLoad = if ($currentMetrics.GPU) { [double]$currentMetrics.GPU.Load } else { 0 }
+                    
+                    # #3: Heavy Mode — update co tick
+                    if (-not [string]::IsNullOrWhiteSpace($currentForeground)) {
+                        $appRAMCache.UpdateHeavyMode($currentForeground, $currentMetrics.CPU, $ctxGpuLoad, $prophetApps)
+                    }
+                    # Profile app modules — co 30 iteracji skanuj RZECZYWISTE moduły foreground app
+                    if ($iteration % 30 -eq 0 -and -not [string]::IsNullOrWhiteSpace($currentForeground)) {
+                        $hasLearned = ($appRAMCache.AppPaths.ContainsKey($currentForeground) -and 
+                                       $appRAMCache.AppPaths[$currentForeground].ContainsKey('LearnedFiles') -and 
+                                       $appRAMCache.AppPaths[$currentForeground].LearnedFiles -and 
+                                       $appRAMCache.AppPaths[$currentForeground].LearnedFiles.Count -gt 0)
+                        if (-not $hasLearned) {
+                            $appRAMCache.ProfileAppModules($currentForeground)
+                        }
+                    }
+                    # #8: Session detection
+                    $appRAMCache.DetectSession($currentContext, $ctxGpuLoad)
+                    
+                    # Core: AI Tick (guard band, page fault, eviction, pressure)
                     $appRAMCache.AITick($prophetApps, $chainTrans)
-                    # Proactive: gdy idle i CPU niski, preloaduj top apps z Prophet
+                    # Core: Batch tick — pliki w porcjach
+                    $appRAMCache.BatchTick() | Out-Null
+                    
+                    # Periodic save — co 100 iteracji (~3 min) zapisz learned data
+                    if ($iteration % 100 -eq 0 -and $iteration -gt 0) {
+                        $appRAMCache.SaveState($Script:ConfigDir)
+                        if ($Global:DebugMode) {
+                            Add-Log "- RAMCache SAVED: Paths=$($appRAMCache.AppPaths.Count) Class=$($appRAMCache.AppClassification.Count) → C:\CPUManager\RAMCache.json"
+                        }
+                    }
+                    
+                    # Proactive idle cache + idle learning (co 15 iteracji w idle)
                     if (-not $isUserActive -and $currentMetrics.CPU -lt 15 -and $iteration % 15 -eq 0) {
                         $exePaths = if ($performanceBooster) { $performanceBooster.AppExecutablePaths } else { $null }
-                        $appRAMCache.ProactiveCacheIdle($prophetApps, $chainTrans, $exePaths)
+                        $onBattery = $false
+                        try {
+                            $battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
+                            if ($battery -and $battery.BatteryStatus -eq 1) { $onBattery = $true }
+                        } catch {}
+                        $appRAMCache.ProactiveCacheIdle($prophetApps, $chainTrans, $exePaths, $currentMetrics.Temp, $onBattery, $currentState)
+                        $learnResult = $appRAMCache.IdleLearn()
+                        if ($learnResult -and $Global:DebugMode) {
+                            Add-Log "- RAMCache LEARN: Hit=$($learnResult.HitRate)% Waste=$($learnResult.WasteRate)% Aggr=$($learnResult.Aggressiveness) MaxMB=$($learnResult.MaxCacheMB) Session=$($appRAMCache.CurrentSession) Heavy=$($appRAMCache.HeavyMode)"
+                        }
                     }
                 } 
             } catch { }
@@ -19468,6 +20730,17 @@ $Script:PreviousEnsembleEnabled = $false
                     RAMCacheApps = if ($appRAMCache) { $appRAMCache.CachedApps.Count } else { 0 }
                     RAMCacheHits = if ($appRAMCache) { $appRAMCache.TotalHits } else { 0 }
                     RAMCachePreloads = if ($appRAMCache) { $appRAMCache.TotalPreloads } else { 0 }
+                    RAMCacheMisses = if ($appRAMCache) { $appRAMCache.TotalMisses } else { 0 }
+                    RAMCacheWasted = if ($appRAMCache) { $appRAMCache.TotalWastedPreloads } else { 0 }
+                    RAMCacheAggressiveness = if ($appRAMCache) { [Math]::Round($appRAMCache.Aggressiveness, 2) } else { 0 }
+                    RAMCacheMemPressure = if ($appRAMCache) { [Math]::Round($appRAMCache.MemoryPressure, 2) } else { 0 }
+                    RAMCacheBatchPending = if ($appRAMCache) { $appRAMCache.BatchQueue.Count } else { 0 }
+                    RAMCacheHeavyMode = if ($appRAMCache) { $appRAMCache.HeavyMode } else { $false }
+                    RAMCacheHeavyApp = if ($appRAMCache) { $appRAMCache.HeavyModeApp } else { "" }
+                    RAMCacheSession = if ($appRAMCache) { $appRAMCache.CurrentSession } else { "N/A" }
+                    RAMCacheProtectedApps = if ($appRAMCache) { $appRAMCache.ProtectedApps.Count } else { 0 }
+                    RAMCacheAltTabProtected = if ($appRAMCache) { $appRAMCache.AltTabProtection.Count } else { 0 }
+                    RAMCacheGuardBandMB = if ($appRAMCache) { if ($appRAMCache.HeavyMode) { $appRAMCache.GuardBandHeavyMB } else { $appRAMCache.GuardBandMB } } else { 0 }
                     RAMCacheStatus = if ($appRAMCache) { $appRAMCache.GetStatus() } else { "N/A" }
                     PerfBoosterKnownHeavyApps = if ($performanceBooster) { $performanceBooster.KnownHeavyApps.Count } else { 0 }
                     PerfBoosterLastReason = if ($performanceBooster) { $performanceBooster.LastBoostReason } else { "" }
@@ -20615,9 +21888,10 @@ $Script:PreviousEnsembleEnabled = $false
         # AppRAMCache: zwolnij wszystkie cached pliki
         if ($appRAMCache) {
             try { 
+                $appRAMCache.SaveState($Script:ConfigDir)  # Persist learned data
                 $stats = "$($appRAMCache.TotalPreloads) preloads, $($appRAMCache.TotalHits) hits"
                 $appRAMCache.Cleanup()
-                Write-Host "  [RAMCache] Freed all ($stats)" -ForegroundColor Green
+                Write-Host "  [RAMCache] Saved state + freed all ($stats)" -ForegroundColor Green
             } catch {}
         }
         }
