@@ -373,6 +373,90 @@ function Detect-CPU {
 }
 # Alias dla kompatybilnosci wstecznej
 function Detect-HybridCPU { return Detect-CPU }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CENTRALNY PROFIL HARDWARE — $Script:HW
+# Jedno miejsce z CAŁĄ wiedzą o maszynie. Wypełniany po Detect-CPU + RAM detect.
+# Używany przez: RAMCache, Q-Learning, Prophet, PerformanceBooster, TDP AI
+# ═══════════════════════════════════════════════════════════════════════════════
+function Build-HardwareProfile {
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $totalRAM_MB = [Math]::Round($os.TotalVisibleMemorySize / 1KB)
+        $freeRAM_MB  = [Math]::Round($os.FreePhysicalMemory / 1KB)
+        $totalRAM_GB = [Math]::Round($totalRAM_MB / 1024, 1)
+    } catch {
+        $totalRAM_MB = 8192; $freeRAM_MB = 4096; $totalRAM_GB = 8
+    }
+    
+    # Storage type detection (NVMe vs SSD vs HDD)
+    $storageType = "Unknown"
+    try {
+        $sysDisk = Get-PhysicalDisk -ErrorAction Stop | Where-Object { $_.DeviceId -eq 0 } | Select-Object -First 1
+        if ($sysDisk) {
+            if ($sysDisk.BusType -eq 'NVMe' -or $sysDisk.MediaType -eq 'SSD') {
+                $storageType = if ($sysDisk.BusType -eq 'NVMe') { "NVMe" } else { "SSD" }
+            } else { $storageType = "HDD" }
+        }
+    } catch {
+        # Fallback: sprawdź czy seek time wskazuje na SSD
+        try {
+            $diskPerf = Get-Counter '\PhysicalDisk(0 *)\Avg. Disk sec/Read' -ErrorAction Stop
+            $avgRead = $diskPerf.CounterSamples[0].CookedValue
+            $storageType = if ($avgRead -lt 0.001) { "NVMe" } elseif ($avgRead -lt 0.005) { "SSD" } else { "HDD" }
+        } catch { $storageType = "SSD" }  # assume SSD if can't detect
+    }
+    
+    # Tier: określa ogólną "klasę" maszyny dla AI decisions
+    # Tier 1: High-end (≥32GB, ≥8 cores, NVMe/SSD) → agresywny cache, więcej preloadów
+    # Tier 2: Mid-range (16-31GB, 4-7 cores) → standardowy cache
+    # Tier 3: Low-end (<16GB, <4 cores lub HDD) → ostrożny cache, oszczędzaj RAM
+    $tier = 2
+    if ($totalRAM_GB -ge 32 -and $Script:TotalCores -ge 8) { $tier = 1 }
+    elseif ($totalRAM_GB -lt 16 -or $Script:TotalCores -lt 4 -or $storageType -eq "HDD") { $tier = 3 }
+    
+    $hw = @{
+        # CPU
+        Vendor       = $Script:CPUVendor
+        Model        = $Script:CPUModel
+        Generation   = $Script:CPUGeneration
+        Cores        = $Script:TotalCores
+        Threads      = $Script:TotalThreads
+        IsHybrid     = $Script:IsHybridCPU
+        PCores       = $Script:PCoreCount
+        ECores       = $Script:ECoreCount
+        Architecture = $Script:HybridArchitecture
+        # RAM
+        TotalRAM_MB  = $totalRAM_MB
+        TotalRAM_GB  = $totalRAM_GB
+        FreeRAM_MB   = $freeRAM_MB
+        # Storage
+        StorageType  = $storageType  # "NVMe" | "SSD" | "HDD"
+        # GPU (wypełniane później po Detect-GPU)
+        HasdGPU      = $false
+        dGPUVendor   = ""
+        # Tier
+        Tier         = $tier         # 1=High-end, 2=Mid, 3=Low-end
+        # Computed cache strategy
+        # Tier 1: agresywny preload, duży cache, dużo apps w startup
+        # Tier 2: standardowy
+        # Tier 3: ostrożny, mały cache, priorytetyzuj tylko heavy apps
+        CacheStrategy = switch ($tier) {
+            1 { @{ MaxStartupApps = 10; MaxIdlePreload = 8; MaxModules = 50; MaxSavedFiles = 40; BatchSize = 64MB; CachePercent = 0.50 } }
+            2 { @{ MaxStartupApps = 6;  MaxIdlePreload = 4; MaxModules = 35; MaxSavedFiles = 30; BatchSize = 32MB; CachePercent = 0.40 } }
+            3 { @{ MaxStartupApps = 3;  MaxIdlePreload = 2; MaxModules = 20; MaxSavedFiles = 20; BatchSize = 16MB; CachePercent = 0.30 } }
+        }
+    }
+    
+    # Bonus: HDD → cache jest KRYTYCZNY (dysk wolny), zwiększ priorytet cache
+    if ($storageType -eq "HDD") {
+        $hw.CacheStrategy.CachePercent = [Math]::Min(0.60, $hw.CacheStrategy.CachePercent + 0.15)
+        $hw.CacheStrategy.MaxStartupApps = [Math]::Min(12, $hw.CacheStrategy.MaxStartupApps + 3)
+    }
+    
+    return $hw
+}
+
 # #
 # GPU DETECTION (iGPU vs dGPU - Intel/AMD/NVIDIA)
 # #
@@ -15706,6 +15790,9 @@ class AppRAMCache {
     # ── NEW: DisplayName → ProcessName mapping ──
     [hashtable] $NameMap              # "Google Chrome" → "chrome", "Total Commander" → "TOTALCMD"
     
+    # ── NEW: Hardware Profile (wypełniane przez ENGINE po Detect-CPU) ──
+    [hashtable] $HW                   # CPU/RAM/Storage info od ENGINE
+    
     AppRAMCache() {
         $this.CachedApps = @{}
         $this.AppPaths = @{}
@@ -15750,6 +15837,7 @@ class AppRAMCache {
         $this.NegativeScores = @{}
         $this.CurrentSession = "Mixed"
         $this.NameMap = @{}
+        $this.HW = @{}  # Wypełniane przez ENGINE po Detect-CPU via SetHardwareProfile
         
         # ═══ SKALOWANIE DO HARDWARE (pkt 1,6,9 instrukcji) ═══
         try {
@@ -15759,22 +15847,21 @@ class AppRAMCache {
             $totalGB = [Math]::Round($this.TotalSystemRAM / 1024, 1)
             
             # Guard Band = % RAM (pkt 1: procent, nie stała)
-            # Mniejszy procent przy większym RAM — bo OS potrzebuje mniej proporcjonalnie
             if ($totalGB -ge 32) {
-                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.08)     # 8% → 40GB = 3.2GB
-                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.10) # 10% → 40GB = 4GB
+                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.08)
+                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.10)
             } elseif ($totalGB -ge 16) {
-                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.10)     # 10%
-                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.14) # 14%
+                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.10)
+                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.14)
             } else {
-                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.12)     # 12%
-                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.18) # 18%
+                $this.GuardBandMB = [int]($this.TotalSystemRAM * 0.12)
+                $this.GuardBandHeavyMB = [int]($this.TotalSystemRAM * 0.18)
             }
             
-            # MaxCacheMB = 50% RAM (pkt 1: 40-60% dynamicznie)
+            # MaxCacheMB = % RAM — zależne od Tier (ustawiane po otrzymaniu HW)
+            # Default 50% — zostanie skorygowane gdy HW.CacheStrategy dostępne
             $this.MaxCacheMB = [int]($this.TotalSystemRAM * 0.50)
             
-            # Zmierz dostępny RAM od razu (pkt 4: nie opierać się na default)
             $this.LastAvailableMB = [Math]::Round($freeRAM)
             
             # BatchSize skalowany do RAM
@@ -15789,6 +15876,33 @@ class AppRAMCache {
             $this.GuardBandHeavyMB = 1536
             $this.LastAvailableMB = 4096
         }
+    }
+    
+    # ═══ Wywołaj PO ustawieniu $this.HW przez ENGINE ═══
+    # Dostosowuje parametry cache na podstawie pełnego profilu hardware
+    [void] ApplyHardwareProfile() {
+        if (-not $this.HW -or $this.HW.Count -eq 0) { return }
+        $cs = $this.HW.CacheStrategy
+        if (-not $cs) { return }
+        
+        # MaxCacheMB z CacheStrategy (Tier-dependent %)
+        $this.MaxCacheMB = [int]($this.TotalSystemRAM * $cs.CachePercent)
+        $this.BatchSizeBytes = $cs.BatchSize
+        
+        # HDD → cache KRYTYCZNY — potrzebujemy agresywnego preloadu
+        # NVMe → cache pomocny ale mniej krytyczny — dysk jest szybki
+        $storageType = if ($this.HW.StorageType) { $this.HW.StorageType } else { "SSD" }
+        if ($storageType -eq "HDD") {
+            # HDD: zwiększ retencję, zmniejsz eviction — trzymaj jak najwięcej w RAM
+            $this.RetentionTolerance = [Math]::Min(1.0, $this.RetentionTolerance + 0.3)
+            $this.Aggressiveness = [Math]::Min($this.AggressivenessMax, $this.Aggressiveness + 0.2)
+        } elseif ($storageType -eq "NVMe") {
+            # NVMe: standardowa retencja, eviction OK — dysk szybki
+            $this.RetentionTolerance = [Math]::Max(0.3, $this.RetentionTolerance - 0.1)
+        }
+        
+        $tier = if ($this.HW.Tier) { $this.HW.Tier } else { 2 }
+        Write-RCLog "HW PROFILE: Tier=$tier $($this.HW.Vendor) $($this.HW.Cores)C/$($this.HW.Threads)T RAM=$($this.HW.TotalRAM_GB)GB Storage=$storageType → MaxCache=$($this.MaxCacheMB)MB Batch=$([int]($this.BatchSizeBytes/1MB))MB Aggr=$([Math]::Round($this.Aggressiveness,2))"
     }
     
     # ═══════════════════════════════════════════════════════════════
@@ -15925,6 +16039,9 @@ class AppRAMCache {
     [bool] PreloadApp([string]$appName, [string]$exePath, [double]$confidence) {
         if (-not $this.Enabled) { return $false }
         
+        # Blacklist: Desktop, system procesy — nie preloaduj, nie loguj
+        if ($appName -eq "Desktop" -or $appName -match '^(pwsh|powershell|conhost|WindowsTerminal|ShellHost|explorer|dwm)$') { return $false }
+        
         # #7: Negative learning — skip apps z penalty
         if ($this.IsNegativePenalty($appName)) { return $false }
         
@@ -15975,19 +16092,40 @@ class AppRAMCache {
             $preloadLevel = "warm"     # 25-40%: exe only
         }
         
-        # Find exe path
-        $targetPath = $exePath
-        if ([string]::IsNullOrWhiteSpace($targetPath)) {
-            if ($this.AppPaths.ContainsKey($appName)) {
-                $targetPath = $this.AppPaths[$appName].ExePath
-            } else {
-                try {
-                    $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($proc -and $proc.Path) { $targetPath = $proc.Path }
-                } catch {}
+        # Find exe path — kaskadowo: podany exePath → AppPaths → Get-Process
+        $targetPath = ""
+        
+        # Próba 1: podany exePath (jeśli istnieje na dysku)
+        if (-not [string]::IsNullOrWhiteSpace($exePath) -and (Test-Path $exePath -ErrorAction SilentlyContinue)) {
+            $targetPath = $exePath
+        }
+        
+        # Próba 2: AppPaths (zapisany z poprzedniej sesji)
+        if ([string]::IsNullOrWhiteSpace($targetPath) -and $this.AppPaths.ContainsKey($appName)) {
+            $saved = $this.AppPaths[$appName].ExePath
+            if (-not [string]::IsNullOrWhiteSpace($saved) -and (Test-Path $saved -ErrorAction SilentlyContinue)) {
+                $targetPath = $saved
             }
         }
-        if ([string]::IsNullOrWhiteSpace($targetPath) -or -not (Test-Path $targetPath)) {
+        
+        # Próba 3: szukaj running procesu (działa np. po update exe, np. Claude/Electron apps)
+        if ([string]::IsNullOrWhiteSpace($targetPath)) {
+            try {
+                $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($proc -and $proc.Path -and (Test-Path $proc.Path)) { 
+                    $targetPath = $proc.Path
+                    # Update AppPaths z nową ścieżką
+                    if (-not $this.AppPaths.ContainsKey($appName)) {
+                        $this.AppPaths[$appName] = @{ ExePath = $proc.Path; Dir = [System.IO.Path]::GetDirectoryName($proc.Path) }
+                    } else {
+                        $this.AppPaths[$appName].ExePath = $proc.Path
+                        $this.AppPaths[$appName].Dir = [System.IO.Path]::GetDirectoryName($proc.Path)
+                    }
+                }
+            } catch {}
+        }
+        
+        if ([string]::IsNullOrWhiteSpace($targetPath)) {
             Write-RCLog "PRELOAD SKIP '$appName': no valid path (exePath='$exePath', inAppPaths=$($this.AppPaths.ContainsKey($appName)))"
             return $false
         }
@@ -16008,7 +16146,14 @@ class AppRAMCache {
         # 2. DLL/Modules — użyj LEARNED FILES jeśli dostępne, inaczej skanuj katalog
         $usedLearned = $false
         if ($preloadLevel -ne "warm") {
-            $maxFiles = if ($preloadLevel -eq "full") { 20 } else { 8 }
+            # Skaluj maxFiles do HW Tier
+            $maxModPerApp = 30  # default
+            if ($this.HW -and $this.HW.CacheStrategy) { $maxModPerApp = $this.HW.CacheStrategy.MaxModules }
+            else {
+                $totalGB2 = $this.TotalSystemRAM / 1024.0
+                $maxModPerApp = if ($totalGB2 -ge 32) { 30 } elseif ($totalGB2 -ge 16) { 20 } else { 12 }
+            }
+            $maxFiles = if ($preloadLevel -eq "full") { $maxModPerApp } else { [Math]::Max(5, [int]($maxModPerApp * 0.4)) }
             
             # PRIORYTET 1: Learned files z profilu (rzeczywiste moduły procesu)
             if ($this.AppPaths.ContainsKey($appName) -and $this.AppPaths[$appName].LearnedFiles -and $this.AppPaths[$appName].LearnedFiles.Count -gt 0) {
@@ -16321,8 +16466,15 @@ class AppRAMCache {
         }
         if ($candidates.Count -eq 0) { return }
         
-        # Preload top kandydatów (ograniczony przez aggressiveness)
-        $maxToPreload = [Math]::Max(1, [int]($this.Aggressiveness * 3))  # 0.3→1, 0.6→2, 1.0→3
+        # Preload top kandydatów — skaluj do HW Tier
+        $baseMax = 4  # default
+        if ($this.HW -and $this.HW.CacheStrategy) {
+            $baseMax = $this.HW.CacheStrategy.MaxIdlePreload
+        } else {
+            $totalGB = $this.TotalSystemRAM / 1024.0
+            $baseMax = if ($totalGB -ge 32) { 8 } elseif ($totalGB -ge 16) { 5 } else { 3 }
+        }
+        $maxToPreload = [Math]::Max(2, [int]($this.Aggressiveness * $baseMax))
         $sorted = $candidates.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First $maxToPreload
         
         foreach ($entry in $sorted) {
@@ -16835,9 +16987,15 @@ class AppRAMCache {
             if (-not $proc) { return }
             
             # Pobierz RZECZYWISTE załadowane moduły procesu
+            $maxModules = 35  # default
+            if ($this.HW -and $this.HW.CacheStrategy) { $maxModules = $this.HW.CacheStrategy.MaxModules }
+            else {
+                $totalGB3 = $this.TotalSystemRAM / 1024.0
+                $maxModules = if ($totalGB3 -ge 32) { 50 } elseif ($totalGB3 -ge 16) { 35 } else { 25 }
+            }
             $modules = $proc.Modules | Where-Object { 
                 $_.FileName -and (Test-Path $_.FileName -ErrorAction SilentlyContinue)
-            } | Select-Object -First 30  # Max 30 modułów
+            } | Select-Object -First $maxModules
             
             if ($modules.Count -lt 2) { return }
             
@@ -16876,6 +17034,17 @@ class AppRAMCache {
         try {
             $path = Join-Path $configDir "RAMCache.json"
             
+            # WALIDACJA: nie zapisuj pustych danych (chroni przed utratą przy crash/restart)
+            if ($this.AppPaths.Count -eq 0 -and $this.AppClassification.Count -eq 0) {
+                Write-RCLog "SAVE SKIP: empty state (Paths=0 Class=0) — protecting existing data"
+                return
+            }
+            
+            # Backup istniejącego pliku (rotacja: .bak)
+            if (Test-Path $path) {
+                try { Copy-Item $path "$path.bak" -Force -ErrorAction Stop } catch {}
+            }
+            
             # NegativeScores (safe serialization)
             $negScores = @{}
             foreach ($app in @($this.NegativeScores.Keys)) {
@@ -16906,7 +17075,7 @@ class AppRAMCache {
                         $files = [System.Collections.Generic.List[hashtable]]::new()
                         $count = 0
                         foreach ($f in $entry.LearnedFiles) {
-                            if ($count -ge 25) { break }
+                            if ($count -ge $(if ($this.HW -and $this.HW.CacheStrategy) { $this.HW.CacheStrategy.MaxSavedFiles } else { 40 })) { break }
                             if ($f -and $f.Path) {
                                 $files.Add(@{ P = [string]$f.Path; S = [long]$f.Size; M = [string]$f.Module })
                                 $count++
@@ -16955,6 +17124,20 @@ class AppRAMCache {
             $json = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
             $data = $json | ConvertFrom-Json
             
+            # Walidacja: jeśli JSON jest pusty/uszkodzony, spróbuj backup
+            $pathCount = 0
+            if ($data.AppPaths) { $data.AppPaths.PSObject.Properties | ForEach-Object { $pathCount++ } }
+            if ($pathCount -eq 0 -and (Test-Path "$path.bak")) {
+                Write-RCLog "LOAD: Main JSON empty (Paths=0), trying backup..."
+                $json = [System.IO.File]::ReadAllText("$path.bak", [System.Text.Encoding]::UTF8)
+                $data = $json | ConvertFrom-Json
+                $pathCount = 0
+                if ($data.AppPaths) { $data.AppPaths.PSObject.Properties | ForEach-Object { $pathCount++ } }
+                if ($pathCount -gt 0) {
+                    Write-RCLog "LOAD: Backup has $pathCount paths — restoring"
+                }
+            }
+            
             if ($data.AppClassification) {
                 $data.AppClassification.PSObject.Properties | ForEach-Object {
                     $this.AppClassification[$_.Name] = $_.Value
@@ -16995,7 +17178,8 @@ class AppRAMCache {
                     $this.NameMap[$_.Name] = [string]$_.Value
                 }
             }
-            if ($data.MaxCacheMB) { $this.MaxCacheMB = [int]$data.MaxCacheMB }
+            # MaxCacheMB NIE przywracaj z JSON — jest dynamicznie wyliczane w konstruktorze
+            # na podstawie aktualnego RAM. Stara wartość z JSON mogła być z innej sesji/innego RAM.
             if ($data.TotalHits) { $this.TotalHits = [int]$data.TotalHits }
             if ($data.TotalMisses) { $this.TotalMisses = [int]$data.TotalMisses }
             if ($data.TotalPreloads) { $this.TotalPreloads = [int]$data.TotalPreloads }
@@ -17003,6 +17187,7 @@ class AppRAMCache {
         } catch {
             Write-RCLog "LOAD ERROR: $($_.Exception.Message)"
         }
+        Write-RCLog "LoadState: Paths=$($this.AppPaths.Count) Class=$($this.AppClassification.Count) Aggr=$([Math]::Round($this.Aggressiveness,2)) MaxCache=$($this.MaxCacheMB)MB"
     }
     
     # ═══════════════════════════════════════════════════════════════
@@ -17017,8 +17202,10 @@ class AppRAMCache {
             $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
                 $_.Path -and 
                 $_.Id -gt 4 -and 
-                $_.ProcessName -notmatch '^(svchost|csrss|lsass|services|smss|wininit|System|Idle|Registry|dwm|conhost|fontdrvhost|sihost|taskhostw|ctfmon|SearchHost|StartMenuExperienceHost|RuntimeBroker|TextInputHost|SecurityHealthSystray|explorer|ShellExperienceHost|pwsh|powershell|WindowsTerminal|WmiPrvSE|wmiprvse|ApplicationFrameHost|nvcontainer|NVDisplay\.Container|audiodg|CompPkgSrv|dllhost)$' -and
-                $_.WorkingSet64 -gt 10MB
+                $_.ProcessName -notmatch '^(svchost|csrss|lsass|services|smss|wininit|System|Idle|Registry|dwm|conhost|fontdrvhost|sihost|taskhostw|ctfmon|SearchHost|StartMenuExperienceHost|RuntimeBroker|TextInputHost|SecurityHealthSystray|explorer|ShellExperienceHost|pwsh|powershell|WindowsTerminal|WmiPrvSE|wmiprvse|ApplicationFrameHost|nvcontainer|NVDisplay\.Container|audiodg|CompPkgSrv|dllhost|ShellHost|igfxEM|dasHost|spoolsv|SearchIndexer|MidiSrv|IntelAudioService|CrossDeviceResume|TiWorker|msedgewebview2|GameManagerService3|OneApp\.IGCC\.WinService)$' -and
+                $_.ProcessName -notmatch '\.(tmp|nks\.tmp)$' -and
+                $_.Path -notmatch '\\(Temp|TEMP|tmp)\\' -and
+                $_.WorkingSet64 -gt 30MB
             } | Sort-Object WorkingSet64 -Descending | Select-Object -First 20
             
             foreach ($proc in $procs) {
@@ -17040,7 +17227,7 @@ class AppRAMCache {
                     # 2. Profiluj moduły (rzeczywiste DLL w pamięci procesu)
                     $modules = $proc.Modules | Where-Object { 
                         $_.FileName -and (Test-Path $_.FileName -ErrorAction SilentlyContinue)
-                    } | Select-Object -First 30
+                    } | Select-Object -First $(if ($this.HW -and $this.HW.CacheStrategy) { $this.HW.CacheStrategy.MaxModules } elseif ($this.TotalSystemRAM -gt 32768) { 50 } elseif ($this.TotalSystemRAM -gt 16384) { 35 } else { 25 })
                     
                     if ($modules.Count -ge 2) {
                         $learnedFiles = [System.Collections.Generic.List[hashtable]]::new()
@@ -17073,15 +17260,12 @@ class AppRAMCache {
                     $this.AppClassification[$appName] = $class
                     
                     $learned++
+                    Write-RCLog "  BOOTSTRAP NEW: $appName [$class] modules=$($this.AppPaths[$appName].ModuleCount) exe=$($proc.Path)"
                 } catch { continue }
             }
         } catch {}
-        Write-RCLog "BOOTSTRAP: Scanned $learned apps. Paths=$($this.AppPaths.Count) Class=$($this.AppClassification.Count)"
-        foreach ($app in $this.AppPaths.Keys) {
-            $lfc = 0; if ($this.AppPaths[$app].ContainsKey('LearnedFiles') -and $this.AppPaths[$app].LearnedFiles) { $lfc = $this.AppPaths[$app].LearnedFiles.Count }
-            $cls = if ($this.AppClassification.ContainsKey($app)) { $this.AppClassification[$app] } else { "?" }
-            Write-RCLog "  APP: $app [$cls] modules=$lfc exe=$($this.AppPaths[$app].ExePath)"
-        }
+        Write-RCLog "BOOTSTRAP: Scanned $learned new apps. Paths=$($this.AppPaths.Count) Class=$($this.AppClassification.Count)"
+        # Loguj tylko nowo znalezione procesy (nie cały AppPaths)
         return $learned
     }
     
@@ -17111,8 +17295,16 @@ class AppRAMCache {
             
             $prio = 0
             if ($app.IsHeavy) { $prio += 30 }
-            if ($app.Samples -and $app.Samples -gt 20) { $prio += [Math]::Min(20, [int]($app.Samples / 5)) }
+            if ($app.Samples -and $app.Samples -gt 5) { $prio += [Math]::Min(25, [int]($app.Samples / 3)) }
             if ($app.AvgCPU -gt 40) { $prio += 15 }
+            # Bonus za historyczne hity (z NegativeScores — ironic name ale trzyma hitCount)
+            if ($this.NegativeScores.ContainsKey($appName)) {
+                $prio += [Math]::Min(20, $this.NegativeScores[$appName].HitCount * 3)
+            }
+            # LEARNED bonus — app z profilem ładuje się efektywniej
+            if ($this.AppPaths[$appName].ContainsKey('LearnedFiles') -and $this.AppPaths[$appName].LearnedFiles -and $this.AppPaths[$appName].LearnedFiles.Count -gt 5) {
+                $prio += 10
+            }
             # Chain bonus
             if ($transitions) {
                 foreach ($src in $transitions.Keys) {
@@ -17121,21 +17313,455 @@ class AppRAMCache {
                     }
                 }
             }
-            if ($prio -ge 25) { $candidates[$appName] = $prio }  # Min próg
+            if ($prio -ge 10) { $candidates[$appName] = $prio }  # Niski próg — mamy 20GB RAM do zagospodarowania
         }
         
         if ($candidates.Count -eq 0) { return }
         
-        # Preload top 3 (batch — nie blokuj startu)
-        $sorted = $candidates.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3
+        # Preload top kandydatów — skaluj do HW Tier
+        $maxStartup = 6  # default
+        if ($this.HW -and $this.HW.CacheStrategy) {
+            $maxStartup = $this.HW.CacheStrategy.MaxStartupApps
+        } else {
+            $totalGB = $this.TotalSystemRAM / 1024.0
+            $maxStartup = if ($totalGB -ge 32) { 10 } elseif ($totalGB -ge 16) { 6 } else { 3 }
+        }
+        
+        $sorted = $candidates.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First $maxStartup
+        Write-RCLog "STARTUP PRELOAD: $($sorted.Count) candidates (max=$maxStartup, hour=$currentHour, activity=$hourActivity)"
         foreach ($entry in $sorted) {
             $appName = $entry.Name
             $exePath = $this.AppPaths[$appName].ExePath
-            $conf = [Math]::Min(1.0, $entry.Value / 60.0)  # Normalizuj priorytet na confidence
+            $conf = [Math]::Min(1.0, $entry.Value / 60.0)
             $this.PreloadApp($appName, $exePath, $conf) | Out-Null
         }
     }
 }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FastFileCopy — inteligentne kopiowanie/przenoszenie plików
+# Kontrolowane przez ENGINE, używa RAMCache jako bufor
+# Strategie: SmallBatch (parallel), LargeStream (sequential), Mix (adaptive)
+# ═══════════════════════════════════════════════════════════════════════════
+class FastFileCopy {
+    # ── Config ──
+    [int] $SmallFileThreshold          # Granica mały/duży plik (bytes)
+    [int] $ParallelThreads             # Ile wątków dla małych plików
+    [int] $LargeBufferSize             # Bufor dla dużych plików
+    [int] $RAMBufferMaxMB              # Max RAM na buforowanie małych plików
+    [bool] $VerifyAfterCopy            # Sprawdź hash po kopiowaniu
+    [bool] $PreserveTimestamps         # Zachowaj daty
+    
+    # ── State ──
+    [long] $TotalBytes
+    [long] $CopiedBytes
+    [int] $TotalFiles
+    [int] $CopiedFiles
+    [int] $FailedFiles
+    [double] $SpeedMBps
+    [string] $CurrentFile
+    [string] $Strategy                 # "SmallBatch" | "LargeStream" | "Mixed"
+    [bool] $IsCancelled
+    [System.Diagnostics.Stopwatch] $Timer
+    [System.Collections.Generic.List[string]] $Errors
+    
+    # ── Drive info cache ──
+    [hashtable] $DriveTypes            # "C:" → "SSD" | "HDD" | "Network"
+    
+    FastFileCopy() {
+        $this.SmallFileThreshold = 1MB
+        $this.LargeBufferSize = 4MB
+        $this.RAMBufferMaxMB = 512
+        $this.VerifyAfterCopy = $false
+        $this.PreserveTimestamps = $true
+        $this.IsCancelled = $false
+        $this.Timer = [System.Diagnostics.Stopwatch]::new()
+        $this.Errors = [System.Collections.Generic.List[string]]::new()
+        $this.DriveTypes = @{}
+        
+        # Auto-skaluj do RAM
+        try {
+            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $totalGB = [Math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+            if ($totalGB -ge 32) {
+                $this.ParallelThreads = 16
+                $this.RAMBufferMaxMB = 2048
+                $this.LargeBufferSize = 8MB
+            } elseif ($totalGB -ge 16) {
+                $this.ParallelThreads = 12
+                $this.RAMBufferMaxMB = 1024
+                $this.LargeBufferSize = 4MB
+            } else {
+                $this.ParallelThreads = 8
+                $this.RAMBufferMaxMB = 512
+                $this.LargeBufferSize = 2MB
+            }
+        } catch {
+            $this.ParallelThreads = 8
+        }
+        
+        $this.DetectDriveTypes()
+    }
+    
+    # ═══ WYKRYWANIE TYPU DYSKU ═══
+    [void] DetectDriveTypes() {
+        try {
+            $disks = Get-PhysicalDisk -ErrorAction SilentlyContinue
+            $partitions = Get-CimInstance Win32_DiskDriveToDiskPartition -ErrorAction SilentlyContinue
+            $logicals = Get-CimInstance Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue
+            
+            foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
+                if (-not $drive.IsReady) { continue }
+                $letter = $drive.Name.Substring(0, 2)  # "C:"
+                if ($drive.DriveType -eq [System.IO.DriveType]::Network) {
+                    $this.DriveTypes[$letter] = "Network"
+                } else {
+                    # Domyślnie SSD, spróbuj wykryć HDD
+                    $this.DriveTypes[$letter] = "SSD"
+                    try {
+                        $mediaType = Get-PhysicalDisk | Where-Object { $_.DeviceID -eq "0" } | Select-Object -First 1 -ExpandProperty MediaType
+                        if ($mediaType -eq "HDD") { $this.DriveTypes[$letter] = "HDD" }
+                    } catch {}
+                }
+            }
+        } catch {}
+    }
+    
+    [string] GetDriveType([string]$path) {
+        try {
+            $root = [System.IO.Path]::GetPathRoot($path)
+            $letter = $root.Substring(0, 2)
+            if ($this.DriveTypes.ContainsKey($letter)) { return $this.DriveTypes[$letter] }
+            if ($path.StartsWith("\\")) { return "Network" }
+        } catch {}
+        return "SSD"
+    }
+    
+    # ═══ ANALIZA ŹRÓDŁA — dobór strategii ═══
+    [hashtable] AnalyzeSource([string]$sourcePath) {
+        $result = @{
+            TotalFiles = 0; TotalBytes = [long]0
+            SmallFiles = 0; SmallBytes = [long]0
+            LargeFiles = 0; LargeBytes = [long]0
+            Files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        }
+        
+        try {
+            $items = if (Test-Path $sourcePath -PathType Container) {
+                [System.IO.DirectoryInfo]::new($sourcePath).EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories)
+            } else {
+                @([System.IO.FileInfo]::new($sourcePath))
+            }
+            
+            foreach ($fi in $items) {
+                $result.TotalFiles++
+                $result.TotalBytes += $fi.Length
+                $result.Files.Add($fi)
+                if ($fi.Length -le $this.SmallFileThreshold) {
+                    $result.SmallFiles++
+                    $result.SmallBytes += $fi.Length
+                } else {
+                    $result.LargeFiles++
+                    $result.LargeBytes += $fi.Length
+                }
+            }
+        } catch {
+            $this.Errors.Add("Analiza: $_")
+        }
+        
+        return $result
+    }
+    
+    [string] SelectStrategy([hashtable]$analysis, [string]$srcDrive, [string]$dstDrive) {
+        $smallRatio = if ($analysis.TotalFiles -gt 0) { $analysis.SmallFiles / $analysis.TotalFiles } else { 0 }
+        
+        # >80% małych plików → SmallBatch (parallel)
+        if ($smallRatio -gt 0.8) { return "SmallBatch" }
+        # >80% dużych plików → LargeStream (sequential, duży bufor)
+        if ($smallRatio -lt 0.2) { return "LargeStream" }
+        # Mix
+        return "Mixed"
+    }
+    
+    # ═══ GŁÓWNA METODA — KOPIUJ ═══
+    [hashtable] Copy([string]$source, [string]$destination, [bool]$move) {
+        $this.Reset()
+        $this.Timer.Start()
+        
+        $analysis = $this.AnalyzeSource($source)
+        if ($analysis.TotalFiles -eq 0) {
+            return @{ Success = $false; Error = "Brak plików do kopiowania" }
+        }
+        
+        $this.TotalFiles = $analysis.TotalFiles
+        $this.TotalBytes = $analysis.TotalBytes
+        
+        $srcDrive = $this.GetDriveType($source)
+        $dstDrive = $this.GetDriveType($destination)
+        $this.Strategy = $this.SelectStrategy($analysis, $srcDrive, $dstDrive)
+        
+        $srcRoot = if (Test-Path $source -PathType Container) { $source } else { [System.IO.Path]::GetDirectoryName($source) }
+        
+        # Sortuj: małe najpierw (szybkie parallel), duże potem (sequential)
+        $smallFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        $largeFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        foreach ($f in $analysis.Files) {
+            if ($f.Length -le $this.SmallFileThreshold) { $smallFiles.Add($f) }
+            else { $largeFiles.Add($f) }
+        }
+        
+        # ═══ FAZA 1: Małe pliki — PARALLEL z RAM buffer ═══
+        if ($smallFiles.Count -gt 0) {
+            $this.CopySmallFilesParallel($smallFiles, $srcRoot, $destination, $move)
+        }
+        
+        # ═══ FAZA 2: Duże pliki — SEQUENTIAL z dużym buforem ═══
+        if ($largeFiles.Count -gt 0 -and -not $this.IsCancelled) {
+            $this.CopyLargeFilesStream($largeFiles, $srcRoot, $destination, $move)
+        }
+        
+        $this.Timer.Stop()
+        $elapsed = $this.Timer.Elapsed
+        $avgSpeed = if ($elapsed.TotalSeconds -gt 0) { [Math]::Round(($this.CopiedBytes / 1MB) / $elapsed.TotalSeconds, 1) } else { 0 }
+        
+        return @{
+            Success = ($this.FailedFiles -eq 0)
+            TotalFiles = $this.TotalFiles
+            CopiedFiles = $this.CopiedFiles
+            FailedFiles = $this.FailedFiles
+            TotalMB = [Math]::Round($this.TotalBytes / 1MB, 1)
+            CopiedMB = [Math]::Round($this.CopiedBytes / 1MB, 1)
+            Elapsed = $elapsed.ToString("mm\:ss\.f")
+            AvgSpeedMBps = $avgSpeed
+            Strategy = $this.Strategy
+            Errors = $this.Errors
+        }
+    }
+    
+    # ═══ MAŁE PLIKI — PARALLEL (RunspacePool) ═══
+    [void] CopySmallFilesParallel([System.Collections.Generic.List[System.IO.FileInfo]]$files, [string]$srcRoot, [string]$dst, [bool]$move) {
+        $pool = [System.Management.Automation.Runspaces.RunspacePool]::CreateRunspacePool(1, $this.ParallelThreads)
+        $pool.Open()
+        
+        $jobs = [System.Collections.Generic.List[hashtable]]::new()
+        $batchBytes = [long]0
+        
+        # Grupuj w batche po RAMBufferMaxMB
+        $batch = [System.Collections.Generic.List[hashtable]]::new()
+        
+        foreach ($fi in $files) {
+            if ($this.IsCancelled) { break }
+            
+            $relativePath = $fi.FullName.Substring($srcRoot.Length).TrimStart('\', '/')
+            $dstPath = [System.IO.Path]::Combine($dst, $relativePath)
+            
+            $batch.Add(@{ Src = $fi.FullName; Dst = $dstPath; Size = $fi.Length; Move = $move; Timestamps = $this.PreserveTimestamps })
+            $batchBytes += $fi.Length
+            
+            # Flush batch gdy pełny lub ostatni plik
+            if ($batchBytes -ge ($this.RAMBufferMaxMB * 1MB) -or $fi -eq $files[$files.Count - 1]) {
+                foreach ($item in $batch) {
+                    $ps = [System.Management.Automation.PowerShell]::Create()
+                    $ps.RunspacePool = $pool
+                    [void]$ps.AddScript({
+                        param($src, $dst, $move, $ts)
+                        try {
+                            $dstDir = [System.IO.Path]::GetDirectoryName($dst)
+                            if (-not [System.IO.Directory]::Exists($dstDir)) {
+                                [System.IO.Directory]::CreateDirectory($dstDir) | Out-Null
+                            }
+                            # RAM buffer: czytaj do pamięci, zapisz na raz
+                            $data = [System.IO.File]::ReadAllBytes($src)
+                            [System.IO.File]::WriteAllBytes($dst, $data)
+                            if ($ts) {
+                                $srcInfo = [System.IO.FileInfo]::new($src)
+                                [System.IO.File]::SetCreationTime($dst, $srcInfo.CreationTime)
+                                [System.IO.File]::SetLastWriteTime($dst, $srcInfo.LastWriteTime)
+                            }
+                            if ($move) { [System.IO.File]::Delete($src) }
+                            return @{ OK = $true; Size = $data.Length }
+                        } catch {
+                            return @{ OK = $false; Error = $_.Exception.Message; Src = $src }
+                        }
+                    }).AddArgument($item.Src).AddArgument($item.Dst).AddArgument($item.Move).AddArgument($item.Timestamps)
+                    
+                    $handle = $ps.BeginInvoke()
+                    $jobs.Add(@{ PS = $ps; Handle = $handle; Size = $item.Size })
+                }
+                
+                # Czekaj na batch
+                foreach ($job in $jobs) {
+                    try {
+                        $result = $job.PS.EndInvoke($job.Handle)
+                        if ($result -and $result[0].OK) {
+                            $this.CopiedFiles++
+                            $this.CopiedBytes += $job.Size
+                        } else {
+                            $this.FailedFiles++
+                            if ($result -and $result[0].Error) { $this.Errors.Add($result[0].Error) }
+                        }
+                    } catch {
+                        $this.FailedFiles++
+                        $this.Errors.Add("Parallel: $_")
+                    }
+                    $job.PS.Dispose()
+                }
+                $jobs.Clear()
+                $batch.Clear()
+                $batchBytes = 0
+                
+                # Update speed
+                $elapsed = $this.Timer.Elapsed.TotalSeconds
+                if ($elapsed -gt 0) { $this.SpeedMBps = [Math]::Round(($this.CopiedBytes / 1MB) / $elapsed, 1) }
+            }
+        }
+        
+        $pool.Close()
+        $pool.Dispose()
+    }
+    
+    # ═══ DUŻE PLIKI — SEQUENTIAL z dużym buforem ═══
+    [void] CopyLargeFilesStream([System.Collections.Generic.List[System.IO.FileInfo]]$files, [string]$srcRoot, [string]$dst, [bool]$move) {
+        $buffer = [byte[]]::new($this.LargeBufferSize)
+        
+        foreach ($fi in $files) {
+            if ($this.IsCancelled) { break }
+            
+            $relativePath = $fi.FullName.Substring($srcRoot.Length).TrimStart('\', '/')
+            $dstPath = [System.IO.Path]::Combine($dst, $relativePath)
+            $this.CurrentFile = $fi.Name
+            
+            try {
+                $dstDir = [System.IO.Path]::GetDirectoryName($dstPath)
+                if (-not [System.IO.Directory]::Exists($dstDir)) {
+                    [System.IO.Directory]::CreateDirectory($dstDir) | Out-Null
+                }
+                
+                # Streaming copy z dużym buforem
+                $srcStream = [System.IO.FileStream]::new($fi.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, $this.LargeBufferSize, [System.IO.FileOptions]::SequentialScan)
+                $dstStream = [System.IO.FileStream]::new($dstPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, $this.LargeBufferSize)
+                
+                try {
+                    $bytesRead = 0
+                    do {
+                        $bytesRead = $srcStream.Read($buffer, 0, $buffer.Length)
+                        if ($bytesRead -gt 0) {
+                            $dstStream.Write($buffer, 0, $bytesRead)
+                            $this.CopiedBytes += $bytesRead
+                        }
+                        # Update speed co 16MB
+                        if (($this.CopiedBytes % (16MB)) -lt $this.LargeBufferSize) {
+                            $elapsed = $this.Timer.Elapsed.TotalSeconds
+                            if ($elapsed -gt 0) { $this.SpeedMBps = [Math]::Round(($this.CopiedBytes / 1MB) / $elapsed, 1) }
+                        }
+                    } while ($bytesRead -gt 0 -and -not $this.IsCancelled)
+                } finally {
+                    $dstStream.Flush()
+                    $dstStream.Dispose()
+                    $srcStream.Dispose()
+                }
+                
+                if ($this.PreserveTimestamps) {
+                    [System.IO.File]::SetCreationTime($dstPath, $fi.CreationTime)
+                    [System.IO.File]::SetLastWriteTime($dstPath, $fi.LastWriteTime)
+                }
+                
+                if ($move -and -not $this.IsCancelled) { [System.IO.File]::Delete($fi.FullName) }
+                
+                $this.CopiedFiles++
+            } catch {
+                $this.FailedFiles++
+                $this.Errors.Add("Stream '$($fi.Name)': $_")
+            }
+        }
+    }
+    
+    # ═══ PROGRESS INFO ═══
+    [hashtable] GetProgress() {
+        $elapsed = $this.Timer.Elapsed.TotalSeconds
+        $percent = if ($this.TotalBytes -gt 0) { [Math]::Round(($this.CopiedBytes / $this.TotalBytes) * 100, 1) } else { 0 }
+        $eta = 0
+        if ($this.SpeedMBps -gt 0 -and $this.TotalBytes -gt $this.CopiedBytes) {
+            $remainMB = ($this.TotalBytes - $this.CopiedBytes) / 1MB
+            $eta = [int]($remainMB / $this.SpeedMBps)
+        }
+        return @{
+            Percent = $percent
+            CopiedMB = [Math]::Round($this.CopiedBytes / 1MB, 1)
+            TotalMB = [Math]::Round($this.TotalBytes / 1MB, 1)
+            Files = "$($this.CopiedFiles)/$($this.TotalFiles)"
+            SpeedMBps = $this.SpeedMBps
+            ETA = $eta
+            CurrentFile = $this.CurrentFile
+            Strategy = $this.Strategy
+            Failed = $this.FailedFiles
+        }
+    }
+    
+    [void] Cancel() { $this.IsCancelled = $true }
+    
+    [void] Reset() {
+        $this.TotalBytes = 0; $this.CopiedBytes = 0
+        $this.TotalFiles = 0; $this.CopiedFiles = 0; $this.FailedFiles = 0
+        $this.SpeedMBps = 0; $this.CurrentFile = ""
+        $this.IsCancelled = $false
+        $this.Errors.Clear()
+        $this.Timer.Reset()
+    }
+}
+
+# ═══ HELPER: Invoke-FastCopy — wrapper do wywołania z ENGINE/CLI ═══
+function Invoke-FastCopy {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [switch]$Move,
+        [switch]$Verify,
+        [switch]$NoProgress
+    )
+    
+    $fc = [FastFileCopy]::new()
+    if ($Verify) { $fc.VerifyAfterCopy = $true }
+    
+    $analysis = $fc.AnalyzeSource($Source)
+    $strategy = $fc.SelectStrategy($analysis, $fc.GetDriveType($Source), $fc.GetDriveType($Destination))
+    $totalMB = [Math]::Round($analysis.TotalBytes / 1MB, 1)
+    
+    Write-Host "═══ FastCopy ═══" -ForegroundColor Cyan
+    Write-Host "  Source: $Source" -ForegroundColor White
+    Write-Host "  Dest:   $Destination" -ForegroundColor White
+    Write-Host "  Files:  $($analysis.TotalFiles) ($totalMB MB) [$($analysis.SmallFiles) small + $($analysis.LargeFiles) large]" -ForegroundColor White
+    Write-Host "  Strategy: $strategy | Threads: $($fc.ParallelThreads) | Buffer: $([Math]::Round($fc.LargeBufferSize/1MB,0))MB" -ForegroundColor Yellow
+    Write-Host ""
+    
+    # Kopiuj z progress
+    if (-not $NoProgress) {
+        $job = Start-Job -ScriptBlock {
+            param($src, $dst, $mv, $ver)
+            Add-Type -AssemblyName System.Management.Automation
+            $fc2 = [FastFileCopy]::new()
+            if ($ver) { $fc2.VerifyAfterCopy = $true }
+            return $fc2.Copy($src, $dst, $mv)
+        } -ArgumentList $Source, $Destination, $Move.IsPresent, $Verify.IsPresent
+        
+        # Fallback: synchronous copy z inline progress
+        $result = $fc.Copy($Source, $Destination, $Move.IsPresent)
+    } else {
+        $result = $fc.Copy($Source, $Destination, $Move.IsPresent)
+    }
+    
+    # Wynik
+    Write-Host ""
+    if ($result.Success) {
+        Write-Host "✓ DONE: $($result.CopiedFiles) files ($($result.CopiedMB) MB) in $($result.Elapsed) @ $($result.AvgSpeedMBps) MB/s [$($result.Strategy)]" -ForegroundColor Green
+    } else {
+        Write-Host "✗ ERRORS: $($result.FailedFiles) failed, $($result.CopiedFiles) OK" -ForegroundColor Red
+        foreach ($err in $result.Errors) { Write-Host "  - $err" -ForegroundColor Red }
+    }
+    
+    return $result
+}
+
 class DesktopWidget {
     [string] $DataFile
     [bool] $Running
@@ -18575,6 +19201,13 @@ function Main {
     Write-Host "  - CPU Detection" -ForegroundColor Cyan
     Write-Host "#" -ForegroundColor DarkCyan
     Detect-HybridCPU | Out-Null
+    
+    # ═══ BUILD CENTRAL HARDWARE PROFILE ═══
+    $Script:HW = Build-HardwareProfile
+    # Update GPU info po Detect-GPU (jeśli już było)
+    if ($Script:HasdGPU) { $Script:HW.HasdGPU = $true; $Script:HW.dGPUVendor = $Script:dGPUVendor }
+    Write-Host "  [HW] Tier $($Script:HW.Tier): $($Script:HW.Vendor) $($Script:HW.Model) $($Script:HW.Generation) ($($Script:HW.Cores)C/$($Script:HW.Threads)T) RAM=$($Script:HW.TotalRAM_GB)GB Storage=$($Script:HW.StorageType)" -ForegroundColor Yellow
+    
     Write-Host ""
 # Network adapters cache (v39.3 - fix busy cursor)
 $Script:CachedNetAdapters = $null
@@ -18590,6 +19223,12 @@ $Script:PreviousEnsembleEnabled = $false
     # ═══ APP RAM CACHE — prawdziwy preload aplikacji do RAM ═══
     $appRAMCache = [AppRAMCache]::new()
     $Script:AppRAMCache = $appRAMCache
+    
+    # Przekaż hardware profile — RAMCache dostosowuje strategię do maszyny
+    if ($Script:HW) { 
+        $appRAMCache.HW = $Script:HW
+        $appRAMCache.ApplyHardwareProfile()
+    }
     
     # 1. Załaduj poprzednią wiedzę (jeśli RAMCache.json istnieje)
     $appRAMCache.LoadState($Script:ConfigDir)
