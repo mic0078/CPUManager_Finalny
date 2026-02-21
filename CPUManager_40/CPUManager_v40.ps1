@@ -146,7 +146,7 @@ try {
     }
 
     $proc = Get-Process -Id $PID -ErrorAction Stop
-    if ($proc.PriorityClass -ne 'Idle') { $proc.PriorityClass = 'Idle' }
+    if ($proc.PriorityClass -ne 'BelowNormal') { $proc.PriorityClass = 'BelowNormal' }
 } catch {}
 function Validate-TDP {
     param(
@@ -3403,7 +3403,7 @@ function Set-IntelBackgroundAffinity {
         $fgHwnd = [Win32]::GetForegroundWindow()
         $fgPid = 0
         if ($fgHwnd -ne [IntPtr]::Zero) { [Win32]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid) | Out-Null }
-        $protected = @("System","Idle","svchost","csrss","smss","lsass","services","wininit","dwm","explorer","powershell","CPUManager")
+        $protected = @("System","Idle","svchost","csrss","smss","lsass","services","wininit","dwm","explorer","powershell","CPUManager","ShellExperienceHost","ApplicationFrameHost","TextInputHost","ShellHost","sihost","taskhostw","RuntimeBroker","dllhost","ctfmon","audiodg")
         $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
             $_.Id -ne $fgPid -and $_.Id -gt 4 -and $_.WorkingSet64 -gt 20MB -and $protected -notcontains $_.ProcessName
         } | Sort-Object WorkingSet64 -Descending | Select-Object -First 15
@@ -3439,8 +3439,10 @@ function Set-IntelBackgroundPriority {
         $fgHwnd = [Win32]::GetForegroundWindow()
         $fgPid = 0
         if ($fgHwnd -ne [IntPtr]::Zero) { [Win32]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid) | Out-Null }
+        # Shell/system procesy NIGDY nie throttle — bez tego = białe ikony, zamrożony UI
+        $shellProtected = @("System","Idle","svchost","csrss","smss","lsass","services","wininit","dwm","explorer","powershell","pwsh","CPUManager","ShellExperienceHost","ApplicationFrameHost","TextInputHost","ShellHost","sihost","taskhostw","RuntimeBroker","dllhost","ctfmon","audiodg","conhost","fontdrvhost","SearchHost","StartMenuExperienceHost","winlogon","SecurityHealthService","MsMpEng")
         $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            $_.Id -ne $fgPid -and $_.Id -gt 4 -and $_.WorkingSet64 -gt 30MB
+            $_.Id -ne $fgPid -and $_.Id -gt 4 -and $_.WorkingSet64 -gt 30MB -and $shellProtected -notcontains $_.ProcessName
         } | Select-Object -First 20
         foreach ($p in $procs) {
             try {
@@ -6219,7 +6221,7 @@ class SystemGovernor {
             if ($this.IsOverloaded -or $mode -eq "Silent") {
                 $bgPri = if ($this.IsOverloaded) { [System.Diagnostics.ProcessPriorityClass]::Idle } else { [System.Diagnostics.ProcessPriorityClass]::BelowNormal }
                 $protected = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-                foreach ($p in @("System","Idle","Registry","smss","csrss","wininit","services","lsass","winlogon","svchost","dwm","explorer","audiodg","ctfmon","MsMpEng","powershell","pwsh","CPUManager","RuntimeBroker")) { [void]$protected.Add($p) }
+                foreach ($p in @("System","Idle","Registry","smss","csrss","wininit","services","lsass","winlogon","svchost","dwm","explorer","audiodg","ctfmon","MsMpEng","powershell","pwsh","CPUManager","RuntimeBroker","ShellExperienceHost","ApplicationFrameHost","TextInputHost","ShellHost","sihost","taskhostw","dllhost")) { [void]$protected.Add($p) }
                 $bgs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -ne $fgApp -and -not $protected.Contains($_.ProcessName) -and $_.WorkingSet64 -gt 50MB -and $_.PriorityClass -notin @([System.Diagnostics.ProcessPriorityClass]::Idle,[System.Diagnostics.ProcessPriorityClass]::BelowNormal) } | Sort-Object WorkingSet64 -Descending | Select-Object -First 10
                 foreach ($bp in $bgs) { try { $bp.PriorityClass = $bgPri; $this.ActiveOverrides[$bp.Id] = @{ Name = $bp.ProcessName; AppliedAt = Get-Date }; $r.GovernedCount++; $bp.Dispose() } catch { try { $bp.Dispose() } catch {} } }
             }
@@ -9886,7 +9888,7 @@ class ProBalance {
             "services" = $true
             "lsass" = $true
             "winlogon" = $true
-            # Windows Subsystem
+            # Windows Subsystem — BEZ TEGO = białe ikony, znikające UI
             "svchost" = $true
             "RuntimeBroker" = $true
             "dwm" = $true              # Desktop Window Manager (GUI)
@@ -9894,6 +9896,14 @@ class ProBalance {
             "ShellExperienceHost" = $true  # Start Menu
             "SearchHost" = $true       # Windows Search
             "StartMenuExperienceHost" = $true
+            "ApplicationFrameHost" = $true # UWP frames
+            "TextInputHost" = $true    # Keyboard/IME
+            "ShellHost" = $true        # Quick Settings
+            "sihost" = $true           # Shell Infrastructure Host
+            "taskhostw" = $true        # Task Host Window
+            "dllhost" = $true          # COM Surrogate
+            "fontdrvhost" = $true      # Font Driver Host
+            "conhost" = $true          # Console Host
             # Security & Updates
             "MsMpEng" = $true          # Windows Defender
             "SecurityHealthService" = $true
@@ -10116,7 +10126,7 @@ class ProBalance {
             $highPriority = $recommendations.HighPriority
             
             # 0. Wyczysc stare AI temporary protection (zachowaj tylko core system processes)
-            $coreSystem = @("System", "Idle", "svchost", "csrss", "smss", "wininit", "services", "lsass", "dwm", "explorer", "CPUManager")
+            $coreSystem = @("System", "Idle", "svchost", "csrss", "smss", "wininit", "services", "lsass", "dwm", "explorer", "CPUManager", "ShellExperienceHost", "ApplicationFrameHost", "TextInputHost", "ShellHost", "sihost", "taskhostw", "RuntimeBroker", "dllhost", "ctfmon", "audiodg", "powershell", "pwsh")
             $toRemove = @()
             foreach ($key in $this.SystemProcesses.Keys) {
                 if ($coreSystem -notcontains $key) {
@@ -10205,6 +10215,10 @@ class PerformanceBooster {
         "powershell" = $true; "pwsh" = $true; "conhost" = $true
         "SecurityHealthService" = $true; "MsMpEng" = $true; "NisSrv" = $true
         "audiodg" = $true; "ctfmon" = $true; "dllhost" = $true
+        # Shell UI — BEZ TEGO = białe ikony, znikające UI, mrugający taskbar
+        "ShellExperienceHost" = $true; "ApplicationFrameHost" = $true
+        "TextInputHost" = $true; "ShellHost" = $true
+        "WindowsTerminal" = $true; "WmiPrvSE" = $true
     }
     # Heavy apps które wymagają boost (domyślna lista)
     [hashtable] $DefaultHeavyApps = @{
@@ -10354,11 +10368,12 @@ class PerformanceBooster {
     }
     [void] SetOptimalAffinity([System.Diagnostics.Process]$proc) {
         try {
-            # Dla 8+ core CPU, użyj pierwszych 8 rdzeni (typowo P-cores)
             $coreCount = [Environment]::ProcessorCount
             if ($coreCount -ge 8) {
-                # Ustaw affinity na pierwsze 8 rdzeni (bitmask: 0xFF = 255)
-                $proc.ProcessorAffinity = [IntPtr]255
+                # Dynamiczny mask: użyj wszystkich fizycznych rdzeni (nie hardcoded 255)
+                # Dla 8 cores = 0xFF, 16 cores = 0xFFFF, 24 cores = 0xFFFFFF
+                $mask = [long]([Math]::Pow(2, [Math]::Min($coreCount, 64)) - 1)
+                $proc.ProcessorAffinity = [IntPtr]$mask
             }
         } catch { }
     }
@@ -12404,7 +12419,7 @@ class AICoordinator {
                 if ($data.EnsembleEnabled -ne $null) { $this.EnsembleEnabled = $data.EnsembleEnabled }
                 if ($data.AvgCPU) { $this.AvgCPU = $data.AvgCPU }
                 if ($data.LastTransferTime) { 
-                    try { $this.LastTransferTime = [datetime]::Parse($data.LastTransferTime) } catch { }
+                    try { $this.LastTransferTime = [datetime]::Parse($data.LastTransferTime, [System.Globalization.CultureInfo]::InvariantCulture) } catch { }
                 }
                 if ($data.EngineDecisionCount) {
                     $data.EngineDecisionCount.PSObject.Properties | ForEach-Object {
@@ -13523,7 +13538,7 @@ class ThermalGuardian {
                 if ($data.VRMLimit) { $this.VRMLimit = $data.VRMLimit }
                 if ($data.ThrottleCount) { $this.ThrottleCount = $data.ThrottleCount }
                 if ($data.LastThrottle) { 
-                    try { $this.LastThrottle = [datetime]::Parse($data.LastThrottle) } catch { }
+                    try { $this.LastThrottle = [datetime]::Parse($data.LastThrottle, [System.Globalization.CultureInfo]::InvariantCulture) } catch { }
                 }
                 if ($data.TempHistory) {
                     foreach ($t in $data.TempHistory) {
@@ -13571,7 +13586,7 @@ class ProcessAI {
             "services" = $true
             "lsass" = $true
             "winlogon" = $true
-            # Windows Subsystem
+            # Windows Subsystem — BEZ TEGO = białe ikony, znikające UI
             "svchost" = $true
             "runtimebroker" = $true
             "dwm" = $true                      # Desktop Window Manager
@@ -13579,6 +13594,14 @@ class ProcessAI {
             "shellexperiencehost" = $true      # Start Menu
             "searchhost" = $true
             "startmenuexperiencehost" = $true
+            "applicationframehost" = $true     # UWP frames
+            "textinputhost" = $true            # Keyboard/IME
+            "shellhost" = $true                # Quick Settings
+            "sihost" = $true                   # Shell Infrastructure Host
+            "taskhostw" = $true                # Task Host Window
+            "dllhost" = $true                  # COM Surrogate
+            "fontdrvhost" = $true              # Font Driver Host
+            "conhost" = $true                  # Console Host
             # Security & Updates
             "msmpeng" = $true                  # Windows Defender
             "securityhealthservice" = $true
@@ -17336,6 +17359,68 @@ class AppRAMCache {
             $this.PreloadApp($appName, $exePath, $conf) | Out-Null
         }
     }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # WARMUP ALL KNOWN — po starcie, ładuj WSZYSTKIE znane apps z LEARNED profilem
+    # Wywołaj ASYNCHRONICZNIE (w tle) ~30s po starcie, żeby nie blokować UI
+    # Filozofia: 20GB RAM i 500MB cache = marnowanie. Załaduj WSZYSTKO co znamy.
+    # ═══════════════════════════════════════════════════════════════
+    [int] WarmupAllKnown() {
+        if (-not $this.Enabled) { return 0 }
+        
+        # Bezpieczeństwo: minimum 25% RAM musi zostać wolne
+        $freePercent = if ($this.TotalSystemRAM -gt 0) { $this.LastAvailableMB / $this.TotalSystemRAM } else { 0.5 }
+        if ($freePercent -lt 0.30) { 
+            Write-RCLog "WARMUP SKIP: not enough free RAM ($([int]($freePercent*100))%)"
+            return 0 
+        }
+        
+        $loaded = 0
+        $skipped = 0
+        $totalMB = 0.0
+        
+        # Zbierz WSZYSTKIE apps z LEARNED profilem (mają DLL do załadowania)
+        foreach ($appName in @($this.AppPaths.Keys)) {
+            # Skip już cached
+            if ($this.CachedApps.ContainsKey($appName)) { continue }
+            # Skip blacklisted
+            if ($appName -eq "Desktop" -or $appName -match '^(pwsh|powershell|conhost|WindowsTerminal|ShellHost|explorer|dwm)$') { continue }
+            # Skip negative penalty
+            if ($this.IsNegativePenalty($appName)) { continue }
+            # Tylko LEARNED (mają prawdziwy profil DLL)
+            $entry = $this.AppPaths[$appName]
+            if (-not $entry.ContainsKey('LearnedFiles') -or -not $entry.LearnedFiles -or $entry.LearnedFiles.Count -lt 3) { 
+                $skipped++
+                continue 
+            }
+            
+            # Sprawdź RAM przed każdym preload
+            $this.MeasureMemoryPressure() | Out-Null
+            $freeNow = if ($this.TotalSystemRAM -gt 0) { $this.LastAvailableMB / $this.TotalSystemRAM } else { 0.5 }
+            if ($freeNow -lt 0.25) {
+                Write-RCLog "WARMUP STOP: RAM at $([int]($freeNow*100))% free after $loaded apps ($([int]$totalMB)MB)"
+                break
+            }
+            
+            # Cache full?
+            if ($this.TotalCachedMB -ge $this.MaxCacheMB * 0.90) {
+                Write-RCLog "WARMUP STOP: cache at 90% ($([int]$this.TotalCachedMB)/$($this.MaxCacheMB)MB) after $loaded apps"
+                break
+            }
+            
+            # Preload z niskim confidence (warm) — nie blokuj systemu
+            $exePath = $entry.ExePath
+            $conf = 0.7  # Medium confidence — ładuj exe + top DLL
+            if ($this.PreloadApp($appName, $exePath, $conf)) {
+                $loaded++
+                $appMB = 0; if ($this.CachedApps.ContainsKey($appName)) { $appMB = $this.CachedApps[$appName].SizeMB }
+                $totalMB += $appMB
+            }
+        }
+        
+        Write-RCLog "WARMUP COMPLETE: $loaded apps loaded ($([int]$totalMB)MB), $skipped skipped (no profile), cache=$([int]$this.TotalCachedMB)/$($this.MaxCacheMB)MB"
+        return $loaded
+    }
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -19257,6 +19342,14 @@ $Script:PreviousEnsembleEnabled = $false
         if ($appRAMCache.CachedApps.Count -gt 0 -or $appRAMCache.BatchQueue.Count -gt 0) {
             Write-Host "  [CACHE] Startup preload: $($appRAMCache.CachedApps.Count) apps, $($appRAMCache.BatchQueue.Count) files queued" -ForegroundColor Green
         }
+    }
+    
+    # 5. WARMUP — załaduj WSZYSTKIE znane apps z LEARNED profilem do RAM
+    # Filozofia: wolny RAM = zmarnowany RAM. 500MB cache z 20GB limitu to marnowanie.
+    # Bezpieczny: sprawdza RAM przed każdym preload, zatrzymuje się przy <25% free
+    $warmupCount = $appRAMCache.WarmupAllKnown()
+    if ($warmupCount -gt 0) {
+        Write-Host "  [CACHE] Warmup: $warmupCount additional apps loaded, total cache=$([int]$appRAMCache.TotalCachedMB)MB/$($appRAMCache.MaxCacheMB)MB" -ForegroundColor Green
     }
     try {
         Write-Host "[DEBUG] Engine: starting main loop" -ForegroundColor Yellow
