@@ -3370,28 +3370,34 @@ function New-IntelPowerManager {
 function Set-IntelPowerMode {
     param([hashtable]$PM, [string]$Mode)
     if (-not $PM -or -not $PM.Available -or $Mode -eq $PM.LastMode) { return }
+    # Pobierz Min/Max z IntelStates (konfigurowalnych przez Configurator)
+    $states = $Script:IntelStates
+    $state = $states[$Mode]
+    if (-not $state) { $state = @{ Min = 50; Max = 100 } }
+    $minPct = $state.Min
+    $maxPct = $state.Max
     switch ($Mode) {
         "Silent" {
             Set-IntelBackgroundAffinity $PM $PM.SilentAffinityMask
             Set-IntelBackgroundPriority $PM $true
-            Set-IntelFrequencyCap $PM 50   # 50% MaxFreq = baza efektywna (1.3GHz)
+            Set-IntelFrequencyCap $PM $minPct $maxPct
         }
         "Balanced" {
             Restore-IntelAffinities $PM
             Set-IntelBackgroundPriority $PM $false
-            Set-IntelFrequencyCap $PM 85   # 85% = solidna wydajność
+            Set-IntelFrequencyCap $PM $minPct $maxPct
         }
         "Turbo" {
             Restore-IntelAffinities $PM
-            Set-IntelBackgroundPriority $PM $true  # Tło cicho, foreground max
+            Set-IntelBackgroundPriority $PM $true
             Set-IntelForegroundBoost $PM
-            Set-IntelFrequencyCap $PM 100  # 100% = pełne turbo
+            Set-IntelFrequencyCap $PM $minPct $maxPct
         }
         "Extreme" {
             Restore-IntelAffinities $PM
             Set-IntelBackgroundPriority $PM $false
             Set-IntelForegroundBoost $PM
-            Set-IntelFrequencyCap $PM 100
+            Set-IntelFrequencyCap $PM $minPct $maxPct
         }
     }
     $PM.LastMode = $Mode; $PM.CurrentMode = $Mode; $PM.ModeStats[$Mode]++
@@ -3471,31 +3477,29 @@ function Set-IntelForegroundBoost {
 }
 
 function Set-IntelFrequencyCap {
-    param([hashtable]$PM, [int]$percent)
+    param([hashtable]$PM, [int]$minPercent, [int]$maxPercent = 100)
     try {
         $guid = $PM.PowerPlanGUID
         if (-not $guid) { return }
         $sub = "54533251-82be-4824-96c1-47b60b740d00"
-        # Max Processor Frequency (MHz cap) — ENGINE decyduje
+        # Max Processor Frequency (MHz cap) — z IntelStates
         $freqGuid = "75b0ae3f-bce0-45a7-8c89-c9611c25e100"
-        $freqCap = if ($percent -ge 100) { 0 } else { [int]($PM.MaxFreqMHz * $percent / 100) }
+        $freqCap = if ($maxPercent -ge 100) { 0 } else { [int]($PM.MaxFreqMHz * $maxPercent / 100) }
         powercfg /setacvalueindex $guid $sub $freqGuid $freqCap 2>$null
         powercfg /setdcvalueindex $guid $sub $freqGuid $freqCap 2>$null
-        # EPP — hint dla Intel Speed Shift (ENGINE kontroluje)
-        $epp = if ($percent -le 50) { 200 } elseif ($percent -le 85) { 128 } else { 0 }
+        # EPP — hint dla Intel Speed Shift (skalowany z Max%)
+        $epp = if ($maxPercent -ge 100) { 0 } elseif ($maxPercent -ge 85) { 64 } elseif ($maxPercent -ge 50) { 128 } else { 200 }
         powercfg /setacvalueindex $guid $sub "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $epp 2>$null
         powercfg /setdcvalueindex $guid $sub "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" $epp 2>$null
-        # Boost mode — ENGINE kontroluje
-        $boost = if ($percent -ge 100) { 2 } elseif ($percent -ge 85) { 1 } else { 0 }
+        # Boost mode — z Max%
+        $boost = if ($maxPercent -ge 100) { 2 } elseif ($maxPercent -ge 85) { 1 } else { 0 }
         powercfg /setacvalueindex $guid $sub "be337238-0d82-4146-a960-4f3749d470c7" $boost 2>$null
         powercfg /setdcvalueindex $guid $sub "be337238-0d82-4146-a960-4f3749d470c7" $boost 2>$null
-        # Min/Max state — ENGINE ustawia precyzyjnie (nie zakres!)
-        $minState = if ($percent -le 50) { 5 } elseif ($percent -le 85) { 50 } else { 100 }
-        $maxState = $percent
-        powercfg /setacvalueindex $guid $sub "893dee8e-2bef-41e0-89c6-b55d0929964c" $minState 2>$null
-        powercfg /setacvalueindex $guid $sub "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxState 2>$null
-        powercfg /setdcvalueindex $guid $sub "893dee8e-2bef-41e0-89c6-b55d0929964c" $minState 2>$null
-        powercfg /setdcvalueindex $guid $sub "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxState 2>$null
+        # Min/Max CPU state — BEZPOŚREDNIO z IntelStates (Configurator)
+        powercfg /setacvalueindex $guid $sub "893dee8e-2bef-41e0-89c6-b55d0929964c" $minPercent 2>$null
+        powercfg /setacvalueindex $guid $sub "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxPercent 2>$null
+        powercfg /setdcvalueindex $guid $sub "893dee8e-2bef-41e0-89c6-b55d0929964c" $minPercent 2>$null
+        powercfg /setdcvalueindex $guid $sub "bc5038f7-23e0-4960-96da-33abaf5935ec" $maxPercent 2>$null
         powercfg /setactive $guid 2>$null
     } catch {}
 }
@@ -3505,7 +3509,7 @@ function Reset-IntelPowerManager {
     if (-not $PM -or -not $PM.Available) { return }
     Restore-IntelAffinities $PM
     Set-IntelBackgroundPriority $PM $false
-    Set-IntelFrequencyCap $PM 100
+    Set-IntelFrequencyCap $PM 100 100
 }
 
 $Script:IntelPM = $null
@@ -15780,6 +15784,7 @@ class AppRAMCache {
     [double] $LastAvailableMB
     [double] $LastAvailablePercent       # Available / Total * 100
     [int] $LastPageFaultsPerSec
+    [DateTime] $_LastWMICheck = [DateTime]::MinValue
     [double] $MemoryPressure
     [System.Collections.Generic.List[double]] $PressureHistory  # ostatnie N odczytów (trend)
     
@@ -15991,22 +15996,25 @@ class AppRAMCache {
     # ═══════════════════════════════════════════════════════════════
     [double] MeasureMemoryPressure() {
         try {
+            # PERFORMANCE FIX: Cache WMI — max raz na 2 sekundy (WMI = 50-100ms per call)
+            $now = [DateTime]::UtcNow
+            if ($this.LastAvailableMB -gt 0 -and $this._LastWMICheck -and ($now - $this._LastWMICheck).TotalSeconds -lt 2.0) {
+                return $this.LastCommitRatio
+            }
+            $this._LastWMICheck = $now
+            
             $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
             $availableMB = [Math]::Round($os.FreePhysicalMemory / 1KB, 0)
             $totalMB = [Math]::Round($os.TotalVisibleMemorySize / 1KB, 0)
             $availablePercent = if ($totalMB -gt 0) { ($availableMB / $totalMB) * 100.0 } else { 50.0 }
             $commitRatio = if ($totalMB -gt 0) { 1.0 - ($availableMB / $totalMB) } else { 0.5 }
             
-            $pageFaults = 0
-            try {
-                $pf = (Get-Counter '\Memory\Pages/sec' -ErrorAction Stop).CounterSamples[0].CookedValue
-                $pageFaults = [int]$pf
-            } catch { $pageFaults = $this.LastPageFaultsPerSec }
+            # PERFORMANCE FIX: Skip Get-Counter (100ms+ per call) — use cached value
+            # Page faults updated only every 30s in main loop via separate call
             
             $this.LastAvailableMB = $availableMB
             $this.LastAvailablePercent = $availablePercent
             $this.LastCommitRatio = $commitRatio
-            $this.LastPageFaultsPerSec = $pageFaults
             
             # ═══ PRESSURE SKALOWANE DO % RAM (pkt 1) ═══
             # Progi zależne od ilości RAM:
@@ -16025,7 +16033,7 @@ class AppRAMCache {
                 $pressureAvail = (($warnPercent - $availablePercent) / ($warnPercent - $criticalPercent)) * 0.5
             }
             
-            $pressurePF = [Math]::Min(1.0, $pageFaults / 500.0)
+            $pressurePF = [Math]::Min(1.0, $this.LastPageFaultsPerSec / 500.0)
             
             $instantPressure = [Math]::Min(1.0, ($pressureAvail * 0.7) + ($pressurePF * 0.3))
             
@@ -16297,12 +16305,16 @@ class AppRAMCache {
                 if (-not (Test-Path $item.Path)) { continue }
                 $fileSize = $item.Size
                 
-                # Pliki <50MB → ReadAllBytes (trzyma w managed heap = pewne w RAM)
-                # Pliki ≥50MB → MemoryMappedFile + sequential read (ładuje do file cache)
+                # Pliki <50MB → ReadAllBytes + DISCARD (touch only, don't hold in managed heap)
+                # Celem jest załadowanie stron do Windows file cache, NIE trzymanie w .NET heap
+                # Trzymanie byte[] = ENGINE zjada 2GB+ RAM z managed heap = system zamula!
                 if ($fileSize -lt 50MB) {
-                    $bytes = [System.IO.File]::ReadAllBytes($item.Path)
+                    $stream = [System.IO.File]::Open($item.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    $buffer = [byte[]]::new([Math]::Min(65536, $fileSize))
+                    while ($stream.Read($buffer, 0, $buffer.Length) -gt 0) { }
+                    $stream.Close(); $stream.Dispose()
                     $this.CachedApps[$appName].Files.Add(@{ 
-                        Path = $item.Path; Data = $bytes; SizeBytes = $fileSize; Type = $item.Type 
+                        Path = $item.Path; SizeBytes = $fileSize; Type = $item.Type 
                     })
                 } else {
                     # Duże pliki: memory-mapped + sekwencyjny odczyt wymusza załadowanie stron
@@ -17369,6 +17381,7 @@ class AppRAMCache {
         if (-not $this.Enabled) { return 0 }
         
         # Bezpieczeństwo: minimum 25% RAM musi zostać wolne
+        $this.MeasureMemoryPressure() | Out-Null
         $freePercent = if ($this.TotalSystemRAM -gt 0) { $this.LastAvailableMB / $this.TotalSystemRAM } else { 0.5 }
         if ($freePercent -lt 0.30) { 
             Write-RCLog "WARMUP SKIP: not enough free RAM ($([int]($freePercent*100))%)"
@@ -17394,12 +17407,15 @@ class AppRAMCache {
                 continue 
             }
             
-            # Sprawdź RAM przed każdym preload
-            $this.MeasureMemoryPressure() | Out-Null
-            $freeNow = if ($this.TotalSystemRAM -gt 0) { $this.LastAvailableMB / $this.TotalSystemRAM } else { 0.5 }
-            if ($freeNow -lt 0.25) {
-                Write-RCLog "WARMUP STOP: RAM at $([int]($freeNow*100))% free after $loaded apps ($([int]$totalMB)MB)"
-                break
+            # PERFORMANCE FIX: Sprawdź RAM co 5 apps (nie co app — WMI jest wolne)
+            if ($loaded % 5 -eq 0) {
+                $this._LastWMICheck = [DateTime]::MinValue  # Force fresh WMI
+                $this.MeasureMemoryPressure() | Out-Null
+                $freeNow = if ($this.TotalSystemRAM -gt 0) { $this.LastAvailableMB / $this.TotalSystemRAM } else { 0.5 }
+                if ($freeNow -lt 0.25) {
+                    Write-RCLog "WARMUP STOP: RAM at $([int]($freeNow*100))% free after $loaded apps ($([int]$totalMB)MB)"
+                    break
+                }
             }
             
             # Cache full?
@@ -17416,6 +17432,9 @@ class AppRAMCache {
                 $appMB = 0; if ($this.CachedApps.ContainsKey($appName)) { $appMB = $this.CachedApps[$appName].SizeMB }
                 $totalMB += $appMB
             }
+            
+            # PERFORMANCE FIX: Yield CPU co app żeby nie blokować systemu podczas warmup
+            [System.Threading.Thread]::Sleep(10)
         }
         
         Write-RCLog "WARMUP COMPLETE: $loaded apps loaded ($([int]$totalMB)MB), $skipped skipped (no profile), cache=$([int]$this.TotalCachedMB)/$($this.MaxCacheMB)MB"
