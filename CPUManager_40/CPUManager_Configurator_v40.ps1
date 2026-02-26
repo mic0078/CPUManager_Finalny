@@ -691,9 +691,9 @@ $Script:DefaultConfig = @{
         StartupBoostDurationSeconds = 3
     }
     IOSettings = @{
-        ReadThreshold = 80; WriteThreshold = 50; Sensitivity = 4    #  SYNC: zgodne z ENGINE
-        CheckInterval = 1200; TurboThreshold = 150                   #  SYNC: 150 jak w ENGINE (bylo 50)
-        OverrideForceMode = $false; ExtremeGraceSeconds = 8
+        ReadThreshold = 40; WriteThreshold = 30; Sensitivity = 8    #  SYNC: zgodne z ENGINE v43.15
+        CheckInterval = 1200; TurboThreshold = 40                    #  SYNC: NVMe system, reaguj szybko
+        OverrideForceMode = $true; ExtremeGraceSeconds = 8
     }
     OptimizationSettings = @{
         PreloadEnabled = $true
@@ -4823,10 +4823,10 @@ $toolTip.SetToolTip($Script:trackIOPriority, " Priorytet operacji wejscia/wyjsci
 New-Label -Parent $gbOptimization -Text "Intelligent optimization + caching" -X 15 -Y 255 -Width 400 -Height 15 -ForeColor $Script:Colors.TextDim
 # I/O Settings
 $gbIO = New-GroupBox -Parent $tabSettings -Title "I/O Settings (Disk)" -X 580 -Y 10 -Width 530 -Height 150
-$ioRead = if ($Script:Config.IOSettings.ReadThreshold) { $Script:Config.IOSettings.ReadThreshold } else { 80 }
-$ioWrite = if ($Script:Config.IOSettings.WriteThreshold) { $Script:Config.IOSettings.WriteThreshold } else { 50 }
-$ioSens = if ($Script:Config.IOSettings.Sensitivity) { $Script:Config.IOSettings.Sensitivity } else { 4 }
-$ioTurbo = if ($Script:Config.IOSettings.TurboThreshold) { $Script:Config.IOSettings.TurboThreshold } else { 150 }
+$ioRead = if ($Script:Config.IOSettings.ReadThreshold) { $Script:Config.IOSettings.ReadThreshold } else { 40 }
+$ioWrite = if ($Script:Config.IOSettings.WriteThreshold) { $Script:Config.IOSettings.WriteThreshold } else { 30 }
+$ioSens = if ($Script:Config.IOSettings.Sensitivity) { $Script:Config.IOSettings.Sensitivity } else { 8 }
+$ioTurbo = if ($Script:Config.IOSettings.TurboThreshold) { $Script:Config.IOSettings.TurboThreshold } else { 40 }
 $null = New-Label -Parent $gbIO -Text "Read (MB/s):" -X 15 -Y 28 -Width 100 -Height 22
 $Script:numIORead = New-NumericUpDown -Parent $gbIO -X 120 -Y 25 -Min 1 -Max 500 -Value $ioRead -Width 80 -Increment 10
 $null = New-Label -Parent $gbIO -Text "Write (MB/s):" -X 220 -Y 28 -Width 100 -Height 22
@@ -4835,7 +4835,7 @@ $null = New-Label -Parent $gbIO -Text "Sensitivity:" -X 15 -Y 65 -Width 100 -Hei
 $Script:numIOSensitivity = New-NumericUpDown -Parent $gbIO -X 120 -Y 62 -Min 1 -Max 10 -Value $ioSens -Width 80
 $null = New-Label -Parent $gbIO -Text "Turbo IO:" -X 220 -Y 65 -Width 100 -Height 22
 $Script:numIOTurbo = New-NumericUpDown -Parent $gbIO -X 325 -Y 62 -Min 1 -Max 800 -Value $ioTurbo -Width 80 -Increment 10
-$ioOverride = if ($null -ne $Script:Config.IOSettings.OverrideForceMode) { $Script:Config.IOSettings.OverrideForceMode } else { $false }
+$ioOverride = if ($null -ne $Script:Config.IOSettings.OverrideForceMode) { $Script:Config.IOSettings.OverrideForceMode } else { $true }
 $Script:chkIOOverride = New-CheckBox -Parent $gbIO -Text "I/O can override ForceMode" -X 15 -Y 100 -Checked $ioOverride -Width 300
 
 # === ULTRA NETWORK SETTINGS ===
@@ -5162,8 +5162,8 @@ $btnResetSettings = New-Button -Parent $tabSettings -Text "⟲ Reset to Defaults
     $Script:chkActivityBoost.Checked = $true
     $Script:numActivityIdleThreshold.Value = 5; $Script:numActivityMaxBoost.Value = 30
     # I/O Settings
-    $Script:numIORead.Value = 80; $Script:numIOWrite.Value = 50
-    $Script:numIOSensitivity.Value = 4; $Script:numIOTurbo.Value = 150
+    $Script:numIORead.Value = 40; $Script:numIOWrite.Value = 30
+    $Script:numIOSensitivity.Value = 8; $Script:numIOTurbo.Value = 40
     $Script:chkIOOverride.Checked = $false
     # OPTIMIZATION Settings
     $Script:chkPreloadEnabled.Checked = $true; $Script:chkPredictiveBoost.Checked = $true
