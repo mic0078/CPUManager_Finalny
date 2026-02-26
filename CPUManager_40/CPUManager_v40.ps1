@@ -32,7 +32,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # V42.5: TIMER-BASED HYSTERESIS - FIX PING-PONG!
 # 
-# PROBLEM v42.4:
+# PROBLEM v42.3:
 # - Entry: CPU<45%, Exit: CPU>45% (instant)
 # - Silent Hill: CPU skacze 40-55% → Mode ping-pong co 5 sekund! ❌
 # - Wentylator: 2500 RPM ↔ 4000 RPM → IRYTUJĄCE! ❌
